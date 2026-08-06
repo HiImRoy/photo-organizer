@@ -43,7 +43,7 @@ npm.cmd run typecheck
 npm.cmd test
 npm.cmd run test:rust
 npm.cmd run build
-npm.cmd run tauri build
+npm.cmd run tauri build -- --target x86_64-pc-windows-msvc
 ```
 
 正式 Windows 构建使用 Rust MSVC target 和 Microsoft C++ Build Tools。仓库 CI 也以该受支持路径生成安装产物；本机若缺少 `link.exe`，请先补齐 C++ Build Tools，不要把 GNU 回退产物当作正式发布版本。

@@ -117,3 +117,10 @@
 - 浏览器 smoke 覆盖网格、单图、胶片栏、左右折叠、语义 AND 组合筛选和主标签分组；1920×1080、1440×900、1366×768 与 960×720 均无页面溢出。修复确定性 fixture 的重复标签键后，新页面控制台 error/warn 为 0。
 - `npm.cmd run tauri build` 的前端 production 阶段通过，随后 Rust MSVC 编译明确失败：`linker link.exe not found`。2026-08-06 的 GNU/LLVM NSIS 是旧里程碑产物，不包含本次 TinyCLIP/工作区变更，发布闭环审计已将其删除。
 - 未完成项：正式 MSVC 安装包、打包 WebView2 smoke、干净 Windows VM、签名/MSI、GPU/NPU provider、峰值内存与授权真实摄影集分类质量评测。
+
+### 2026-08-07 MSVC 发布闭环复验
+
+- Visual Studio Build Tools、MSVC linker/compiler、Windows SDK 与 Rust MSVC target 已真实加载；`npm.cmd ci`、前端检查、MSVC Rust tests/Clippy、production build 全部通过。
+- 显式 `--target x86_64-pc-windows-msvc` 修复 Tauri bundler 的 target 路径错配；当前 NSIS 与中英文 MSI 均已生成，资源随包存在，均未签名。
+- NSIS 安装、启动响应、TinyCLIP CPU benchmark/评估 CLI、关闭重启和卸载已实际执行；源夹具哈希不变，卸载不移除应用 SQLite。
+- 打包 WebView 内的导入、暂停/继续、组合筛选和重启续作 UI 点击流仍未完成，原因是桌面自动化 helper 两次 `EnumWindows 0x80070003`；不能将其标记为通过。干净 Windows VM、签名、SmartScreen/Defender 与授权摄影集质量评测仍留待后续发布验证。

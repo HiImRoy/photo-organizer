@@ -98,11 +98,11 @@ jobs:
       - name: Verify bundled model and runtime resources
         run: ./scripts/invoke-ci-command.ps1 -Name bundle-resources pwsh -NoProfile -ExecutionPolicy Bypass -File ./scripts/verify-release-resources.ps1
       - name: Build NSIS installer
-        run: ./scripts/invoke-ci-command.ps1 -Name tauri-nsis npm.cmd run tauri build -- --bundles nsis
+        run: ./scripts/invoke-ci-command.ps1 -Name tauri-nsis npm.cmd run tauri build -- --target x86_64-pc-windows-msvc --bundles nsis
       - name: Build MSI installer when WiX succeeds
         id: msi
         continue-on-error: true
-        run: ./scripts/invoke-ci-command.ps1 -Name tauri-msi npm.cmd run tauri build -- --bundles msi
+        run: ./scripts/invoke-ci-command.ps1 -Name tauri-msi npm.cmd run tauri build -- --target x86_64-pc-windows-msvc --bundles msi
       - name: Record optional MSI result
         if: steps.msi.outcome == 'failure'
         run: Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY -Value 'MSI generation failed; the required NSIS build completed. See the uploaded tauri-msi log.'

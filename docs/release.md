@@ -9,7 +9,7 @@ Tauri 配置生成 NSIS `.exe` 与 WiX `.msi`（环境允许时）。安装包�
 ```powershell
 npm.cmd ci
 npm.cmd run validate
-npm.cmd run tauri build
+npm.cmd run tauri build -- --target x86_64-pc-windows-msvc
 ```
 
 CI 在 Windows runner 执行相同检查并上传 bundle artifact。版本由 `package.json`、`src-tauri/Cargo.toml` 和 `tauri.conf.json` 同步维护。
@@ -77,3 +77,15 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/build-windows.ps
 ```
 
 微软官方组件目录与命令行环境说明：<https://learn.microsoft.com/en-us/visualstudio/install/workload-component-id-vs-build-tools?view=vs-2022>、<https://learn.microsoft.com/en-us/cpp/build/building-on-the-command-line?view=msvc-170>。
+
+## 2026-08-07 MSVC 正式打包与安装验收（当前）
+
+- 环境已确认：Visual Studio Build Tools 17.14.37 位于 `D:\Develop\buildtools\product`，`Microsoft.VisualStudio.Workload.VCTools`、`Microsoft.VisualStudio.Component.VC.Tools.x86.x64`、Windows SDK `10.0.26100.0`、`link.exe`、`cl.exe` 和 MSBuild 均存在。普通终端最初未加载开发环境；本次通过 x64 `VsDevCmd.bat` 导入，并将 `%USERPROFILE%\.cargo\bin` 加入当前进程 PATH。Rust 为 `stable-x86_64-pc-windows-msvc`，rustc/cargo `1.97.1`。
+- `npm.cmd ci`、Prettier、ESLint、TypeScript、Vitest 6/6、Rustfmt、MSVC Cargo tests（21 个）、Clippy `-D warnings` 和 Vite production build 均通过。npm 报告 Node `22.12.0` 低于项目声明的 `>=22.13.0`，但本次命令实际完成；发布 CI 仍固定使用 Node 22，建议升级本机 Node 后再做同版本复核。
+- Tauri 构建使用显式 `--target x86_64-pc-windows-msvc`；此前仅依赖 `CARGO_BUILD_TARGET` 会导致 bundler 错找 `target\\release`，已同步修正 `scripts/build-windows.ps1` 与 CI。NSIS、WiX 下载在普通沙箱网络下返回 WinSock 10013，获准访问官方构建工具后完成。
+- 当前 MSVC 产物（均未签名）：
+  - NSIS：`src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis/PhotoOrganizer_0.1.0_x64-setup.exe`，236,452,475 bytes，SHA-256 `728550F36A1A2CC5680F54A59231C1EE4C31239E884F116B4326DCCE6881194D`。
+  - MSI 简体中文：`src-tauri/target/x86_64-pc-windows-msvc/release/bundle/msi/PhotoOrganizer_0.1.0_x64_zh-CN.msi`，238,862,336 bytes，SHA-256 `CF2EBC45300A6B59CEB79AFF8E6F402DF235E3CD10F045F1AB54B90D03092161`。
+  - MSI 英文：`src-tauri/target/x86_64-pc-windows-msvc/release/bundle/msi/PhotoOrganizer_0.1.0_x64_en-US.msi`，238,862,336 bytes，SHA-256 `951CE5769C66865D93F1815677E6C5C78819C24A12C9CD03BD766DA8463D4B77`。
+- 安装验收：NSIS 静默安装退出码 0，安装目录为 `%LOCALAPPDATA%\\PhotoOrganizer`；TinyCLIP ONNX、tokenizer、ONNX Runtime DLL、许可证和来源文件均存在。启动后应用数据目录和 SQLite 可打开，关闭并重启后主进程 `Responding=True` 且数据库保留（本机已有旧测试数据库，未删除用户数据）。已安装 benchmark 对 3 张临时夹具真实 CPU 推理，失败 0，平均延迟约 28.49 ms，吞吐约 35.11 张/秒；评估 CLI 对 2 张 `unknown` 夹具完成，失败 0，模型加载约 316.85 ms、端到端约 372.95 ms，并输出 21 类原始相似度。运行自带卸载器退出码 0，安装目录移除且应用数据库仍保留。源夹具三组 SHA-256 前后一致。
+- 安装后的 WebView UI 点击验收未完成：桌面自动化 helper 在枚举窗口时两次返回 `EnumWindows failed: 0x80070003`，重置后仍失败；因此本次不能声称已在打包 WebView 中完成“导入、暂停/继续、组合筛选、关闭重启续作”的 UI 操作。相关 IPC/Rust 任务控制测试和 Vite 视觉 fixture 已通过，需在可用桌面自动化或人工桌面上补做一次。

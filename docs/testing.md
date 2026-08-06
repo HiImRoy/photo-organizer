@@ -75,3 +75,11 @@ http://localhost:1420/?visual-fixture=error
 - 安装 smoke：未生成当前安装包，故安装、启动、导入测试图库、真实分类、暂停/恢复、关闭重启续作、组合筛选和卸载均未运行，不能描述为通过。
 - 发布资源：模型、tokenizer、runtime DLL 固定哈希复核通过；配置、许可、第三方声明和来源文件全部存在。
 - Git 安全审计：未发现密钥或个人图片；个人绝对路径已改为环境变量写法；旧 benchmark 临时报告和过期 GNU 安装包已删除。
+
+## Windows MSVC 正式打包与安装验收（2026-08-07 当前）
+
+- MSVC 环境实际可用：Build Tools 17.14.37、MSVC 14.44.35207、Windows SDK 10.0.26100.0、`link.exe`/`cl.exe`/MSBuild；Rust `stable-x86_64-pc-windows-msvc`。通过 x64 `VsDevCmd.bat` 加载环境，并补入 `%USERPROFILE%\.cargo\bin`。
+- 完整 validate 通过：Prettier、ESLint、TypeScript、Vitest 6/6、Rustfmt、MSVC Cargo tests 21 个、Clippy warnings denied、Vite production build。Node 22.12.0 低于 `package.json` 的 22.13.0 下限，已记录为环境风险。
+- Tauri 显式 `--target x86_64-pc-windows-msvc` 后生成 NSIS 与中英文 MSI；三个产物均 `NotSigned`，哈希和路径记录在 `docs/release.md`。资源目录包含 TinyCLIP、tokenizer、ONNX Runtime DLL 及许可证。
+- NSIS 安装退出码 0；安装后主进程响应，应用数据目录和 SQLite 可打开（本机已有旧测试数据库，未删除用户数据）。已安装 TinyCLIP benchmark（3 张临时夹具）和评估 CLI（2 张 `unknown` 夹具）均真实 CPU 完成且失败 0；关闭/重启后 SQLite 保留；自带卸载器退出码 0 且安装目录移除。临时源夹具 SHA-256 未变化。
+- 打包 WebView UI 的导入、暂停/继续、组合筛选和重启续作点击流未能执行：桌面自动化 helper 返回 `EnumWindows failed: 0x80070003`，按规范重试和重置后仍失败。不得将这些 UI 步骤标记为通过；需人工或修复桌面自动化后补测。
