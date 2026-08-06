@@ -1,0 +1,139 @@
+name: Windows validation and installers
+
+on:
+  workflow_dispatch:
+  pull_request:
+  push:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: windows-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CI: true
+  CARGO_TERM_COLOR: always
+  CARGO_BUILD_TARGET: x86_64-pc-windows-msvc
+
+defaults:
+  run:
+    shell: pwsh -NoLogo -NoProfile -ExecutionPolicy Bypass -File {0}
+
+jobs:
+  validate:
+    name: Validate on MSVC
+    runs-on: windows-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+          components: clippy, rustfmt
+      - name: Load Visual C++ build environment
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+      - name: Diagnose Windows toolchain
+        run: ./scripts/invoke-ci-command.ps1 -Name toolchain pwsh -NoProfile -File ./scripts/diagnose-msvc.ps1
+      - name: Install JavaScript dependencies
+        run: ./scripts/invoke-ci-command.ps1 -Name npm-ci npm.cmd ci
+      - name: Verify bundled model and runtime resources
+        run: ./scripts/invoke-ci-command.ps1 -Name release-resources pwsh -NoProfile -ExecutionPolicy Bypass -File ./scripts/verify-release-resources.ps1
+      - name: Prettier
+        run: ./scripts/invoke-ci-command.ps1 -Name prettier npm.cmd run format:check
+      - name: ESLint
+        run: ./scripts/invoke-ci-command.ps1 -Name eslint npm.cmd run lint
+      - name: TypeScript
+        run: ./scripts/invoke-ci-command.ps1 -Name typescript npm.cmd run typecheck
+      - name: Vitest
+        run: ./scripts/invoke-ci-command.ps1 -Name vitest npm.cmd test -- --run
+      - name: Rustfmt
+        run: ./scripts/invoke-ci-command.ps1 -Name rustfmt cargo fmt --manifest-path src-tauri/Cargo.toml -- --check
+      - name: Rust tests
+        run: ./scripts/invoke-ci-command.ps1 -Name cargo-test cargo test --manifest-path src-tauri/Cargo.toml --all-targets --all-features
+      - name: Clippy
+        run: ./scripts/invoke-ci-command.ps1 -Name clippy cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --all-features -- -D warnings
+      - name: Frontend production build
+        run: ./scripts/invoke-ci-command.ps1 -Name frontend-build npm.cmd run build
+      - name: Upload validation logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-validation-logs-${{ github.run_number }}
+          path: artifacts/logs/**
+          if-no-files-found: warn
+          retention-days: 14
+
+  bundle:
+    name: Build Windows installers
+    if: github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/v')
+    needs: validate
+    runs-on: windows-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+          components: clippy, rustfmt
+      - name: Load Visual C++ build environment
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+      - name: Diagnose Windows toolchain
+        run: ./scripts/invoke-ci-command.ps1 -Name bundle-toolchain pwsh -NoProfile -File ./scripts/diagnose-msvc.ps1
+      - name: Install JavaScript dependencies
+        run: ./scripts/invoke-ci-command.ps1 -Name bundle-npm-ci npm.cmd ci
+      - name: Verify bundled model and runtime resources
+        run: ./scripts/invoke-ci-command.ps1 -Name bundle-resources pwsh -NoProfile -ExecutionPolicy Bypass -File ./scripts/verify-release-resources.ps1
+      - name: Build NSIS installer
+        run: ./scripts/invoke-ci-command.ps1 -Name tauri-nsis npm.cmd run tauri build -- --bundles nsis
+      - name: Build MSI installer when WiX succeeds
+        id: msi
+        continue-on-error: true
+        run: ./scripts/invoke-ci-command.ps1 -Name tauri-msi npm.cmd run tauri build -- --bundles msi
+      - name: Record optional MSI result
+        if: steps.msi.outcome == 'failure'
+        run: Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY -Value 'MSI generation failed; the required NSIS build completed. See the uploaded tauri-msi log.'
+      - name: Collect installers and SHA-256
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $installers = @(Get-ChildItem -LiteralPath src-tauri/target -Recurse -File | Where-Object { $_.Extension -eq '.msi' -or $_.Name -like '*-setup.exe' })
+          if ($installers.Count -eq 0) { throw 'No NSIS or MSI installer was produced.' }
+          New-Item -ItemType Directory -Force -Path artifacts/installers,artifacts/hashes | Out-Null
+          foreach ($installer in $installers) { Copy-Item -LiteralPath $installer.FullName -Destination artifacts/installers -Force }
+          $hashes = Get-ChildItem -LiteralPath artifacts/installers -File | Sort-Object Name | ForEach-Object {
+            $hash = Get-FileHash -Algorithm SHA256 -LiteralPath $_.FullName
+            '{0}  {1}' -f $hash.Hash.ToLowerInvariant(), $_.Name
+          }
+          Set-Content -LiteralPath artifacts/hashes/SHA256SUMS.txt -Value $hashes -Encoding utf8NoBOM
+          $hashes | ForEach-Object { Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY -Value ('`' + $_ + '`') }
+      - name: Upload Windows installers and hashes
+        uses: actions/upload-artifact@v4
+        with:
+          name: photo-organizer-windows-${{ github.ref_name }}-${{ github.run_number }}
+          path: |
+            artifacts/installers/**
+            artifacts/hashes/SHA256SUMS.txt
+          if-no-files-found: error
+          retention-days: 30
+      - name: Upload bundle logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-bundle-logs-${{ github.run_number }}
+          path: artifacts/logs/**
+          if-no-files-found: warn
+          retention-days: 30

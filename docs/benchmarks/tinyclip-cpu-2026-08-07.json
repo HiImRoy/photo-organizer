@@ -1,0 +1,270 @@
+{
+  "schemaVersion": 2,
+  "requestedModel": "tinyclip",
+  "model": {
+    "name": "TinyCLIP-ViT-8M-16-Text-3M-YFCC15M",
+    "version": "onnx-int8-2025-08-06",
+    "analysisVersion": "photo-organizer-semantic-v1",
+    "license": "MIT",
+    "installed": true,
+    "modelSizeBytes": 24281512,
+    "modelSha256": "10921310ddef06557ec1598d1260470a0a4db53f70ffe0deb60b946dcad6d27a",
+    "supportedBackends": ["cpu"]
+  },
+  "backend": "cpu",
+  "batchSize": 1,
+  "sampleCount": 48,
+  "failureCount": 0,
+  "meanLatencyMs": 23.826897916666667,
+  "p50LatencyMs": 23.108,
+  "p95LatencyMs": 30.696399999999997,
+  "throughputPerSecond": 41.9687249061999,
+  "peakMemoryBytes": null,
+  "samplePredictions": [
+    {
+      "path": "icons\\128x128.png",
+      "labels": [
+        {
+          "labelId": "product",
+          "displayName": "产品",
+          "similarity": 0.34643868,
+          "threshold": 0.16,
+          "isPrimary": true
+        },
+        {
+          "labelId": "abstract",
+          "displayName": "抽象",
+          "similarity": 0.34422997,
+          "threshold": 0.16,
+          "isPrimary": false
+        },
+        {
+          "labelId": "screenshot",
+          "displayName": "截图",
+          "similarity": 0.33504555,
+          "threshold": 0.17,
+          "isPrimary": false
+        },
+        {
+          "labelId": "document",
+          "displayName": "文档",
+          "similarity": 0.29497883,
+          "threshold": 0.17,
+          "isPrimary": false
+        }
+      ]
+    },
+    {
+      "path": "icons\\128x128@2x.png",
+      "labels": [
+        {
+          "labelId": "abstract",
+          "displayName": "抽象",
+          "similarity": 0.3541243,
+          "threshold": 0.16,
+          "isPrimary": true
+        },
+        {
+          "labelId": "product",
+          "displayName": "产品",
+          "similarity": 0.3528868,
+          "threshold": 0.16,
+          "isPrimary": false
+        },
+        {
+          "labelId": "screenshot",
+          "displayName": "截图",
+          "similarity": 0.329126,
+          "threshold": 0.17,
+          "isPrimary": false
+        },
+        {
+          "labelId": "sunset",
+          "displayName": "日落",
+          "similarity": 0.3004177,
+          "threshold": 0.16,
+          "isPrimary": false
+        }
+      ]
+    },
+    {
+      "path": "icons\\32x32.png",
+      "labels": [
+        {
+          "labelId": "abstract",
+          "displayName": "抽象",
+          "similarity": 0.36928433,
+          "threshold": 0.16,
+          "isPrimary": true
+        },
+        {
+          "labelId": "product",
+          "displayName": "产品",
+          "similarity": 0.35039145,
+          "threshold": 0.16,
+          "isPrimary": false
+        },
+        {
+          "labelId": "screenshot",
+          "displayName": "截图",
+          "similarity": 0.34987655,
+          "threshold": 0.17,
+          "isPrimary": false
+        },
+        {
+          "labelId": "animal",
+          "displayName": "动物",
+          "similarity": 0.31450284,
+          "threshold": 0.16,
+          "isPrimary": false
+        }
+      ]
+    },
+    {
+      "path": "icons\\64x64.png",
+      "labels": [
+        {
+          "labelId": "abstract",
+          "displayName": "抽象",
+          "similarity": 0.34855494,
+          "threshold": 0.16,
+          "isPrimary": true
+        },
+        {
+          "labelId": "product",
+          "displayName": "产品",
+          "similarity": 0.34617096,
+          "threshold": 0.16,
+          "isPrimary": false
+        },
+        {
+          "labelId": "screenshot",
+          "displayName": "截图",
+          "similarity": 0.3388857,
+          "threshold": 0.17,
+          "isPrimary": false
+        },
+        {
+          "labelId": "document",
+          "displayName": "文档",
+          "similarity": 0.29904965,
+          "threshold": 0.17,
+          "isPrimary": false
+        }
+      ]
+    },
+    {
+      "path": "icons\\android\\mipmap-hdpi\\ic_launcher.png",
+      "labels": [
+        {
+          "labelId": "abstract",
+          "displayName": "抽象",
+          "similarity": 0.3534911,
+          "threshold": 0.16,
+          "isPrimary": true
+        },
+        {
+          "labelId": "product",
+          "displayName": "产品",
+          "similarity": 0.34836167,
+          "threshold": 0.16,
+          "isPrimary": false
+        },
+        {
+          "labelId": "screenshot",
+          "displayName": "截图",
+          "similarity": 0.3362809,
+          "threshold": 0.17,
+          "isPrimary": false
+        }
+      ]
+    },
+    {
+      "path": "icons\\android\\mipmap-hdpi\\ic_launcher_foreground.png",
+      "labels": [
+        {
+          "labelId": "abstract",
+          "displayName": "抽象",
+          "similarity": 0.35524675,
+          "threshold": 0.16,
+          "isPrimary": true
+        },
+        {
+          "labelId": "product",
+          "displayName": "产品",
+          "similarity": 0.35236493,
+          "threshold": 0.16,
+          "isPrimary": false
+        },
+        {
+          "labelId": "screenshot",
+          "displayName": "截图",
+          "similarity": 0.33202156,
+          "threshold": 0.17,
+          "isPrimary": false
+        }
+      ]
+    },
+    {
+      "path": "icons\\android\\mipmap-hdpi\\ic_launcher_round.png",
+      "labels": [
+        {
+          "labelId": "screenshot",
+          "displayName": "截图",
+          "similarity": 0.36049104,
+          "threshold": 0.17,
+          "isPrimary": true
+        },
+        {
+          "labelId": "abstract",
+          "displayName": "抽象",
+          "similarity": 0.35292113,
+          "threshold": 0.16,
+          "isPrimary": false
+        },
+        {
+          "labelId": "product",
+          "displayName": "产品",
+          "similarity": 0.33727595,
+          "threshold": 0.16,
+          "isPrimary": false
+        },
+        {
+          "labelId": "animal",
+          "displayName": "动物",
+          "similarity": 0.30715355,
+          "threshold": 0.16,
+          "isPrimary": false
+        }
+      ]
+    },
+    {
+      "path": "icons\\android\\mipmap-mdpi\\ic_launcher.png",
+      "labels": [
+        {
+          "labelId": "product",
+          "displayName": "产品",
+          "similarity": 0.34940943,
+          "threshold": 0.16,
+          "isPrimary": true
+        },
+        {
+          "labelId": "abstract",
+          "displayName": "抽象",
+          "similarity": 0.34668726,
+          "threshold": 0.16,
+          "isPrimary": false
+        },
+        {
+          "labelId": "screenshot",
+          "displayName": "截图",
+          "similarity": 0.33424303,
+          "threshold": 0.17,
+          "isPrimary": false
+        }
+      ]
+    }
+  ],
+  "status": "completed",
+  "error": null
+}

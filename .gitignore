@@ -1,0 +1,66 @@
+# JavaScript
+node_modules/
+dist/
+coverage/
+*.tsbuildinfo
+
+# Rust / Tauri
+src-tauri/target/
+src-tauri/gen/schemas/
+target/
+
+# Local application data and databases
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite3
+*.sqlite3-shm
+*.sqlite3-wal
+thumbnails/
+cache/
+logs/
+*.log
+photo-organizer-data/
+
+# Local evaluation sets and user media (never commit personal photos)
+evaluation-data/
+personal-data/
+local-library/
+photo-library/
+user-photos/
+
+# Temporary model downloads and generated benchmark output
+model-downloads/
+*.download
+*.part
+*.onnx.tmp
+benchmark-output/
+benchmark-reports/
+
+# Local installer output outside Tauri target
+*.msi
+*-setup.exe
+*.appinstaller
+
+# Editors and operating systems
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+*.swp
+.cache/
+.tmp/
+tmp/
+
+# Local environment and signing material
+.env
+.env.*
+!.env.example
+*.pfx
+*.p12
+*.cer
+*.key
+
+# Generated reports
+license-reports/

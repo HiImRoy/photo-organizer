@@ -1,0 +1,10 @@
+node_modules
+AGENTS.md
+dist
+coverage
+src-tauri/target
+src-tauri/gen/schemas
+package-lock.json
+src-tauri/Cargo.lock
+src-tauri/resources/models/**/*.json
+*.sqlite3
