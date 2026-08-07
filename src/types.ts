@@ -172,3 +172,97 @@ export interface SemanticProgress {
   modelVersion: string;
   error: string | null;
 }
+
+export type OrganizationScope = "all" | "filtered" | "selected";
+export type OrganizationLevelKind =
+  | "year"
+  | "month"
+  | "day"
+  | "original_directory"
+  | "primary_semantic"
+  | "tone"
+  | "dominant_color"
+  | "saturation";
+export type OrganizationMissingFallback = "modification_time" | "unknown" | "skip" | "block";
+export type OrganizationConflictStrategy = "skip" | "sequence" | "short_hash";
+
+export interface OrganizationLevel {
+  kind: OrganizationLevelKind;
+  fallback: OrganizationMissingFallback;
+}
+
+export interface OrganizationRules {
+  version: string;
+  levels: OrganizationLevel[];
+  template: string;
+  sequenceStart: number;
+  sequenceWidth: number;
+  missingFallback: OrganizationMissingFallback;
+  conflictStrategy: OrganizationConflictStrategy;
+}
+
+export interface OrganizationPlanRequest {
+  libraryId: number;
+  targetRoot: string;
+  scope: OrganizationScope;
+  filter: AssetFilter;
+  selectedAssetIds: number[];
+  rules: OrganizationRules;
+}
+
+export type OrganizationItemStatus = "ready" | "warning" | "error" | "skipped_conflict";
+export type OrganizationIssueSeverity = "warning" | "error";
+
+export interface OrganizationIssue {
+  code: string;
+  severity: OrganizationIssueSeverity;
+  sourcePath: string | null;
+  targetPath: string | null;
+  detail: string;
+}
+
+export interface OrganizationPlanItem {
+  ordinal: number;
+  assetId: number;
+  sourcePath: string;
+  sourceRelativePath: string;
+  sourceFingerprint: string;
+  targetRelativePath: string;
+  targetPath: string;
+  fileSize: number;
+  status: OrganizationItemStatus;
+  variables: Record<string, string>;
+  issues: OrganizationIssue[];
+}
+
+export interface OrganizationTreeNode {
+  name: string;
+  relativePath: string;
+  fileCount: number;
+  byteCount: number;
+  children: OrganizationTreeNode[];
+}
+
+export interface OrganizationPlanSummary {
+  planId: string;
+  libraryId: number;
+  sourceRoot: string;
+  targetRoot: string;
+  scope: OrganizationScope;
+  itemCount: number;
+  conflictCount: number;
+  errorCount: number;
+  warningCount: number;
+  estimatedBytes: number;
+  targetAvailableBytes: number | null;
+  generatedAt: string;
+  status: string;
+  sourceSnapshot: string;
+  rules: OrganizationRules;
+}
+
+export interface OrganizationPlan {
+  summary: OrganizationPlanSummary;
+  items: OrganizationPlanItem[];
+  tree: OrganizationTreeNode;
+}

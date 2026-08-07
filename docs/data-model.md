@@ -62,6 +62,10 @@
 - 每次扫描生成 `scan_started_at`，成功发现的记录更新 `last_seen_at`；扫描自然完成后，本轮未见记录标为 missing。取消扫描不批量标 missing，避免把未遍历部分误判为缺失。
 - 重启时 semantic running/cancelling 任务和 running item 恢复为 queued 并自动继续；paused 保持暂停，已完成 item 不重复执行。
 
+### `organization_plans` / `organization_plan_items` / `organization_plan_issues`
+
+`0003_organization_dry_run.sql` 保存只读整理预览的图库、目标根目录、范围快照、版本化规则、摘要和更新时间。计划项保存源 asset、源快照 fingerprint、相对目标路径、字节数、稳定顺序和预览状态；问题表保存稳定代码、严重度、源/目标路径和说明。它们不是复制队列，不包含 executed/copying/moving/deleting 状态。完整映射可从当前 SQLite 资产重新计算，导出清单不会写入源图库，也不会创建目标目录。
+
 ## 迁移
 
-迁移文件随 Rust 二进制嵌入，在打开数据库时事务执行。`0002_semantic_workspace.sql` 只新增表、列和索引，不修改已发布的 `0001`。`schema_migrations(version, applied_at)` 保证重复初始化安全。测试覆盖空库、重复初始化、版本顺序、组合筛选和唯一约束。
+迁移文件随 Rust 二进制嵌入，在打开数据库时事务执行。`0002_semantic_workspace.sql` 和 `0003_organization_dry_run.sql` 只新增表、列和索引，不修改已发布的旧 migration。`schema_migrations(version, applied_at)` 保证重复初始化安全。测试覆盖空库、重复初始化、版本顺序、组合筛选、组织计划表和唯一约束。

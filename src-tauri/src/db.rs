@@ -8,7 +8,8 @@ use rusqlite::{Connection, OptionalExtension, params, params_from_iter};
 use crate::error::{AppError, AppResult};
 use crate::models::{
     AssetFilter, AssetListItem, AssetPage, AssetSortField, ExistingAssetSnapshot, FileSnapshot,
-    FolderSummary, LibrarySummary, ProcessedImage, SemanticGroupSummary, SemanticLabelResult,
+    FolderSummary, LibrarySummary, OrganizationIssue, OrganizationIssueSeverity, OrganizationPlan,
+    OrganizationPlanRecord, ProcessedImage, SemanticGroupSummary, SemanticLabelResult,
     SemanticMatchMode, SemanticProgress, SortDirection,
 };
 use crate::semantic::{
@@ -18,6 +19,7 @@ use crate::semantic::{
 
 const INITIAL_MIGRATION: &str = include_str!("../migrations/0001_initial.sql");
 const SEMANTIC_MIGRATION: &str = include_str!("../migrations/0002_semantic_workspace.sql");
+const ORGANIZATION_MIGRATION: &str = include_str!("../migrations/0003_organization_dry_run.sql");
 
 #[derive(Debug, Clone)]
 pub struct Repository {
@@ -58,7 +60,11 @@ impl Repository {
             [],
             |row| row.get(0),
         )?;
-        for (version, sql) in [(1_i64, INITIAL_MIGRATION), (2_i64, SEMANTIC_MIGRATION)] {
+        for (version, sql) in [
+            (1_i64, INITIAL_MIGRATION),
+            (2_i64, SEMANTIC_MIGRATION),
+            (3_i64, ORGANIZATION_MIGRATION),
+        ] {
             if current < version {
                 let transaction = connection.transaction()?;
                 transaction.execute_batch(sql)?;
@@ -659,6 +665,193 @@ impl Repository {
             page: page.max(1),
             page_size,
         })
+    }
+
+    /// Load the complete source set for an organization preview through the same
+    /// SQLite filter used by the browsing grid. Pagination is intentionally
+    /// hidden from the planner so a preview can never silently omit matching
+    /// files. Selection is applied after the database query, still inside the
+    /// repository boundary rather than in the frontend.
+    pub fn list_assets_for_organization(
+        &self,
+        library_id: i64,
+        filter: &AssetFilter,
+        selected_asset_ids: Option<&[i64]>,
+    ) -> AppResult<Vec<AssetListItem>> {
+        let mut page = 1;
+        let mut items = Vec::new();
+        loop {
+            let result = self.list_assets(
+                library_id,
+                AssetSortField::FileName,
+                SortDirection::Asc,
+                page,
+                500,
+                filter,
+            )?;
+            let reached_end = result.items.len() < result.page_size as usize;
+            items.extend(result.items);
+            if reached_end || items.len() as i64 >= result.total {
+                break;
+            }
+            page += 1;
+        }
+        if let Some(selected) = selected_asset_ids {
+            let selected: std::collections::HashSet<i64> = selected.iter().copied().collect();
+            items.retain(|item| selected.contains(&item.id));
+        }
+        Ok(items)
+    }
+
+    pub fn save_organization_plan(&self, plan: &OrganizationPlan) -> AppResult<()> {
+        let mut connection = self.open()?;
+        let transaction = connection.transaction()?;
+        let timestamp = now();
+        let scope_json = serde_json::to_string(&plan.summary.scope)?;
+        let rules_json = serde_json::to_string(&plan.summary.rules)?;
+        let summary_json = serde_json::to_string(&plan.summary)?;
+        transaction.execute(
+            "INSERT OR REPLACE INTO organization_plans(
+                id, library_id, target_root, scope_json, rules_json, summary_json,
+                status, created_at, updated_at
+             ) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, COALESCE(
+                (SELECT created_at FROM organization_plans WHERE id=?1), ?8
+             ), ?8)",
+            params![
+                plan.summary.plan_id,
+                plan.summary.library_id,
+                plan.summary.target_root,
+                scope_json,
+                rules_json,
+                summary_json,
+                plan.summary.status,
+                timestamp,
+            ],
+        )?;
+        transaction.execute(
+            "DELETE FROM organization_plan_items WHERE plan_id=?1",
+            [&plan.summary.plan_id],
+        )?;
+        for item in &plan.items {
+            transaction.execute(
+                "INSERT INTO organization_plan_items(
+                    plan_id, asset_id, source_fingerprint, target_relative_path,
+                    file_size, ordinal, status
+                 ) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                params![
+                    plan.summary.plan_id,
+                    item.asset_id,
+                    item.source_fingerprint,
+                    item.target_relative_path,
+                    i64::try_from(item.file_size).unwrap_or(i64::MAX),
+                    item.ordinal,
+                    serde_json::to_string(&item.status)?
+                        .trim_matches('"')
+                        .to_string(),
+                ],
+            )?;
+            let item_id = transaction.last_insert_rowid();
+            for issue in &item.issues {
+                transaction.execute(
+                    "INSERT INTO organization_plan_issues(
+                        plan_id, item_id, code, severity, source_path, target_path, detail
+                     ) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                    params![
+                        plan.summary.plan_id,
+                        item_id,
+                        issue.code,
+                        serde_json::to_string(&issue.severity)?
+                            .trim_matches('"')
+                            .to_string(),
+                        issue.source_path,
+                        issue.target_path,
+                        issue.detail,
+                    ],
+                )?;
+            }
+        }
+        transaction.commit()?;
+        Ok(())
+    }
+
+    pub fn get_organization_plan(
+        &self,
+        plan_id: &str,
+    ) -> AppResult<Option<OrganizationPlanRecord>> {
+        let connection = self.open()?;
+        connection
+            .query_row(
+                "SELECT id, library_id, target_root, scope_json, rules_json,
+                        summary_json, created_at, updated_at
+                 FROM organization_plans WHERE id=?1",
+                [plan_id],
+                |row| {
+                    let scope_json: String = row.get(3)?;
+                    let rules_json: String = row.get(4)?;
+                    let summary_json: String = row.get(5)?;
+                    Ok(OrganizationPlanRecord {
+                        plan_id: row.get(0)?,
+                        library_id: row.get(1)?,
+                        target_root: row.get(2)?,
+                        scope: serde_json::from_str(&scope_json).map_err(|error| {
+                            rusqlite::Error::FromSqlConversionFailure(
+                                3,
+                                rusqlite::types::Type::Text,
+                                Box::new(error),
+                            )
+                        })?,
+                        rules: serde_json::from_str(&rules_json).map_err(|error| {
+                            rusqlite::Error::FromSqlConversionFailure(
+                                4,
+                                rusqlite::types::Type::Text,
+                                Box::new(error),
+                            )
+                        })?,
+                        summary: serde_json::from_str(&summary_json).map_err(|error| {
+                            rusqlite::Error::FromSqlConversionFailure(
+                                5,
+                                rusqlite::types::Type::Text,
+                                Box::new(error),
+                            )
+                        })?,
+                        created_at: row.get(6)?,
+                        updated_at: row.get(7)?,
+                    })
+                },
+            )
+            .optional()
+            .map_err(AppError::from)
+    }
+
+    pub fn list_organization_issues(&self, plan_id: &str) -> AppResult<Vec<OrganizationIssue>> {
+        let connection = self.open()?;
+        let mut statement = connection.prepare(
+            "SELECT code, severity, source_path, target_path, detail
+             FROM organization_plan_issues
+             WHERE plan_id=?1
+             ORDER BY id ASC",
+        )?;
+        let rows = statement.query_map([plan_id], |row| {
+            let severity: String = row.get(1)?;
+            let severity = match severity.as_str() {
+                "warning" => OrganizationIssueSeverity::Warning,
+                _ => OrganizationIssueSeverity::Error,
+            };
+            Ok(OrganizationIssue {
+                code: row.get(0)?,
+                severity,
+                source_path: row.get(2)?,
+                target_path: row.get(3)?,
+                detail: row.get(4)?,
+            })
+        })?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(AppError::from)
+    }
+
+    pub fn delete_organization_plan(&self, plan_id: &str) -> AppResult<()> {
+        let connection = self.open()?;
+        connection.execute("DELETE FROM organization_plans WHERE id=?1", [plan_id])?;
+        Ok(())
     }
 
     pub fn list_library_folders(&self, library_id: i64) -> AppResult<Vec<FolderSummary>> {
@@ -1368,7 +1561,22 @@ mod tests {
         let repository = Repository::new(temp.path().join("database.sqlite3"));
         repository.initialize().expect("first initialization");
         repository.initialize().expect("second initialization");
-        assert_eq!(repository.migration_version().expect("version"), 2);
+        assert_eq!(repository.migration_version().expect("version"), 3);
+        let connection = repository.open().expect("connection");
+        for table in [
+            "organization_plans",
+            "organization_plan_items",
+            "organization_plan_issues",
+        ] {
+            let exists: i64 = connection
+                .query_row(
+                    "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?1",
+                    [table],
+                    |row| row.get(0),
+                )
+                .expect("table lookup");
+            assert_eq!(exists, 1, "missing table {table}");
+        }
     }
 
     #[test]

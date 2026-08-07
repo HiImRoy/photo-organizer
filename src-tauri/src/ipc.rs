@@ -10,9 +10,11 @@ use crate::db::Repository;
 use crate::error::{AppError, AppResult};
 use crate::models::{
     AssetFilter, AssetPage, AssetSortField, CancelScanResponse, FolderSummary, LibrarySummary,
+    OrganizationIssue, OrganizationPlan, OrganizationPlanRecord, OrganizationPlanRequest,
     ScanProgress, SemanticGroupSummary, SemanticProgress, SemanticTaskResponse, SortDirection,
     StartScanResponse, StartSemanticResponse,
 };
+use crate::organization;
 use crate::paths::AppPaths;
 use crate::scanner::{scan_library, validate_scan_root};
 use crate::semantic::{
@@ -333,6 +335,85 @@ pub fn cancel_semantic_analysis(
         false
     };
     Ok(SemanticTaskResponse { job_id, accepted })
+}
+
+#[tauri::command]
+pub fn validate_organization_rules(request: OrganizationPlanRequest) -> Vec<OrganizationIssue> {
+    organization::validate_rules(&request.rules)
+}
+
+#[tauri::command]
+pub fn preview_organization_plan(
+    request: OrganizationPlanRequest,
+    state: State<'_, AppState>,
+) -> Result<OrganizationPlan, String> {
+    let library = state
+        .repository
+        .list_libraries()
+        .map_err(ipc_error)?
+        .into_iter()
+        .find(|library| library.id == request.library_id)
+        .ok_or_else(|| format!("library {} not found", request.library_id))?;
+    let filter = match request.scope {
+        crate::models::OrganizationScope::Filtered => request.filter.clone(),
+        _ => AssetFilter::default(),
+    };
+    let selected = match request.scope {
+        crate::models::OrganizationScope::Selected => Some(request.selected_asset_ids.as_slice()),
+        _ => None,
+    };
+    let assets = state
+        .repository
+        .list_assets_for_organization(request.library_id, &filter, selected)
+        .map_err(ipc_error)?;
+    let plan = organization::build_plan(&request, &library.root_path, assets).map_err(ipc_error)?;
+    state
+        .repository
+        .save_organization_plan(&plan)
+        .map_err(ipc_error)?;
+    Ok(plan)
+}
+
+#[tauri::command]
+pub fn get_organization_plan(
+    plan_id: String,
+    state: State<'_, AppState>,
+) -> Result<Option<OrganizationPlanRecord>, String> {
+    state
+        .repository
+        .get_organization_plan(&plan_id)
+        .map_err(ipc_error)
+}
+
+#[tauri::command]
+pub fn list_organization_issues(
+    plan_id: String,
+    state: State<'_, AppState>,
+) -> Result<Vec<OrganizationIssue>, String> {
+    state
+        .repository
+        .list_organization_issues(&plan_id)
+        .map_err(ipc_error)
+}
+
+#[tauri::command]
+pub fn export_organization_manifest(
+    plan: OrganizationPlan,
+    output_path: String,
+    format: String,
+) -> Result<(), String> {
+    organization::export_manifest(&plan, Path::new(&output_path), &format).map_err(ipc_error)
+}
+
+#[tauri::command]
+pub fn discard_organization_plan(
+    plan_id: String,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    state
+        .repository
+        .delete_organization_plan(&plan_id)
+        .map_err(ipc_error)
 }
 
 pub fn resume_pending_semantic_jobs(app: tauri::AppHandle, state: &AppState) {

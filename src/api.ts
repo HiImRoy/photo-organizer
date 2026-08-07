@@ -1,12 +1,15 @@
 import { invoke, isTauri } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
-import { open } from "@tauri-apps/plugin-dialog";
+import { open, save } from "@tauri-apps/plugin-dialog";
 
 import type {
   AssetPage,
   AssetFilter,
   FolderSummary,
   LibrarySummary,
+  OrganizationIssue,
+  OrganizationPlan,
+  OrganizationPlanRequest,
   ScanProgress,
   SemanticGroupSummary,
   SemanticLabelDescriptor,
@@ -45,6 +48,92 @@ export async function chooseLibraryFolder(): Promise<string | null> {
     title: "选择要导入的图片文件夹",
   });
   return typeof selection === "string" ? selection : null;
+}
+
+export async function chooseOrganizationTargetFolder(): Promise<string | null> {
+  if (!desktopRuntime) return null;
+  const selection = await open({
+    directory: true,
+    multiple: false,
+    title: "选择整理预览目标根目录（不会创建目录）",
+  });
+  return typeof selection === "string" ? selection : null;
+}
+
+export async function validateOrganizationRules(
+  request: OrganizationPlanRequest,
+): Promise<OrganizationIssue[]> {
+  if (!desktopRuntime) return [];
+  return invoke<OrganizationIssue[]>("validate_organization_rules", { request });
+}
+
+export async function previewOrganizationPlan(
+  request: OrganizationPlanRequest,
+): Promise<OrganizationPlan> {
+  if (!desktopRuntime) {
+    return {
+      summary: {
+        planId: "browser-preview",
+        libraryId: request.libraryId,
+        sourceRoot: "",
+        targetRoot: request.targetRoot,
+        scope: request.scope,
+        itemCount: 0,
+        conflictCount: 0,
+        errorCount: 0,
+        warningCount: 0,
+        estimatedBytes: 0,
+        targetAvailableBytes: null,
+        generatedAt: new Date().toISOString(),
+        status: "empty",
+        sourceSnapshot: "",
+        rules: request.rules,
+      },
+      items: [],
+      tree: {
+        name: request.targetRoot || "目标根目录",
+        relativePath: "",
+        fileCount: 0,
+        byteCount: 0,
+        children: [],
+      },
+    };
+  }
+  return invoke<OrganizationPlan>("preview_organization_plan", { request });
+}
+
+export async function getOrganizationPlan(planId: string) {
+  if (!desktopRuntime) return null;
+  return invoke("get_organization_plan", { planId });
+}
+
+export async function listOrganizationIssues(planId: string): Promise<OrganizationIssue[]> {
+  if (!desktopRuntime) return [];
+  return invoke<OrganizationIssue[]>("list_organization_issues", { planId });
+}
+
+export async function exportOrganizationManifest(
+  plan: OrganizationPlan,
+  format: "json" | "csv",
+): Promise<string | null> {
+  if (!desktopRuntime) return null;
+  const outputPath = await save({
+    title: `导出整理预览清单（${format.toUpperCase()}）`,
+    defaultPath: `photo-organization-dry-run.${format}`,
+    filters: [{ name: format.toUpperCase(), extensions: [format] }],
+  });
+  if (!outputPath) return null;
+  await invoke("export_organization_manifest", {
+    plan,
+    outputPath,
+    format,
+  });
+  return outputPath;
+}
+
+export async function discardOrganizationPlan(planId: string): Promise<void> {
+  if (!desktopRuntime) return;
+  await invoke("discard_organization_plan", { planId });
 }
 
 export async function fetchLibraries(): Promise<LibrarySummary[]> {

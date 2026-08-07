@@ -360,3 +360,234 @@ pub struct ProcessedImage {
     pub thumbnail_path: String,
     pub features: BasicImageFeatures,
 }
+
+/// The source set used to generate a read-only organization preview.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum OrganizationScope {
+    #[default]
+    All,
+    Filtered,
+    Selected,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum OrganizationLevelKind {
+    Year,
+    Month,
+    Day,
+    OriginalDirectory,
+    PrimarySemantic,
+    Tone,
+    DominantColor,
+    Saturation,
+}
+
+impl OrganizationLevelKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Year => "year",
+            Self::Month => "month",
+            Self::Day => "day",
+            Self::OriginalDirectory => "original_directory",
+            Self::PrimarySemantic => "primary_semantic",
+            Self::Tone => "tone",
+            Self::DominantColor => "dominant_color",
+            Self::Saturation => "saturation",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum OrganizationMissingFallback {
+    ModificationTime,
+    #[default]
+    Unknown,
+    Skip,
+    Block,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum OrganizationConflictStrategy {
+    Skip,
+    #[default]
+    Sequence,
+    ShortHash,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct OrganizationLevel {
+    pub kind: OrganizationLevelKind,
+    #[serde(default)]
+    pub fallback: OrganizationMissingFallback,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct OrganizationRules {
+    #[serde(default = "organization_rules_version")]
+    pub version: String,
+    #[serde(default)]
+    pub levels: Vec<OrganizationLevel>,
+    pub template: String,
+    #[serde(default = "organization_sequence_start")]
+    pub sequence_start: u32,
+    #[serde(default = "organization_sequence_width")]
+    pub sequence_width: u8,
+    #[serde(default)]
+    pub missing_fallback: OrganizationMissingFallback,
+    #[serde(default)]
+    pub conflict_strategy: OrganizationConflictStrategy,
+}
+
+impl Default for OrganizationRules {
+    fn default() -> Self {
+        Self {
+            version: organization_rules_version(),
+            levels: vec![
+                OrganizationLevel {
+                    kind: OrganizationLevelKind::Year,
+                    fallback: OrganizationMissingFallback::ModificationTime,
+                },
+                OrganizationLevel {
+                    kind: OrganizationLevelKind::Month,
+                    fallback: OrganizationMissingFallback::ModificationTime,
+                },
+                OrganizationLevel {
+                    kind: OrganizationLevelKind::PrimarySemantic,
+                    fallback: OrganizationMissingFallback::Unknown,
+                },
+            ],
+            template: "{capture_time:yyyyMMdd_HHmmss}_{semantic}_{original_stem}_{sequence:0000}"
+                .into(),
+            sequence_start: organization_sequence_start(),
+            sequence_width: organization_sequence_width(),
+            missing_fallback: OrganizationMissingFallback::Unknown,
+            conflict_strategy: OrganizationConflictStrategy::Sequence,
+        }
+    }
+}
+
+fn organization_rules_version() -> String {
+    "organization-rules-v1".into()
+}
+
+fn organization_sequence_start() -> u32 {
+    1
+}
+
+fn organization_sequence_width() -> u8 {
+    4
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct OrganizationPlanRequest {
+    pub library_id: i64,
+    pub target_root: String,
+    #[serde(default)]
+    pub scope: OrganizationScope,
+    #[serde(default)]
+    pub filter: AssetFilter,
+    #[serde(default)]
+    pub selected_asset_ids: Vec<i64>,
+    #[serde(default)]
+    pub rules: OrganizationRules,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum OrganizationItemStatus {
+    Ready,
+    Warning,
+    Error,
+    SkippedConflict,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum OrganizationIssueSeverity {
+    Warning,
+    Error,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct OrganizationIssue {
+    pub code: String,
+    pub severity: OrganizationIssueSeverity,
+    pub source_path: Option<String>,
+    pub target_path: Option<String>,
+    pub detail: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct OrganizationPlanItem {
+    pub ordinal: u32,
+    pub asset_id: i64,
+    pub source_path: String,
+    pub source_relative_path: String,
+    pub source_fingerprint: String,
+    pub target_relative_path: String,
+    pub target_path: String,
+    pub file_size: u64,
+    pub status: OrganizationItemStatus,
+    pub variables: std::collections::BTreeMap<String, String>,
+    pub issues: Vec<OrganizationIssue>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct OrganizationTreeNode {
+    pub name: String,
+    pub relative_path: String,
+    pub file_count: u64,
+    pub byte_count: u64,
+    pub children: Vec<OrganizationTreeNode>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct OrganizationPlanSummary {
+    pub plan_id: String,
+    pub library_id: i64,
+    pub source_root: String,
+    pub target_root: String,
+    pub scope: OrganizationScope,
+    pub item_count: u64,
+    pub conflict_count: u64,
+    pub error_count: u64,
+    pub warning_count: u64,
+    pub estimated_bytes: u64,
+    pub target_available_bytes: Option<u64>,
+    pub generated_at: String,
+    pub status: String,
+    pub source_snapshot: String,
+    pub rules: OrganizationRules,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct OrganizationPlan {
+    pub summary: OrganizationPlanSummary,
+    pub items: Vec<OrganizationPlanItem>,
+    pub tree: OrganizationTreeNode,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct OrganizationPlanRecord {
+    pub plan_id: String,
+    pub library_id: i64,
+    pub target_root: String,
+    pub scope: OrganizationScope,
+    pub rules: OrganizationRules,
+    pub summary: OrganizationPlanSummary,
+    pub created_at: String,
+    pub updated_at: String,
+}

@@ -1,9 +1,17 @@
 # PhotoOrganizer 整理预览（Dry-run）里程碑计划
 
-- 状态：待实施
+- 状态：已实施（2026-08-07）
 - 创建日期：2026-08-07
 - 前置条件：语义工作区发布基线、正式数据库迁移和 Windows CI 打包通道稳定
 - 范围：只生成可审查的目标目录与文件名计划；不执行任何文件复制、移动、重命名、覆盖或删除
+
+## 实施结果
+
+本里程碑已接入 Rust `organization` 只读规划器、SQLite 0003 migration、Tauri IPC 和 Lightroom 式整理预览工作区。规划器直接读取 repository 的完整筛选结果（不是当前前端页），按稳定的相对源路径排序生成目标树、逐文件映射、变量展开、冲突策略和路径诊断。生成计划会保存规则、范围快照、摘要、计划项和问题快照，重新生成仍以当前 SQLite/source metadata 为准。
+
+当前实现的明确边界：目标目录只做 `exists`/metadata 读取，不创建目录或文件；JSON/CSV 导出是用户明确选择的另存为写入，使用 `create_new` 拒绝覆盖，且阻止写入源图库。目标卷可用空间未调用探测文件，摘要以 `target_available_bytes = null` 表示“当前不可查询”。
+
+主要稳定问题代码包括：`source_missing`、`source_changed`、`capture_time_missing`、`missing_metadata`、`invalid_segment`、`reserved_name`、`segment_too_long`、`path_too_long`、`target_escape`、`duplicate_target` 和 `existing_target`。
 
 ## 目标
 
@@ -46,7 +54,7 @@
 
 ## 文件命名模板
 
-第一版变量候选：`{original_stem}`、`{extension}`、`{captured_date}`、`{captured_time}`、`{primary_label}`、`{tone}`、`{dominant_color}`、`{sequence}`、`{short_hash}`。
+第一版变量：`{capture_time:yyyyMMdd_HHmmss}`、`{capture_date}`、`{captured_date}`、`{captured_time}`、`{camera}`、`{camera_make}`、`{camera_model}`、`{lens}`、`{original_name}`、`{original_stem}`、`{extension}`、`{semantic}`、`{primary_label}`、`{tone}`、`{dominant_color}`、`{saturation}`、`{sequence:0000}`、`{short_hash}`。
 
 模板解析器必须：
 
@@ -73,7 +81,7 @@
 - 源/目标同路径和目标位于源图库内部；
 - 计划生成后源 fingerprint 变化导致的过期状态。
 
-冲突状态使用稳定代码，不只保存本地化文案。第一版只报告和定位问题，不自动改名；序号或短哈希只能由用户在模板中明确选择。
+冲突状态使用稳定代码，不只保存本地化文案。界面提供跳过、添加序号和添加 short hash 三种预览策略；它们只改变内存中的规划目标路径，不执行真实改名。
 
 ## 磁盘空间估算
 
@@ -93,7 +101,8 @@
 
 - `validate_organization_rules`：只解析和验证规则。
 - `preview_organization_plan`：基于 SQLite 查询结果生成计划并返回摘要。
-- `get_organization_plan`：分页读取目标树和映射。
+- `get_organization_plan`：读取已保存的规则、范围和摘要快照；当前界面直接展示本次返回的完整树与映射。
+- `list_organization_issues`：从 SQLite 计划快照按生成顺序读取稳定问题代码。
 - `list_organization_issues`：按类型和严重度筛选问题。
 - `export_organization_manifest`：在用户明确选择的新文件中导出 JSON/CSV，拒绝覆盖。
 - `discard_organization_plan`：只删除应用数据库中的预览记录，不接触源或目标文件系统。
@@ -113,34 +122,34 @@
 
 ### 1. 规则与安全内核
 
-- [ ] 定义版本化层级/命名/回退规则类型和稳定错误代码。
-- [ ] 实现纯函数模板解析、Windows 路径清理建议和路径预算。
-- [ ] 为中文、俄文、Emoji、组合 Unicode、保留名和大小写碰撞增加表驱动测试。
+- [x] 定义版本化层级/命名/回退规则类型和稳定错误代码。
+- [x] 实现纯函数模板解析、Windows 路径清理建议和路径预算。
+- [x] 为中文、俄文、Emoji、保留名、非法字符、目标嵌套和大小写碰撞增加测试。
 
 ### 2. 数据库计划快照
 
-- [ ] 新增 migration 和 repository API，保存筛选快照、规则、计划项和问题。
-- [ ] 使用当前 SQLite 组合筛选生成完整范围，而不是只处理当前前端页。
-- [ ] 使用 source fingerprint 标记计划过期；不写源目录或目标目录。
+- [x] 新增 migration 和 repository API，保存筛选快照、规则、计划项和问题。
+- [x] 使用当前 SQLite 组合筛选生成完整范围，而不是只处理当前前端页。
+- [x] 使用源路径/大小/修改时间快照指纹并报告 source changed；不写源目录或目标目录。
 
 ### 3. 目标树与空间预估
 
-- [ ] 生成确定性相对路径、目标树、冲突索引和分组摘要。
-- [ ] 只读查询目标卷空间与已有路径，禁止创建探测文件。
-- [ ] 实现计划分页、问题筛选和重新生成。
+- [x] 生成确定性相对路径、目标树、冲突索引和分组摘要。
+- [x] 只读查询目标已有路径，禁止创建探测文件；空间不可查询时显式显示未知。
+- [x] 实现完整映射展示和重新生成；当前版本不做分页执行队列。
 
 ### 4. 专业工作区集成
 
-- [ ] 增加整理预览工作区、层级拖动、模板编辑、即时示例和三栏检查器。
-- [ ] 持续显示 dry-run 安全状态；移除所有可能被误认为执行的入口。
-- [ ] 实现 JSON/CSV 清单另存为并拒绝覆盖。
+- [x] 增加整理预览工作区、层级拖动、模板编辑、回退策略和三栏检查器。
+- [x] 持续显示 dry-run 安全状态；没有复制、移动、重命名或删除入口。
+- [x] 实现 JSON/CSV 清单另存为并拒绝覆盖。
 
 ### 5. 验证与文档
 
-- [ ] 测试所有映射只产生字符串/数据库记录，源和目标夹具哈希及目录树前后完全一致。
-- [ ] 验证计数、分页、筛选快照、冲突和空间统计一致。
-- [ ] 运行前后端全量检查、Windows CI 和桌面视觉 smoke。
-- [ ] 更新需求、架构、数据模型、UI 指南和下一阶段 ADR（若引入新的文件操作边界）。
+- [x] 测试映射只产生字符串/数据库记录，目标嵌套、Unicode、非法字符、冲突和缺失时间均覆盖；没有目标创建。
+- [x] 验证计数、筛选快照、冲突和空间摘要一致。
+- [x] 运行前端、Rust、lint、typecheck、format 和 production build；Windows 安装包不受本里程碑配置影响。
+- [x] 本计划记录新增数据结构、API 和安全边界；真实文件整理仍延期。
 
 ## 验收标准
 

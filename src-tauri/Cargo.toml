@@ -47,6 +47,7 @@ tauri-plugin-dialog = { version = "2", optional = true }
 tauri-plugin-log = { version = "2", optional = true }
 thiserror = "2"
 tokenizers = { version = "0.22", default-features = false, features = ["fancy-regex"] }
+unicode-normalization-alignments = "0.1.12"
 uuid = { version = "1", features = ["serde", "v4"] }
 walkdir = "2.5"
 

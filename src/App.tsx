@@ -22,6 +22,7 @@ import {
 } from "./api";
 import { AssetCard } from "./components/AssetCard";
 import { DetailPanel } from "./components/DetailPanel";
+import { OrganizationWorkspace } from "./components/OrganizationWorkspace";
 import {
   FilterIcon,
   GridIcon,
@@ -63,6 +64,11 @@ const sortLabels: Record<SortField, string> = {
   saturation: "饱和度",
 };
 
+const visualOrganizationMode =
+  import.meta.env.DEV &&
+  (new URLSearchParams(window.location.search).get("visual-fixture") === "organization" ||
+    new URLSearchParams(window.location.search).get("organization") === "1");
+
 export default function App() {
   const [libraries, setLibraries] = useState<LibrarySummary[]>([]);
   const [selectedLibraryId, setSelectedLibraryId] = useState<number | null>(null);
@@ -87,6 +93,10 @@ export default function App() {
   const [cancellingScan, setCancellingScan] = useState(false);
   const [semanticStatus, setSemanticStatus] = useState<SemanticRuntimeStatus | null>(null);
   const [refreshKey, setRefreshKey] = useState(0);
+  const [workspaceMode, setWorkspaceMode] = useState<"library" | "organization">(
+    visualOrganizationMode ? "organization" : "library",
+  );
+  const [selectedAssetIds, setSelectedAssetIds] = useState<number[]>([]);
 
   const selectedLibrary = useMemo(
     () => libraries.find((library) => library.id === selectedLibraryId) ?? null,
@@ -315,6 +325,8 @@ export default function App() {
   function selectLibrary(id: number) {
     setSelectedLibraryId(id);
     setSelectedAsset(null);
+    setSelectedAssetIds([]);
+    setWorkspaceMode("library");
     setFilterState(emptyAssetFilter);
     setPage(1);
   }
@@ -322,6 +334,17 @@ export default function App() {
   function changeView(next: ViewMode) {
     setViewMode(next);
     if (next === "single" && !selectedAsset) setSelectedAsset(assets[0] ?? null);
+  }
+
+  function selectAsset(asset: AssetListItem) {
+    setSelectedAsset(asset);
+    setSelectedAssetIds((current) => (current.length ? current : [asset.id]));
+  }
+
+  function toggleMarkedAsset(asset: AssetListItem) {
+    setSelectedAssetIds((current) =>
+      current.includes(asset.id) ? current.filter((id) => id !== asset.id) : [...current, asset.id],
+    );
   }
 
   return (
@@ -430,152 +453,179 @@ export default function App() {
             <PlayIcon width="14" height="14" />
             {semanticStatus?.status === "ready" ? "语义分析" : "准备模型"}
           </button>
+          {selectedLibrary ? (
+            <button
+              className={workspaceMode === "organization" ? "tool-button is-active" : "tool-button"}
+              type="button"
+              onClick={() =>
+                setWorkspaceMode((value) => (value === "library" ? "organization" : "library"))
+              }
+            >
+              整理预览
+            </button>
+          ) : null}
         </div>
       </header>
 
       <div className="workspace-shell">
-        <Sidebar
-          collapsed={leftCollapsed}
-          libraries={libraries}
-          selectedLibraryId={selectedLibraryId}
-          folders={folders}
-          groups={semanticGroups}
-          catalog={semanticCatalog}
-          filter={filter}
-          semanticStatus={semanticStatus}
-          onToggle={() => setLeftCollapsed((value) => !value)}
-          onSelectLibrary={selectLibrary}
-          onFilterChange={updateFilter}
-        />
-
-        <main className="center-workspace">
-          {error ? (
-            <div className="global-error" role="alert">
-              <span>{error}</span>
-              <button type="button" onClick={() => setError(null)}>
-                关闭
-              </button>
-            </div>
-          ) : null}
-          {scanProgress ? (
-            <ProgressPanel
-              progress={scanProgress}
-              cancelling={cancellingScan}
-              onCancel={() => void cancelScan()}
-              onDismiss={() => setScanProgress(null)}
+        {workspaceMode === "organization" && selectedLibrary ? (
+          <main className="center-workspace organization-mode-shell">
+            <OrganizationWorkspace
+              library={selectedLibrary}
+              filter={filter}
+              selectedAssetIds={selectedAssetIds}
+              filteredCount={assetTotal}
+              onClose={() => setWorkspaceMode("library")}
             />
-          ) : null}
-          {semanticProgress && semanticRunning ? (
-            <SemanticTaskBar
-              progress={semanticProgress}
-              onPauseResume={() => void pauseOrResumeSemantic()}
-              onCancel={() => void cancelSemantic()}
+          </main>
+        ) : (
+          <>
+            <Sidebar
+              collapsed={leftCollapsed}
+              libraries={libraries}
+              selectedLibraryId={selectedLibraryId}
+              folders={folders}
+              groups={semanticGroups}
+              catalog={semanticCatalog}
+              filter={filter}
+              semanticStatus={semanticStatus}
+              onToggle={() => setLeftCollapsed((value) => !value)}
+              onSelectLibrary={selectLibrary}
+              onFilterChange={updateFilter}
             />
-          ) : null}
 
-          {selectedLibrary ? (
-            <>
-              <div className="content-toolbar">
-                <div>
-                  <strong>{assetTotal.toLocaleString()} 张</strong>
-                  <span>
-                    {activeFilterCount ? `已应用 ${activeFilterCount} 项筛选` : "全部图片"}
-                  </span>
-                </div>
-                <div>
-                  {activeFilterCount ? (
-                    <button type="button" onClick={() => updateFilter(emptyAssetFilter)}>
-                      清除筛选
-                    </button>
-                  ) : null}
-                  <label className="group-toggle">
-                    <input
-                      type="checkbox"
-                      checked={groupBySemantic}
-                      onChange={(event) => setGroupBySemantic(event.target.checked)}
-                    />
-                    按主要语义标签分组
-                  </label>
-                </div>
-              </div>
-              {loading && assets.length === 0 ? (
-                <GridLoading />
-              ) : viewMode === "single" ? (
-                <SinglePreview
-                  assets={assets}
-                  selected={selectedAsset}
-                  onSelect={setSelectedAsset}
-                />
-              ) : assets.length ? (
-                <GridWorkspace
-                  assets={assets}
-                  selected={selectedAsset}
-                  grouped={groupBySemantic}
-                  onSelect={setSelectedAsset}
-                />
-              ) : (
-                <section className="library-empty">
-                  <SingleImageIcon width="28" height="28" />
-                  <h2>没有符合条件的图片</h2>
-                  <p>
-                    {activeFilterCount
-                      ? "调整或清除组合筛选后重试。"
-                      : "重新扫描目录，或导入包含 JPEG、PNG、WebP 的文件夹。"}
-                  </p>
-                </section>
-              )}
-              {totalPages > 1 ? (
-                <nav className="pagination" aria-label="图库分页">
-                  <button
-                    type="button"
-                    disabled={page <= 1}
-                    onClick={() => setPage((value) => Math.max(1, value - 1))}
-                  >
-                    上一页
+            <main className="center-workspace">
+              {error ? (
+                <div className="global-error" role="alert">
+                  <span>{error}</span>
+                  <button type="button" onClick={() => setError(null)}>
+                    关闭
                   </button>
-                  <span>
-                    {page} / {totalPages}
-                  </span>
-                  <button
-                    type="button"
-                    disabled={page >= totalPages}
-                    onClick={() => setPage((value) => Math.min(totalPages, value + 1))}
-                  >
-                    下一页
-                  </button>
-                </nav>
+                </div>
               ) : null}
-            </>
-          ) : !loading ? (
-            <section className="welcome-state">
-              <LibraryIcon width="30" height="30" />
-              <div>
-                <small>本地优先图片工作台</small>
-                <h1>建立本地图片库</h1>
-                <p>
-                  递归索引、生成私有缩略图，并在本机完成影调、色彩和真实语义分析。浏览过程不会修改原始图片。
-                </p>
-                <button
-                  className="primary-action"
-                  type="button"
-                  onClick={() => void importFolder()}
-                >
-                  <ImportIcon width="16" height="16" />
-                  导入图片文件夹
-                </button>
-                <span>JPEG · PNG · WebP · 支持 Unicode 路径</span>
-              </div>
-            </section>
-          ) : null}
-        </main>
+              {scanProgress ? (
+                <ProgressPanel
+                  progress={scanProgress}
+                  cancelling={cancellingScan}
+                  onCancel={() => void cancelScan()}
+                  onDismiss={() => setScanProgress(null)}
+                />
+              ) : null}
+              {semanticProgress && semanticRunning ? (
+                <SemanticTaskBar
+                  progress={semanticProgress}
+                  onPauseResume={() => void pauseOrResumeSemantic()}
+                  onCancel={() => void cancelSemantic()}
+                />
+              ) : null}
 
-        <DetailPanel
-          asset={selectedAsset}
-          collapsed={rightCollapsed}
-          semanticStatus={semanticStatus}
-          onToggle={() => setRightCollapsed((value) => !value)}
-          onReanalyze={(asset) => void analyzeOne(asset)}
-        />
+              {selectedLibrary ? (
+                <>
+                  <div className="content-toolbar">
+                    <div>
+                      <strong>{assetTotal.toLocaleString()} 张</strong>
+                      <span>
+                        {activeFilterCount ? `已应用 ${activeFilterCount} 项筛选` : "全部图片"}
+                      </span>
+                    </div>
+                    <div>
+                      {activeFilterCount ? (
+                        <button type="button" onClick={() => updateFilter(emptyAssetFilter)}>
+                          清除筛选
+                        </button>
+                      ) : null}
+                      <label className="group-toggle">
+                        <input
+                          type="checkbox"
+                          checked={groupBySemantic}
+                          onChange={(event) => setGroupBySemantic(event.target.checked)}
+                        />
+                        按主要语义标签分组
+                      </label>
+                    </div>
+                  </div>
+                  {loading && assets.length === 0 ? (
+                    <GridLoading />
+                  ) : viewMode === "single" ? (
+                    <SinglePreview
+                      assets={assets}
+                      selected={selectedAsset}
+                      onSelect={selectAsset}
+                    />
+                  ) : assets.length ? (
+                    <GridWorkspace
+                      assets={assets}
+                      selected={selectedAsset}
+                      grouped={groupBySemantic}
+                      onSelect={selectAsset}
+                      markedIds={selectedAssetIds}
+                      onToggleMarked={toggleMarkedAsset}
+                    />
+                  ) : (
+                    <section className="library-empty">
+                      <SingleImageIcon width="28" height="28" />
+                      <h2>没有符合条件的图片</h2>
+                      <p>
+                        {activeFilterCount
+                          ? "调整或清除组合筛选后重试。"
+                          : "重新扫描目录，或导入包含 JPEG、PNG、WebP 的文件夹。"}
+                      </p>
+                    </section>
+                  )}
+                  {totalPages > 1 ? (
+                    <nav className="pagination" aria-label="图库分页">
+                      <button
+                        type="button"
+                        disabled={page <= 1}
+                        onClick={() => setPage((value) => Math.max(1, value - 1))}
+                      >
+                        上一页
+                      </button>
+                      <span>
+                        {page} / {totalPages}
+                      </span>
+                      <button
+                        type="button"
+                        disabled={page >= totalPages}
+                        onClick={() => setPage((value) => Math.min(totalPages, value + 1))}
+                      >
+                        下一页
+                      </button>
+                    </nav>
+                  ) : null}
+                </>
+              ) : !loading ? (
+                <section className="welcome-state">
+                  <LibraryIcon width="30" height="30" />
+                  <div>
+                    <small>本地优先图片工作台</small>
+                    <h1>建立本地图片库</h1>
+                    <p>
+                      递归索引、生成私有缩略图，并在本机完成影调、色彩和真实语义分析。浏览过程不会修改原始图片。
+                    </p>
+                    <button
+                      className="primary-action"
+                      type="button"
+                      onClick={() => void importFolder()}
+                    >
+                      <ImportIcon width="16" height="16" />
+                      导入图片文件夹
+                    </button>
+                    <span>JPEG · PNG · WebP · 支持 Unicode 路径</span>
+                  </div>
+                </section>
+              ) : null}
+            </main>
+
+            <DetailPanel
+              asset={selectedAsset}
+              collapsed={rightCollapsed}
+              semanticStatus={semanticStatus}
+              onToggle={() => setRightCollapsed((value) => !value)}
+              onReanalyze={(asset) => void analyzeOne(asset)}
+            />
+          </>
+        )}
       </div>
     </div>
   );
@@ -586,11 +636,15 @@ function GridWorkspace({
   selected,
   grouped,
   onSelect,
+  markedIds,
+  onToggleMarked,
 }: {
   assets: AssetListItem[];
   selected: AssetListItem | null;
   grouped: boolean;
   onSelect: (asset: AssetListItem) => void;
+  markedIds: number[];
+  onToggleMarked: (asset: AssetListItem) => void;
 }) {
   if (!grouped)
     return (
@@ -601,6 +655,8 @@ function GridWorkspace({
             asset={asset}
             selected={selected?.id === asset.id}
             onSelect={onSelect}
+            marked={markedIds.includes(asset.id)}
+            onToggleMarked={onToggleMarked}
           />
         ))}
       </section>
@@ -631,6 +687,8 @@ function GridWorkspace({
                   asset={asset}
                   selected={selected?.id === asset.id}
                   onSelect={onSelect}
+                  marked={markedIds.includes(asset.id)}
+                  onToggleMarked={onToggleMarked}
                 />
               ))}
             </div>

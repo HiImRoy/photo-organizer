@@ -37,6 +37,7 @@ model-downloads/
 *.onnx.tmp
 benchmark-output/
 benchmark-reports/
+output/playwright/
 
 # Local installer output outside Tauri target
 *.msi

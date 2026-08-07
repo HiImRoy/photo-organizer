@@ -4,6 +4,7 @@ pub mod imaging;
 #[cfg(feature = "desktop")]
 pub mod ipc;
 pub mod models;
+pub mod organization;
 pub mod paths;
 pub mod scanner;
 pub mod semantic;
@@ -73,6 +74,12 @@ pub fn run() {
             ipc::pause_semantic_analysis,
             ipc::resume_semantic_analysis,
             ipc::cancel_semantic_analysis,
+            ipc::validate_organization_rules,
+            ipc::preview_organization_plan,
+            ipc::get_organization_plan,
+            ipc::list_organization_issues,
+            ipc::export_organization_manifest,
+            ipc::discard_organization_plan,
         ])
         .run(tauri::generate_context!())
         .expect("failed to run PhotoOrganizer");
