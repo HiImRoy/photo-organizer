@@ -3,6 +3,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use base64::Engine;
+use image::codecs::jpeg::JpegEncoder;
+use image::imageops::FilterType;
 use parking_lot::RwLock;
 use tauri::{Emitter, State};
 
@@ -156,6 +158,75 @@ pub fn cancel_scan(
 #[tauri::command]
 pub fn get_thumbnail_data_url(asset_id: i64, state: State<'_, AppState>) -> Result<String, String> {
     load_thumbnail_data_url(&state.repository, &state.paths.thumbnail_dir, asset_id)
+        .map_err(ipc_error)
+}
+
+#[tauri::command]
+pub fn get_preview_data_url(
+    asset_id: i64,
+    tier: Option<String>,
+    max_width: Option<u32>,
+    max_height: Option<u32>,
+    state: State<'_, AppState>,
+) -> Result<String, String> {
+    load_preview_data_url(
+        &state.repository,
+        &state.paths,
+        asset_id,
+        tier.as_deref().unwrap_or("screen"),
+        max_width.unwrap_or(2560).clamp(640, 4096),
+        max_height.unwrap_or(1600).clamp(480, 4096),
+    )
+    .map_err(ipc_error)
+}
+
+#[tauri::command]
+pub fn remove_library(library_id: i64, state: State<'_, AppState>) -> Result<bool, String> {
+    let cache_entries = state
+        .repository
+        .library_cache_entries(library_id)
+        .map_err(ipc_error)?;
+    let jobs = state
+        .repository
+        .active_job_ids_for_library(library_id)
+        .map_err(ipc_error)?;
+    for (job_id, job_type) in jobs {
+        if job_type == "scan_and_basic_analysis" {
+            state.tasks.cancel(&job_id);
+            let _ = state.repository.cancel_scan(&job_id, library_id);
+        } else {
+            state.semantic_tasks.cancel(&job_id);
+            let _ = state.repository.cancel_semantic_job(&job_id);
+        }
+    }
+
+    let removed = state
+        .repository
+        .remove_library(library_id)
+        .map_err(ipc_error)?;
+    if removed {
+        for (asset_id, fingerprint, thumbnail_path) in cache_entries {
+            if let Some(path) = thumbnail_path {
+                remove_cache_file_if_safe(&state.paths.thumbnail_dir, &path);
+            }
+            remove_cache_entries(
+                &state.paths.preview_dir,
+                &format!("{asset_id}-{fingerprint}-"),
+            );
+        }
+    }
+    Ok(removed)
+}
+
+#[tauri::command]
+pub fn open_library_in_explorer(root_path: String) -> Result<(), String> {
+    if !Path::new(&root_path).is_dir() {
+        return Err("原始目录不可访问".into());
+    }
+    std::process::Command::new("explorer.exe")
+        .arg(&root_path)
+        .spawn()
+        .map(|_| ())
         .map_err(ipc_error)
 }
 
@@ -531,6 +602,101 @@ fn load_thumbnail_data_url(
         "data:image/jpeg;base64,{}",
         base64::engine::general_purpose::STANDARD.encode(bytes)
     ))
+}
+
+fn load_preview_data_url(
+    repository: &Repository,
+    paths: &AppPaths,
+    asset_id: i64,
+    tier: &str,
+    max_width: u32,
+    max_height: u32,
+) -> AppResult<String> {
+    let (source_path, fingerprint) = repository.asset_source(asset_id)?;
+    let source = source_path.canonicalize()?;
+    let metadata = fs::metadata(&source)?;
+    if !metadata.is_file() {
+        return Err(AppError::NotFound(format!("source for asset {asset_id}")));
+    }
+
+    if tier == "original" {
+        if metadata.len() > 96 * 1024 * 1024 {
+            return Err(AppError::InvalidArgument(
+                "original preview exceeds the 96 MiB IPC safety limit".into(),
+            ));
+        }
+        let bytes = fs::read(&source)?;
+        return Ok(format!(
+            "{}{}",
+            mime_for_path(&source),
+            base64::engine::general_purpose::STANDARD.encode(bytes)
+        ));
+    }
+
+    let cache_name = format!("{asset_id}-{fingerprint}-{}-{}.jpg", max_width, max_height);
+    let cache_path = paths.preview_dir.join(cache_name);
+    let bytes = if cache_path.is_file() {
+        fs::read(&cache_path)?
+    } else {
+        let image = crate::imaging::load_oriented_image(&source)?;
+        let preview = image.resize(max_width, max_height, FilterType::Lanczos3);
+        let mut encoded = Vec::new();
+        JpegEncoder::new_with_quality(&mut encoded, 91).encode_image(&preview)?;
+        let temp_path = cache_path.with_extension("tmp");
+        fs::write(&temp_path, &encoded)?;
+        match fs::rename(&temp_path, &cache_path) {
+            Ok(()) => encoded,
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                fs::read(&cache_path)?
+            }
+            Err(error) => return Err(AppError::Io(error)),
+        }
+    };
+    Ok(format!(
+        "data:image/jpeg;base64,{}",
+        base64::engine::general_purpose::STANDARD.encode(bytes)
+    ))
+}
+
+fn mime_for_path(path: &Path) -> &'static str {
+    match path
+        .extension()
+        .and_then(|value| value.to_str())
+        .map(|value| value.to_ascii_lowercase())
+        .as_deref()
+    {
+        Some("png") => "data:image/png;base64,",
+        Some("webp") => "data:image/webp;base64,",
+        _ => "data:image/jpeg;base64,",
+    }
+}
+
+fn remove_cache_entries(directory: &Path, prefix: &str) {
+    let Ok(entries) = fs::read_dir(directory) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let matches = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.starts_with(prefix));
+        if matches {
+            let _ = fs::remove_file(path);
+        }
+    }
+}
+
+fn remove_cache_file_if_safe(root: &Path, path: &Path) {
+    let Ok(root) = canonical_or_absolute(root) else {
+        return;
+    };
+    let Ok(target) = canonical_or_absolute(path) else {
+        return;
+    };
+    if target.starts_with(&root) {
+        let _ = fs::remove_file(target);
+    }
 }
 
 fn canonical_or_absolute(path: &Path) -> AppResult<PathBuf> {

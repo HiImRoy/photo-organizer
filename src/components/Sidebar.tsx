@@ -21,6 +21,10 @@ interface SidebarProps {
   semanticStatus: SemanticRuntimeStatus | null;
   onToggle: () => void;
   onSelectLibrary: (id: number) => void;
+  onRescanLibrary: (library: LibrarySummary) => void;
+  onOpenLibrary: (library: LibrarySummary) => void;
+  onShowLibraryInfo: (library: LibrarySummary) => void;
+  onRemoveLibrary: (library: LibrarySummary) => void;
   onFilterChange: (filter: AssetFilter) => void;
 }
 
@@ -53,9 +57,14 @@ export function Sidebar(props: SidebarProps) {
     semanticStatus,
     onToggle,
     onSelectLibrary,
+    onRescanLibrary,
+    onOpenLibrary,
+    onShowLibraryInfo,
+    onRemoveLibrary,
     onFilterChange,
   } = props;
   const [expandedFolders, setExpandedFolders] = useState<Set<string>>(new Set());
+  const [openLibraryMenuId, setOpenLibraryMenuId] = useState<number | null>(null);
   const folderTree = useMemo(() => buildFolderTree(folders), [folders]);
   const selectedLibrary = libraries.find((library) => library.id === selectedLibraryId) ?? null;
 
@@ -82,19 +91,83 @@ export function Sidebar(props: SidebarProps) {
 
       <PanelSection title="图库">
         <div className="nav-list">
-          {libraries.map((library) => (
-            <button
-              type="button"
-              className={library.id === selectedLibraryId ? "nav-row is-active" : "nav-row"}
-              key={library.id}
-              onClick={() => onSelectLibrary(library.id)}
-              title={library.rootPath}
-            >
-              <LibraryIcon width="15" height="15" />
-              <span>{library.rootPath.split(/[\\/]/).at(-1) || library.rootPath}</span>
-              <small>{library.presentCount}</small>
-            </button>
-          ))}
+          {libraries.map((library) => {
+            const label = library.rootPath.split(/[\\/]/).at(-1) || library.rootPath;
+            const menuOpen = openLibraryMenuId === library.id;
+            return (
+              <div
+                className="library-nav-row"
+                key={library.id}
+                onContextMenu={(event) => {
+                  event.preventDefault();
+                  setOpenLibraryMenuId(library.id);
+                }}
+              >
+                <button
+                  type="button"
+                  className={library.id === selectedLibraryId ? "nav-row is-active" : "nav-row"}
+                  onClick={() => onSelectLibrary(library.id)}
+                  title={library.rootPath}
+                >
+                  <LibraryIcon width="15" height="15" />
+                  <span>{library.status === "unavailable" ? "位置不可用" : label}</span>
+                  <small>{library.presentCount}</small>
+                </button>
+                <button
+                  type="button"
+                  className="library-menu-trigger"
+                  aria-label={`${label}图库菜单`}
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    setOpenLibraryMenuId(menuOpen ? null : library.id);
+                  }}
+                >
+                  …
+                </button>
+                {menuOpen ? (
+                  <div className="library-context-menu" role="menu">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setOpenLibraryMenuId(null);
+                        onRescanLibrary(library);
+                      }}
+                    >
+                      重新扫描
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setOpenLibraryMenuId(null);
+                        onOpenLibrary(library);
+                      }}
+                    >
+                      在资源管理器中显示
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setOpenLibraryMenuId(null);
+                        onShowLibraryInfo(library);
+                      }}
+                    >
+                      图库信息
+                    </button>
+                    <button
+                      type="button"
+                      className="danger-action"
+                      onClick={() => {
+                        setOpenLibraryMenuId(null);
+                        onRemoveLibrary(library);
+                      }}
+                    >
+                      从资料库移除
+                    </button>
+                  </div>
+                ) : null}
+              </div>
+            );
+          })}
         </div>
       </PanelSection>
 

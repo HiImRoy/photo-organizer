@@ -194,6 +194,31 @@ export async function fetchThumbnail(assetId: number): Promise<string> {
   return invoke<string>("get_thumbnail_data_url", { assetId });
 }
 
+export async function fetchPreview(
+  assetId: number,
+  tier: "screen" | "original" = "screen",
+  maxWidth = 2560,
+  maxHeight = 1600,
+): Promise<string> {
+  if (!desktopRuntime) return fetchThumbnail(assetId);
+  return invoke<string>("get_preview_data_url", {
+    assetId,
+    tier,
+    maxWidth,
+    maxHeight,
+  });
+}
+
+export async function removeLibrary(libraryId: number): Promise<boolean> {
+  if (!desktopRuntime) return false;
+  return invoke<boolean>("remove_library", { libraryId });
+}
+
+export async function openLibraryInExplorer(rootPath: string): Promise<void> {
+  if (!desktopRuntime) return;
+  await invoke("open_library_in_explorer", { rootPath });
+}
+
 export async function fetchSemanticStatus(): Promise<SemanticRuntimeStatus> {
   const visual = await getVisualFixture();
   if (visual) return visual.fixture.semanticStatus;

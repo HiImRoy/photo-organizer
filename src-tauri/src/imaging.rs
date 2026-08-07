@@ -12,6 +12,7 @@ use crate::models::{BasicImageFeatures, ExifMetadata, ProcessedImage};
 
 pub const THUMBNAIL_SPEC: &str = "grid-320-v1";
 pub const ANALYSIS_VERSION: &str = "basic-color-v2";
+pub const SCREEN_PREVIEW_SPEC: &str = "screen-2560-v1";
 
 pub fn process_image(
     source_path: &Path,
@@ -38,6 +39,17 @@ pub fn process_image(
         thumbnail_path: path_to_string(&thumbnail_path),
         features,
     })
+}
+
+/// Decode a source image with the same EXIF orientation used by thumbnails.
+/// The returned image is kept in the caller so the desktop IPC layer can
+/// choose an appropriate preview tier without ever modifying the source.
+pub fn load_oriented_image(source_path: &Path) -> AppResult<DynamicImage> {
+    let exif = read_exif(source_path);
+    let decoded = image::ImageReader::open(source_path)?
+        .with_guessed_format()?
+        .decode()?;
+    Ok(apply_orientation(decoded, exif.orientation))
 }
 
 fn write_thumbnail_once(image: &DynamicImage, target: &Path) -> AppResult<()> {

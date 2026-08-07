@@ -21,7 +21,8 @@ Rust application core
 Application data directory             Tauri resources
   ├─ photo-organizer.sqlite3              ├─ model-int8.onnx
   ├─ thumbnails/                          ├─ tokenizer/config/licenses
-  └─ logs/                                └─ onnxruntime.dll + notices
+  ├─ previews/                             └─ onnxruntime.dll + notices
+  └─ logs/
 
 User-selected source directory: read-only during scan and analysis
 ```
@@ -36,6 +37,8 @@ User-selected source directory: read-only during scan and analysis
 - `semantic_tasks.rs`：单 worker 后台分析、单项失败隔离、进度和终态。
 - `tasks.rs`：扫描取消 token 与语义暂停/继续/取消控制器。
 - `ipc.rs`：唯一暴露给 UI 的命令；模型状态只报告实际启用的 provider。
+- 高清预览通过 `get_preview_data_url(asset_id, tier)` 受控读取：screen tier 以 EXIF 方向解码并缓存约 2560px JPEG，original tier 只为当前查看器临时读取原图；两者都不写入源目录。
+- `remove_library(library_id)` 先取消该图库的活动任务，再用 SQLite 外键事务清理索引、分析、任务和计划，并按数据库登记路径清理应用 cache；它不调用源目录删除、移动或重命名。
 - `migrations/`：只增不改、随二进制嵌入的 SQLite schema。
 
 ## 扫描与语义数据流
@@ -59,6 +62,8 @@ User-selected source directory: read-only during scan and analysis
 - 没有删除、移动、重命名、覆盖或写回 EXIF/XMP 的命令。
 - 缩略图、SQLite、日志、模型和 embedding 均不写入源图库。
 - 缩略图读取必须来自数据库登记并位于应用 cache root 的规范路径。
+- 预览读取只能通过 asset id 找到数据库登记的源路径；screen 预览缓存位于应用数据目录，图片切换用 generation token 忽略旧请求。
+- “从资料库移除”只删除应用索引和 cache，源目录、原始图片和 EXIF/XMP 保持不变。
 - 模型缺失、哈希失败或 session 初始化失败只禁用语义分析；不会产生占位标签。
 - 扫描和语义任务使用独立注册器；语义保持单 worker，避免阻塞浏览和占满 CPU。
 - 测试只使用仓库夹具或临时目录，并对源文件做前后哈希验证。

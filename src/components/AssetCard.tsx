@@ -7,15 +7,24 @@ import { Thumbnail } from "./Thumbnail";
 
 interface AssetCardProps {
   asset: AssetListItem;
+  active: boolean;
   selected: boolean;
   onSelect: (
     asset: AssetListItem,
     modifiers?: { ctrlKey?: boolean; metaKey?: boolean; shiftKey?: boolean },
   ) => void;
+  onToggleSelection: (asset: AssetListItem) => void;
   onOpen?: (asset: AssetListItem) => void;
 }
 
-export function AssetCard({ asset, selected, onSelect, onOpen }: AssetCardProps) {
+export function AssetCard({
+  asset,
+  active,
+  selected,
+  onSelect,
+  onToggleSelection,
+  onOpen,
+}: AssetCardProps) {
   const clickTimer = useRef<number | null>(null);
   useEffect(
     () => () => {
@@ -25,7 +34,19 @@ export function AssetCard({ asset, selected, onSelect, onOpen }: AssetCardProps)
   );
 
   return (
-    <div className="asset-card-shell">
+    <div className={`asset-card-shell${active ? " is-active" : ""}`}>
+      <button
+        type="button"
+        className={`asset-check${selected ? " is-selected" : ""}`}
+        onClick={(event) => {
+          event.stopPropagation();
+          onToggleSelection(asset);
+        }}
+        aria-label={selected ? `取消选择 ${asset.fileName}` : `选择 ${asset.fileName}`}
+        aria-pressed={selected}
+      >
+        {selected ? <CheckIcon width="14" height="14" /> : null}
+      </button>
       <button
         type="button"
         className={`asset-card${selected ? " is-selected" : ""}`}
@@ -48,17 +69,12 @@ export function AssetCard({ asset, selected, onSelect, onOpen }: AssetCardProps)
           clickTimer.current = null;
           onOpen?.(asset);
         }}
-        aria-pressed={selected}
-        aria-label={`${asset.fileName}${selected ? "，已选中" : ""}`}
+        aria-pressed={active}
+        aria-label={`${asset.fileName}${active ? "，当前图片" : ""}`}
         title={asset.fileName}
       >
         <div className="asset-image-wrap">
           <Thumbnail asset={asset} />
-          {selected ? (
-            <span className="asset-selection" aria-hidden="true">
-              <CheckIcon width="14" height="14" />
-            </span>
-          ) : null}
           {asset.fileStatus === "missing" ? <span className="asset-alert">源文件缺失</span> : null}
           {asset.analysisStatus === "failed" ? <span className="asset-alert">分析失败</span> : null}
         </div>

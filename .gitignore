@@ -38,6 +38,7 @@ model-downloads/
 benchmark-output/
 benchmark-reports/
 output/playwright/
+release-artifacts/
 
 # Local installer output outside Tauri target
 *.msi

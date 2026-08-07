@@ -12,6 +12,9 @@ const api = vi.hoisted(() => ({
   startLibraryScan: vi.fn(),
   cancelLibraryScan: vi.fn(),
   fetchThumbnail: vi.fn(),
+  fetchPreview: vi.fn(),
+  removeLibrary: vi.fn(),
+  openLibraryInExplorer: vi.fn(),
   fetchSemanticStatus: vi.fn(),
   prepareSemanticModel: vi.fn(),
   fetchSemanticCatalog: vi.fn(),
@@ -117,6 +120,9 @@ beforeEach(() => {
   api.startLibraryScan.mockResolvedValue({ taskId: "task-1" });
   api.cancelLibraryScan.mockResolvedValue({ taskId: "task-1", accepted: true });
   api.fetchThumbnail.mockResolvedValue("data:image/jpeg;base64,ZmFrZQ==");
+  api.fetchPreview.mockResolvedValue("data:image/jpeg;base64,ZmFrZQ==");
+  api.removeLibrary.mockResolvedValue(true);
+  api.openLibraryInExplorer.mockResolvedValue(undefined);
   api.fetchSemanticStatus.mockResolvedValue({
     status: "model_unavailable",
     message: "not installed",
@@ -277,19 +283,39 @@ describe("PhotoOrganizer application shell", () => {
     const second = screen.getByRole("button", { name: "海边.png" });
     await user.click(first);
     await waitFor(() => expect(first).toHaveAttribute("aria-pressed", "true"));
+    await user.click(screen.getByRole("button", { name: "选择 晚霞.png" }));
     fireEvent.click(second, { ctrlKey: true });
     expect(await screen.findByText("已选择 2 张")).toBeInTheDocument();
-    fireEvent.click(first);
+    fireEvent.click(first, { ctrlKey: true });
     await waitFor(() => expect(screen.getByText("已选择 1 张")).toBeInTheDocument());
     fireEvent.click(second, { shiftKey: true });
     expect(await screen.findByText("已选择 2 张")).toBeInTheDocument();
-    await user.click(screen.getByLabelText("图片网格"));
+    await user.click(screen.getAllByRole("button", { name: "清除选择" })[0]);
     expect(screen.queryByText("已选择 2 张")).not.toBeInTheDocument();
 
     await user.dblClick(first);
     expect(await screen.findByLabelText("胶片栏")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "100%" })).toBeInTheDocument();
+    await waitFor(() => expect(api.fetchPreview).toHaveBeenCalledWith(12, "screen"));
+    await user.click(screen.getByRole("button", { name: "海边.png" }));
+    await waitFor(() => expect(api.fetchPreview).toHaveBeenCalledWith(13, "screen"));
     await user.keyboard("{Escape}");
     expect(screen.getByLabelText("图片网格")).toBeInTheDocument();
+  });
+
+  it("removes a library through its menu without touching source files", async () => {
+    const user = userEvent.setup();
+    const confirm = vi.spyOn(window, "confirm").mockReturnValue(true);
+    api.fetchLibraries.mockResolvedValue([library]);
+    api.fetchAssets.mockResolvedValue({ items: [asset], total: 1, page: 1, pageSize: 200 });
+    render(<App />);
+
+    await screen.findByText("晚霞.png");
+    await user.click(screen.getByRole("button", { name: "中文 图库图库菜单" }));
+    await user.click(screen.getByRole("button", { name: "从资料库移除" }));
+
+    expect(api.removeLibrary).toHaveBeenCalledWith(7);
+    expect(confirm).toHaveBeenCalled();
+    confirm.mockRestore();
   });
 });

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import {
   cancelLibraryScan,
@@ -7,13 +7,16 @@ import {
   fetchAssets,
   fetchLibraries,
   fetchLibraryFolders,
+  fetchPreview,
   fetchSemanticCatalog,
   fetchSemanticGroups,
   fetchSemanticProgress,
   fetchSemanticStatus,
+  openLibraryInExplorer,
   pauseSemanticAnalysis,
   prepareSemanticModel,
   reanalyzeAsset,
+  removeLibrary,
   resumeSemanticAnalysis,
   startLibraryScan,
   startSemanticAnalysis,
@@ -78,13 +81,16 @@ const visualOrganizationMode =
 
 export default function App() {
   const [libraries, setLibraries] = useState<LibrarySummary[]>([]);
-  const [selectedLibraryId, setSelectedLibraryId] = useState<number | null>(null);
+  const [currentLibraryId, setCurrentLibraryId] = useState<number | null>(null);
   const [assets, setAssets] = useState<AssetListItem[]>([]);
   const [assetTotal, setAssetTotal] = useState(0);
   const [folders, setFolders] = useState<FolderSummary[]>([]);
   const [semanticGroups, setSemanticGroups] = useState<SemanticGroupSummary[]>([]);
   const [semanticCatalog, setSemanticCatalog] = useState<SemanticLabelDescriptor[]>([]);
-  const [selectedAsset, setSelectedAsset] = useState<AssetListItem | null>(null);
+  const [activeAssetId, setActiveAssetId] = useState<number | null>(null);
+  const [previewAssetId, setPreviewAssetId] = useState<number | null>(null);
+  const [selectionAnchorId, setSelectionAnchorId] = useState<number | null>(null);
+  const [pendingPreviewDirection, setPendingPreviewDirection] = useState<-1 | 1 | null>(null);
   const [sort, setSort] = useState<SortField>("capture_time");
   const [direction, setDirection] = useState<SortDirection>("desc");
   const [filter, setFilterState] = useState<AssetFilter>(emptyAssetFilter);
@@ -106,8 +112,16 @@ export default function App() {
   const [selectedAssetIds, setSelectedAssetIds] = useState<number[]>([]);
 
   const selectedLibrary = useMemo(
-    () => libraries.find((library) => library.id === selectedLibraryId) ?? null,
-    [libraries, selectedLibraryId],
+    () => libraries.find((library) => library.id === currentLibraryId) ?? null,
+    [libraries, currentLibraryId],
+  );
+  const activeAsset = useMemo(
+    () => assets.find((asset) => asset.id === activeAssetId) ?? null,
+    [activeAssetId, assets],
+  );
+  const previewAsset = useMemo(
+    () => assets.find((asset) => asset.id === previewAssetId) ?? null,
+    [assets, previewAssetId],
   );
   const totalPages = Math.max(1, Math.ceil(assetTotal / PAGE_SIZE));
   const scanRunning =
@@ -127,7 +141,7 @@ export default function App() {
         if (!active) return;
         if (libraryResult.status === "fulfilled") {
           setLibraries(libraryResult.value);
-          setSelectedLibraryId(libraryResult.value[0]?.id ?? null);
+          setCurrentLibraryId(libraryResult.value[0]?.id ?? null);
         } else {
           setError(messageFrom(libraryResult.reason));
         }
@@ -143,11 +157,11 @@ export default function App() {
 
   useEffect(() => {
     let active = true;
-    if (selectedLibraryId === null) {
+    if (currentLibraryId === null) {
       return undefined;
     }
     void fetchAssets({
-      libraryId: selectedLibraryId,
+      libraryId: currentLibraryId,
       sort,
       direction,
       page,
@@ -158,10 +172,20 @@ export default function App() {
         if (!active) return;
         setAssets(result.items);
         setAssetTotal(result.total);
-        setSelectedAsset((current) => {
-          const restored = current && result.items.find((item) => item.id === current.id);
-          return restored ?? (viewMode === "single" ? (result.items[0] ?? null) : null);
+        const fallbackId =
+          viewMode === "single"
+            ? ((pendingPreviewDirection === -1 ? result.items.at(-1)?.id : result.items[0]?.id) ??
+              null)
+            : null;
+        setActiveAssetId((current) => {
+          if (current && result.items.some((item) => item.id === current)) return current;
+          return fallbackId;
         });
+        setPreviewAssetId((current) => {
+          if (current && result.items.some((item) => item.id === current)) return current;
+          return fallbackId;
+        });
+        if (pendingPreviewDirection !== null) setPendingPreviewDirection(null);
       })
       .catch((reason: unknown) => {
         if (active) setError(messageFrom(reason));
@@ -172,16 +196,25 @@ export default function App() {
     return () => {
       active = false;
     };
-  }, [direction, filter, page, refreshKey, selectedLibraryId, sort, viewMode]);
+  }, [
+    direction,
+    filter,
+    page,
+    refreshKey,
+    currentLibraryId,
+    sort,
+    viewMode,
+    pendingPreviewDirection,
+  ]);
 
   useEffect(() => {
     let active = true;
-    if (selectedLibraryId === null) return undefined;
+    if (currentLibraryId === null) return undefined;
     void Promise.all([
       fetchLibraries(),
-      fetchLibraryFolders(selectedLibraryId),
-      fetchSemanticGroups(selectedLibraryId),
-      fetchSemanticProgress(selectedLibraryId),
+      fetchLibraryFolders(currentLibraryId),
+      fetchSemanticGroups(currentLibraryId),
+      fetchSemanticProgress(currentLibraryId),
     ])
       .then(([nextLibraries, nextFolders, nextGroups, progress]) => {
         if (!active) return;
@@ -196,7 +229,7 @@ export default function App() {
     return () => {
       active = false;
     };
-  }, [refreshKey, selectedLibraryId]);
+  }, [refreshKey, currentLibraryId]);
 
   useEffect(() => {
     let disposed = false;
@@ -205,7 +238,7 @@ export default function App() {
     void subscribeScanProgress((progress) => {
       if (disposed) return;
       setScanProgress(progress);
-      if (progress.libraryId !== null) setSelectedLibraryId(progress.libraryId);
+      if (progress.libraryId !== null) setCurrentLibraryId(progress.libraryId);
       if (
         progress.status !== "running" ||
         progress.processed === 1 ||
@@ -289,9 +322,9 @@ export default function App() {
         setSemanticStatus(status);
         return;
       }
-      if (selectedLibraryId === null) return;
-      const { jobId } = await startSemanticAnalysis(selectedLibraryId);
-      setSemanticProgress(pendingSemanticProgress(jobId, selectedLibraryId, semanticStatus));
+      if (currentLibraryId === null) return;
+      const { jobId } = await startSemanticAnalysis(currentLibraryId);
+      setSemanticProgress(pendingSemanticProgress(jobId, currentLibraryId, semanticStatus));
     } catch (reason) {
       setError(messageFrom(reason));
     }
@@ -348,8 +381,10 @@ export default function App() {
   }
 
   function selectLibrary(id: number) {
-    setSelectedLibraryId(id);
-    setSelectedAsset(null);
+    setCurrentLibraryId(id);
+    setActiveAssetId(null);
+    setPreviewAssetId(null);
+    setSelectionAnchorId(null);
     setSelectedAssetIds([]);
     setWorkspaceMode("library");
     setFilterState(emptyAssetFilter);
@@ -358,13 +393,17 @@ export default function App() {
 
   function changeView(next: ViewMode) {
     setViewMode(next);
-    if (next === "single" && !selectedAsset) setSelectedAsset(assets[0] ?? null);
+    if (next === "single") {
+      const nextAsset = activeAsset ?? assets[0] ?? null;
+      setActiveAssetId(nextAsset?.id ?? null);
+      setPreviewAssetId(nextAsset?.id ?? null);
+    }
   }
 
   function selectAsset(asset: AssetListItem, modifiers: SelectionModifiers = {}) {
-    setSelectedAsset(asset);
-    if (modifiers.shiftKey && selectedAsset) {
-      const anchorIndex = assets.findIndex((item) => item.id === selectedAsset.id);
+    setActiveAssetId(asset.id);
+    if (modifiers.shiftKey && selectionAnchorId !== null) {
+      const anchorIndex = assets.findIndex((item) => item.id === selectionAnchorId);
       const targetIndex = assets.findIndex((item) => item.id === asset.id);
       if (anchorIndex >= 0 && targetIndex >= 0) {
         const start = Math.min(anchorIndex, targetIndex);
@@ -374,6 +413,7 @@ export default function App() {
       }
     }
     if (modifiers.ctrlKey || modifiers.metaKey) {
+      setSelectionAnchorId(asset.id);
       setSelectedAssetIds((current) =>
         current.includes(asset.id)
           ? current.filter((id) => id !== asset.id)
@@ -381,7 +421,15 @@ export default function App() {
       );
       return;
     }
-    setSelectedAssetIds([asset.id]);
+    setSelectionAnchorId(asset.id);
+  }
+
+  function toggleAssetSelection(asset: AssetListItem) {
+    setActiveAssetId(asset.id);
+    setSelectionAnchorId(asset.id);
+    setSelectedAssetIds((current) =>
+      current.includes(asset.id) ? current.filter((id) => id !== asset.id) : [...current, asset.id],
+    );
   }
 
   function clearSelection() {
@@ -389,23 +437,97 @@ export default function App() {
   }
 
   function openSinglePreview(asset: AssetListItem) {
-    setSelectedAsset(asset);
+    setActiveAssetId(asset.id);
+    setPreviewAssetId(asset.id);
     setViewMode("single");
+  }
+
+  function selectPreview(asset: AssetListItem) {
+    setActiveAssetId(asset.id);
+    setPreviewAssetId(asset.id);
+  }
+
+  const navigatePreview = useCallback(
+    (delta: -1 | 1) => {
+      if (!previewAsset) return;
+      const index = assets.findIndex((asset) => asset.id === previewAsset.id);
+      const target = assets[index + delta];
+      if (target) {
+        selectPreview(target);
+        return;
+      }
+      const nextPage = page + delta;
+      if (nextPage >= 1 && nextPage <= totalPages) {
+        setPendingPreviewDirection(delta);
+        setPage(nextPage);
+      }
+    },
+    [assets, page, previewAsset, totalPages],
+  );
+
+  async function removeLibraryById(library: LibrarySummary) {
+    const confirmed = window.confirm(
+      "从 PhotoOrganizer 中移除此图库？\n\n这只会移除 PhotoOrganizer 中的索引、缩略图和分析结果，不会删除或修改磁盘中的任何原始图片。",
+    );
+    if (!confirmed) return;
+    try {
+      await removeLibrary(library.id);
+      const remaining = libraries.filter((item) => item.id !== library.id);
+      setLibraries(remaining);
+      if (currentLibraryId === library.id) {
+        setCurrentLibraryId(remaining[0]?.id ?? null);
+        setActiveAssetId(null);
+        setPreviewAssetId(null);
+        setSelectedAssetIds([]);
+        setSelectionAnchorId(null);
+        setPage(1);
+      }
+    } catch (reason) {
+      setError(messageFrom(reason));
+    }
+  }
+
+  async function rescanLibrary(library: LibrarySummary) {
+    try {
+      const result = await startLibraryScan(library.rootPath);
+      setScanProgress({
+        taskId: result.taskId,
+        libraryId: library.id,
+        status: "running",
+        stage: "preparing",
+        discovered: 0,
+        processed: 0,
+        succeeded: 0,
+        failed: 0,
+        skipped: 0,
+        missing: 0,
+        currentPath: library.rootPath,
+        error: null,
+      });
+    } catch (reason) {
+      setError(messageFrom(reason));
+    }
   }
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key === "Escape") {
         if (viewMode === "single") setViewMode("grid");
-        clearSelection();
-      } else if (event.key === "Enter" && selectedAsset && viewMode === "grid") {
+        else clearSelection();
+      } else if (event.key === "ArrowLeft" && viewMode === "single") {
         event.preventDefault();
-        openSinglePreview(selectedAsset);
+        navigatePreview(-1);
+      } else if (event.key === "ArrowRight" && viewMode === "single") {
+        event.preventDefault();
+        navigatePreview(1);
+      } else if (event.key === "Enter" && activeAsset && viewMode === "grid") {
+        event.preventDefault();
+        openSinglePreview(activeAsset);
       }
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [selectedAsset, viewMode]);
+  }, [activeAsset, navigatePreview, previewAsset, viewMode]);
 
   return (
     <div
@@ -511,7 +633,7 @@ export default function App() {
             disabled={!selectedLibrary || semanticRunning}
           >
             <PlayIcon width="14" height="14" />
-            {semanticStatus?.status === "ready" ? "分析全部" : "准备模型"}
+            {semanticStatus?.status === "ready" ? "分析未完成" : "准备模型"}
           </button>
           {selectedAssetIds.length > 0 ? (
             <>
@@ -559,7 +681,7 @@ export default function App() {
             <Sidebar
               collapsed={leftCollapsed}
               libraries={libraries}
-              selectedLibraryId={selectedLibraryId}
+              selectedLibraryId={currentLibraryId}
               folders={folders}
               groups={semanticGroups}
               catalog={semanticCatalog}
@@ -567,6 +689,18 @@ export default function App() {
               semanticStatus={semanticStatus}
               onToggle={() => setLeftCollapsed((value) => !value)}
               onSelectLibrary={selectLibrary}
+              onRescanLibrary={(library) => void rescanLibrary(library)}
+              onOpenLibrary={(library) =>
+                void openLibraryInExplorer(library.rootPath).catch((reason) =>
+                  setError(messageFrom(reason)),
+                )
+              }
+              onShowLibraryInfo={(library) =>
+                window.alert(
+                  `${library.rootPath}\n\n图片：${library.presentCount}\n缺失：${library.missingCount}`,
+                )
+              }
+              onRemoveLibrary={(library) => void removeLibraryById(library)}
               onFilterChange={updateFilter}
             />
 
@@ -639,16 +773,17 @@ export default function App() {
                   ) : viewMode === "single" ? (
                     <SinglePreview
                       assets={assets}
-                      selected={selectedAsset}
-                      onSelect={selectAsset}
-                      onClose={() => setViewMode("grid")}
+                      selected={previewAsset}
+                      onSelect={selectPreview}
                     />
                   ) : assets.length ? (
                     <GridWorkspace
                       assets={assets}
-                      selected={selectedAsset}
+                      active={activeAsset}
+                      selectedAssetIds={selectedAssetIds}
                       grouped={groupBySemantic}
                       onSelect={selectAsset}
+                      onToggleSelection={toggleAssetSelection}
                       onOpen={openSinglePreview}
                       onClearSelection={clearSelection}
                     />
@@ -709,7 +844,7 @@ export default function App() {
             </main>
 
             <DetailPanel
-              asset={selectedAsset}
+              asset={activeAsset}
               collapsed={rightCollapsed}
               semanticStatus={semanticStatus}
               onToggle={() => setRightCollapsed((value) => !value)}
@@ -724,16 +859,20 @@ export default function App() {
 
 function GridWorkspace({
   assets,
-  selected,
+  active,
+  selectedAssetIds,
   grouped,
   onSelect,
+  onToggleSelection,
   onOpen,
   onClearSelection,
 }: {
   assets: AssetListItem[];
-  selected: AssetListItem | null;
+  active: AssetListItem | null;
+  selectedAssetIds: number[];
   grouped: boolean;
   onSelect: (asset: AssetListItem, modifiers?: SelectionModifiers) => void;
+  onToggleSelection: (asset: AssetListItem) => void;
   onOpen: (asset: AssetListItem) => void;
   onClearSelection: () => void;
 }) {
@@ -750,8 +889,10 @@ function GridWorkspace({
           <AssetCard
             key={asset.id}
             asset={asset}
-            selected={selected?.id === asset.id}
+            active={active?.id === asset.id}
+            selected={selectedAssetIds.includes(asset.id)}
             onSelect={onSelect}
+            onToggleSelection={onToggleSelection}
             onOpen={onOpen}
           />
         ))}
@@ -786,8 +927,10 @@ function GridWorkspace({
                 <AssetCard
                   key={asset.id}
                   asset={asset}
-                  selected={selected?.id === asset.id}
+                  active={active?.id === asset.id}
+                  selected={selectedAssetIds.includes(asset.id)}
                   onSelect={onSelect}
+                  onToggleSelection={onToggleSelection}
                   onOpen={onOpen}
                 />
               ))}
@@ -803,17 +946,15 @@ function SinglePreview({
   assets,
   selected,
   onSelect,
-  onClose,
 }: {
   assets: AssetListItem[];
   selected: AssetListItem | null;
-  onSelect: (asset: AssetListItem, modifiers?: SelectionModifiers) => void;
-  onClose: () => void;
+  onSelect: (asset: AssetListItem) => void;
 }) {
   return (
     <section className="single-workspace">
       {selected ? (
-        <ZoomablePreview asset={selected} onClose={onClose} />
+        <ZoomablePreview key={selected.id} asset={selected} />
       ) : (
         <div className="single-empty">没有可预览的图片</div>
       )}
@@ -823,13 +964,16 @@ function SinglePreview({
             type="button"
             key={asset.id}
             className={selected?.id === asset.id ? "is-active" : ""}
-            onClick={(event) =>
-              onSelect(asset, {
-                ctrlKey: event.ctrlKey,
-                metaKey: event.metaKey,
-                shiftKey: event.shiftKey,
-              })
-            }
+            ref={(element) => {
+              if (
+                element &&
+                selected?.id === asset.id &&
+                typeof element.scrollIntoView === "function"
+              ) {
+                element.scrollIntoView({ block: "nearest", inline: "center" });
+              }
+            }}
+            onClick={() => onSelect(asset)}
             aria-label={asset.fileName}
           >
             <Thumbnail asset={asset} />
@@ -840,70 +984,218 @@ function SinglePreview({
   );
 }
 
-function ZoomablePreview({ asset, onClose }: { asset: AssetListItem; onClose: () => void }) {
-  const [zoom, setZoom] = useState(1);
+function ZoomablePreview({ asset }: { asset: AssetListItem }) {
+  const stageRef = useRef<HTMLDivElement | null>(null);
+  const [screenSource, setScreenSource] = useState<string | null>(null);
+  const [originalSource, setOriginalSource] = useState<string | null>(null);
+  const [loadState, setLoadState] = useState<"loading" | "loaded" | "error">("loading");
+  const [originalState, setOriginalState] = useState<"idle" | "loading" | "loaded" | "error">(
+    "idle",
+  );
+  const [naturalSize, setNaturalSize] = useState({
+    width: asset.width ?? 1,
+    height: asset.height ?? 1,
+  });
+  const [fitScale, setFitScale] = useState(1);
+  const [zoom, setZoom] = useState<number | "fit">("fit");
   const [offset, setOffset] = useState({ x: 0, y: 0 });
   const [dragging, setDragging] = useState(false);
   const [dragStart, setDragStart] = useState({ x: 0, y: 0 });
+  const generation = useRef(0);
 
-  function reset(nextZoom = 1) {
-    setZoom(nextZoom);
-    setOffset({ x: 0, y: 0 });
+  useEffect(() => {
+    const requestGeneration = ++generation.current;
+    void fetchPreview(asset.id, "screen")
+      .then((value) => {
+        if (generation.current !== requestGeneration) return;
+        setScreenSource(value);
+        setLoadState("loaded");
+      })
+      .catch(() => {
+        if (generation.current === requestGeneration) setLoadState("error");
+      });
+    return () => {
+      generation.current += 1;
+    };
+  }, [asset.id, asset.height, asset.width]);
+
+  useEffect(() => {
+    const stage = stageRef.current;
+    if (!stage) return undefined;
+    const updateFit = () => {
+      const rect = stage.getBoundingClientRect();
+      setFitScale(
+        Math.max(
+          0.05,
+          Math.min(
+            1,
+            (rect.width - 32) / naturalSize.width,
+            (rect.height - 32) / naturalSize.height,
+          ),
+        ),
+      );
+      if (zoom === "fit") setOffset({ x: 0, y: 0 });
+    };
+    updateFit();
+    if (typeof ResizeObserver === "undefined") return undefined;
+    const observer = new ResizeObserver(updateFit);
+    observer.observe(stage);
+    return () => observer.disconnect();
+  }, [naturalSize.height, naturalSize.width, zoom]);
+
+  function currentScale() {
+    return zoom === "fit" ? fitScale : zoom;
   }
+
+  function clamp(nextOffset: { x: number; y: number }, scale = currentScale()) {
+    const rect = stageRef.current?.getBoundingClientRect();
+    if (!rect) return nextOffset;
+    const maxX = Math.max(0, (naturalSize.width * scale - rect.width) / 2);
+    const maxY = Math.max(0, (naturalSize.height * scale - rect.height) / 2);
+    return {
+      x: Math.max(-maxX, Math.min(maxX, nextOffset.x)),
+      y: Math.max(-maxY, Math.min(maxY, nextOffset.y)),
+    };
+  }
+
+  function loadOriginalIfNeeded() {
+    if (originalSource || originalState === "loading" || originalState === "loaded") return;
+    const requestGeneration = generation.current;
+    setOriginalState("loading");
+    void fetchPreview(asset.id, "original")
+      .then((value) => {
+        if (generation.current !== requestGeneration) return;
+        setOriginalSource(value);
+        setOriginalState("loaded");
+      })
+      .catch(() => {
+        if (generation.current === requestGeneration) setOriginalState("error");
+      });
+  }
+
+  function setZoomLevel(next: number | "fit") {
+    setZoom(next);
+    setOffset({ x: 0, y: 0 });
+    if (next !== "fit" && next >= 1) loadOriginalIfNeeded();
+  }
+
+  const displayScale = currentScale();
+  const displaySource =
+    zoom !== "fit" && zoom >= 1 && originalSource ? originalSource : screenSource;
+  const zoomLabel =
+    zoom === "fit" ? `${Math.round(fitScale * 100)}% · 适应窗口` : `${Math.round(zoom * 100)}%`;
 
   return (
     <div className="single-canvas">
       <div className="preview-toolbar" aria-label="预览缩放工具">
-        <button type="button" onClick={() => setZoom((value) => Math.max(0.5, value - 0.25))}>
+        <button
+          type="button"
+          onClick={() => setZoomLevel(Math.max(0.25, (zoom === "fit" ? fitScale : zoom) - 0.25))}
+        >
           −
         </button>
-        <button type="button" onClick={() => reset(1)}>
+        <button type="button" onClick={() => setZoomLevel("fit")}>
           适应窗口
         </button>
-        <button type="button" onClick={() => reset(1)}>
+        <button type="button" onClick={() => setZoomLevel(1)}>
           100%
         </button>
-        <button type="button" onClick={() => reset(1)}>
-          重置
+        <button type="button" onClick={() => setZoomLevel(0.25)}>
+          25%
         </button>
-        <button type="button" onClick={() => setZoom((value) => Math.min(4, value + 0.25))}>
+        <button type="button" onClick={() => setZoomLevel(0.5)}>
+          50%
+        </button>
+        <button type="button" onClick={() => setZoomLevel(2)}>
+          200%
+        </button>
+        <button type="button" onClick={() => setZoomLevel(4)}>
+          400%
+        </button>
+        <button
+          type="button"
+          onClick={() => setZoomLevel(Math.min(4, (zoom === "fit" ? fitScale : zoom) + 0.25))}
+        >
           ＋
         </button>
-        <span>{Math.round(zoom * 100)}%</span>
+        <span>{zoomLabel}</span>
       </div>
       <div
+        ref={stageRef}
         className={`zoom-stage${dragging ? " is-dragging" : ""}`}
         onWheel={(event) => {
           event.preventDefault();
-          setZoom((value) => Math.max(0.5, Math.min(4, value + (event.deltaY < 0 ? 0.25 : -0.25))));
+          const oldScale = currentScale();
+          const nextScale = Math.max(
+            0.25,
+            Math.min(4, oldScale + (event.deltaY < 0 ? 0.25 : -0.25)),
+          );
+          const rect = event.currentTarget.getBoundingClientRect();
+          const pointer = {
+            x: event.clientX - (rect.left + rect.width / 2) - offset.x,
+            y: event.clientY - (rect.top + rect.height / 2) - offset.y,
+          };
+          const ratio = nextScale / oldScale;
+          setZoomLevel(nextScale);
+          setOffset(
+            clamp(
+              { x: offset.x - pointer.x * (ratio - 1), y: offset.y - pointer.y * (ratio - 1) },
+              nextScale,
+            ),
+          );
         }}
         onPointerDown={(event) => {
-          if (zoom <= 1) return;
+          if (displayScale <= fitScale) return;
           event.currentTarget.setPointerCapture(event.pointerId);
           setDragging(true);
           setDragStart({ x: event.clientX - offset.x, y: event.clientY - offset.y });
         }}
         onPointerMove={(event) => {
-          if (!dragging) return;
-          setOffset({ x: event.clientX - dragStart.x, y: event.clientY - dragStart.y });
+          if (dragging)
+            setOffset(clamp({ x: event.clientX - dragStart.x, y: event.clientY - dragStart.y }));
         }}
         onPointerUp={(event) => {
-          if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+          if (event.currentTarget.hasPointerCapture(event.pointerId))
             event.currentTarget.releasePointerCapture(event.pointerId);
-          }
           setDragging(false);
         }}
-        onDoubleClick={(event) => {
-          if (event.target instanceof HTMLImageElement) reset(zoom > 1 ? 1 : 2);
-          else onClose();
-        }}
+        onDoubleClick={() =>
+          setZoomLevel(zoom === "fit" || (typeof zoom === "number" && zoom < 1) ? 1 : "fit")
+        }
       >
-        <div
-          className="zoom-content"
-          style={{ transform: `translate3d(${offset.x}px, ${offset.y}px, 0) scale(${zoom})` }}
-        >
+        {screenSource ? (
+          <img
+            className="preview-image"
+            src={displaySource ?? screenSource}
+            alt={asset.fileName}
+            draggable={false}
+            style={{
+              width: `${naturalSize.width}px`,
+              height: `${naturalSize.height}px`,
+              transform: `translate3d(${offset.x}px, ${offset.y}px, 0) scale(${displayScale})`,
+            }}
+            onLoad={(event) =>
+              setNaturalSize({
+                width: event.currentTarget.naturalWidth,
+                height: event.currentTarget.naturalHeight,
+              })
+            }
+          />
+        ) : (
           <Thumbnail asset={asset} />
-        </div>
+        )}
+        {loadState === "loading" ? (
+          <span className="preview-loading">正在加载高清预览…</span>
+        ) : null}
+        {loadState === "error" ? (
+          <span className="preview-error">无法加载高清预览，请重试</span>
+        ) : null}
+        {originalState === "loading" ? (
+          <span className="preview-loading">正在加载原图…</span>
+        ) : null}
+        {originalState === "error" ? (
+          <span className="preview-error">原图加载失败，仍可使用屏幕预览</span>
+        ) : null}
       </div>
       <div className="single-caption">
         <strong>{asset.fileName}</strong>

@@ -575,6 +575,67 @@ impl Repository {
                 semantic_pending_count: row.get(8)?,
             })
         })?;
+        let mut libraries = rows
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(AppError::from)?;
+        for library in &mut libraries {
+            if library.status == "ready" && !Path::new(&library.root_path).is_dir() {
+                library.status = "unavailable".into();
+            }
+        }
+        Ok(libraries)
+    }
+
+    pub fn asset_source(&self, asset_id: i64) -> AppResult<(PathBuf, String)> {
+        let connection = self.open()?;
+        connection
+            .query_row(
+                "SELECT absolute_path, fingerprint FROM assets WHERE id=?1",
+                [asset_id],
+                |row| Ok((PathBuf::from(row.get::<_, String>(0)?), row.get(1)?)),
+            )
+            .map_err(AppError::from)
+    }
+
+    /// Remove only the indexed representation of a library. Foreign-key
+    /// cascades clear assets, thumbnails, semantic rows, jobs and plans; the
+    /// source directory is intentionally never opened or modified here.
+    pub fn remove_library(&self, library_id: i64) -> AppResult<bool> {
+        let connection = self.open()?;
+        let transaction = connection.unchecked_transaction()?;
+        let deleted = transaction.execute("DELETE FROM libraries WHERE id=?1", [library_id])?;
+        transaction.commit()?;
+        Ok(deleted > 0)
+    }
+
+    pub fn active_job_ids_for_library(&self, library_id: i64) -> AppResult<Vec<(String, String)>> {
+        let connection = self.open()?;
+        let mut statement = connection.prepare(
+            "SELECT id, job_type FROM analysis_jobs
+             WHERE library_id=?1 AND status IN ('queued','running','paused','cancelling')",
+        )?;
+        let rows = statement.query_map([library_id], |row| Ok((row.get(0)?, row.get(1)?)))?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(AppError::from)
+    }
+
+    pub fn library_cache_entries(
+        &self,
+        library_id: i64,
+    ) -> AppResult<Vec<(i64, String, Option<PathBuf>)>> {
+        let connection = self.open()?;
+        let mut statement = connection.prepare(
+            "SELECT a.id, a.fingerprint, t.cache_path
+             FROM assets a
+             LEFT JOIN thumbnails t ON t.asset_id=a.id
+             WHERE a.library_id=?1",
+        )?;
+        let rows = statement.query_map([library_id], |row| {
+            Ok((
+                row.get(0)?,
+                row.get(1)?,
+                row.get::<_, Option<String>>(2)?.map(PathBuf::from),
+            ))
+        })?;
         rows.collect::<Result<Vec<_>, _>>().map_err(AppError::from)
     }
 
@@ -1667,5 +1728,29 @@ mod tests {
         let libraries = reopened.list_libraries().expect("libraries");
         assert_eq!(libraries.len(), 1);
         assert_eq!(libraries[0].root_path, "C:\\synthetic 图库");
+    }
+
+    #[test]
+    fn removing_library_clears_index_but_not_source_directory() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let source = temp.path().join("图库 😀");
+        std::fs::create_dir_all(&source).expect("source dir");
+        let image = source.join("原图.png");
+        std::fs::write(&image, b"fixture source bytes").expect("source file");
+        let before = std::fs::read(&image).expect("read source");
+
+        let repository = Repository::new(temp.path().join("database.sqlite3"));
+        repository.initialize().expect("initialize");
+        let (library_id, _) = repository
+            .begin_scan(&source.to_string_lossy(), "remove-library-task")
+            .expect("begin scan");
+        repository
+            .cancel_scan("remove-library-task", library_id)
+            .expect("cancel scan");
+
+        assert!(repository.remove_library(library_id).expect("remove index"));
+        assert!(source.is_dir());
+        assert_eq!(std::fs::read(&image).expect("source after"), before);
+        assert!(repository.list_libraries().expect("libraries").is_empty());
     }
 }

@@ -8,6 +8,7 @@ pub struct AppPaths {
     pub data_dir: PathBuf,
     pub database_path: PathBuf,
     pub thumbnail_dir: PathBuf,
+    pub preview_dir: PathBuf,
     pub log_dir: PathBuf,
     pub semantic_model_dir: PathBuf,
     pub onnx_runtime_path: PathBuf,
@@ -27,6 +28,7 @@ impl AppPaths {
     ) -> AppResult<Self> {
         let data_dir = data_dir.as_ref().to_path_buf();
         let thumbnail_dir = data_dir.join("thumbnails");
+        let preview_dir = data_dir.join("previews");
         let log_dir = data_dir.join("logs");
         let resource_dir = resource_dir.as_ref();
         let packaged_root = if resource_dir.join("resources").is_dir() {
@@ -47,12 +49,14 @@ impl AppPaths {
         };
 
         fs::create_dir_all(&thumbnail_dir)?;
+        fs::create_dir_all(&preview_dir)?;
         fs::create_dir_all(&log_dir)?;
 
         Ok(Self {
             database_path: data_dir.join("photo-organizer.sqlite3"),
             data_dir,
             thumbnail_dir,
+            preview_dir,
             log_dir,
             semantic_model_dir: resource_root
                 .join("models")
