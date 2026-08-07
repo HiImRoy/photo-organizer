@@ -19,6 +19,7 @@ const api = vi.hoisted(() => ({
   fetchSemanticGroups: vi.fn(),
   fetchSemanticProgress: vi.fn(),
   startSemanticAnalysis: vi.fn(),
+  startSemanticAnalysisForAssets: vi.fn(),
   reanalyzeAsset: vi.fn(),
   pauseSemanticAnalysis: vi.fn(),
   resumeSemanticAnalysis: vi.fn(),
@@ -38,6 +39,7 @@ const library: LibrarySummary = {
   assetCount: 1,
   presentCount: 1,
   missingCount: 0,
+  semanticPendingCount: 0,
 };
 
 const asset: AssetListItem = {
@@ -69,9 +71,12 @@ const asset: AssetListItem = {
   contrast: 0.5,
   toneLabel: "balanced",
   saturation: 0.72,
+  chroma: 0.68,
   saturationLabel: "high",
   dominantColor: "#D76A52",
   dominantColorCategory: "orange",
+  neutralRatio: 0.12,
+  dominantColorCoverage: 0.72,
   semanticStatus: "completed",
   semanticError: null,
   semanticAnalyzedAt: "2026-08-06T10:00:00Z",
@@ -89,6 +94,16 @@ const asset: AssetListItem = {
       isPrimary: true,
     },
   ],
+};
+
+const secondAsset: AssetListItem = {
+  ...asset,
+  id: 13,
+  absolutePath: "C:\\fixtures\\中文 图库\\海边.png",
+  relativePath: "海边.png",
+  fileName: "海边.png",
+  dominantColor: "#3D78A2",
+  dominantColorCategory: "blue",
 };
 
 let progressListener: ((progress: ScanProgress) => void) | undefined;
@@ -185,7 +200,7 @@ describe("PhotoOrganizer application shell", () => {
     await user.click(assetButton);
 
     expect(screen.getByRole("complementary", { name: "图片详情" })).toBeInTheDocument();
-    expect(assetButton).toHaveAttribute("aria-pressed", "true");
+    await waitFor(() => expect(assetButton).toHaveAttribute("aria-pressed", "true"));
     expect(screen.getByText("1200 × 800")).toBeInTheDocument();
     expect(screen.getByText("#D76A52")).toBeInTheDocument();
     await waitFor(() => expect(api.fetchThumbnail).toHaveBeenCalledWith(12));
@@ -245,5 +260,36 @@ describe("PhotoOrganizer application shell", () => {
     render(<App />);
     expect(await screen.findByRole("alert")).toHaveTextContent("database unavailable");
     expect(screen.getAllByRole("button", { name: "导入图片文件夹" }).length).toBeGreaterThan(0);
+  });
+
+  it("supports explicit multi-selection, blank clearing, and single-image zoom", async () => {
+    const user = userEvent.setup();
+    api.fetchLibraries.mockResolvedValue([library]);
+    api.fetchAssets.mockResolvedValue({
+      items: [asset, secondAsset],
+      total: 2,
+      page: 1,
+      pageSize: 200,
+    });
+    render(<App />);
+
+    const first = await screen.findByRole("button", { name: "晚霞.png" });
+    const second = screen.getByRole("button", { name: "海边.png" });
+    await user.click(first);
+    await waitFor(() => expect(first).toHaveAttribute("aria-pressed", "true"));
+    fireEvent.click(second, { ctrlKey: true });
+    expect(await screen.findByText("已选择 2 张")).toBeInTheDocument();
+    fireEvent.click(first);
+    await waitFor(() => expect(screen.getByText("已选择 1 张")).toBeInTheDocument());
+    fireEvent.click(second, { shiftKey: true });
+    expect(await screen.findByText("已选择 2 张")).toBeInTheDocument();
+    await user.click(screen.getByLabelText("图片网格"));
+    expect(screen.queryByText("已选择 2 张")).not.toBeInTheDocument();
+
+    await user.dblClick(first);
+    expect(await screen.findByLabelText("胶片栏")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "100%" })).toBeInTheDocument();
+    await user.keyboard("{Escape}");
+    expect(screen.getByLabelText("图片网格")).toBeInTheDocument();
   });
 });

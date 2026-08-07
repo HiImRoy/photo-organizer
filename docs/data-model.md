@@ -29,7 +29,7 @@
 
 ### `color_features`
 
-`asset_id`、饱和度均值/中位数、主色 RGB/类别、主色列表 JSON、色相统计 JSON、冷暖评分、中性色比例、色彩丰富度、近黑白概率、饱和度标签、`algorithm_version`、`analyzed_at`。起步 UI 使用均值和主色；其他列为后续算法保留且保持可空。
+`asset_id`、饱和度均值/中位数、平均色度、主色 RGB/类别、主色列表 JSON、色相统计 JSON、冷暖评分、中性色比例、彩色主色覆盖率、色彩丰富度、近黑白概率、饱和度标签、`algorithm_version`、`analyzed_at`。M4 起主色从加权有彩色像素中提取，黑/白/灰不参与有彩色竞争；彩色覆盖不足时类别为 `neutral`。
 
 ### `semantic_labels`
 
@@ -68,4 +68,4 @@
 
 ## 迁移
 
-迁移文件随 Rust 二进制嵌入，在打开数据库时事务执行。`0002_semantic_workspace.sql` 和 `0003_organization_dry_run.sql` 只新增表、列和索引，不修改已发布的旧 migration。`schema_migrations(version, applied_at)` 保证重复初始化安全。测试覆盖空库、重复初始化、版本顺序、组合筛选、组织计划表和唯一约束。
+迁移文件随 Rust 二进制嵌入，在打开数据库时事务执行。`0002_semantic_workspace.sql`、`0003_organization_dry_run.sql` 和 `0004_library_ux_refinement.sql` 只新增表、列和索引，不修改已发布的旧 migration。`schema_migrations(version, applied_at)` 保证重复初始化安全。测试覆盖空库、重复初始化、版本顺序、组合筛选、组织计划表和唯一约束。

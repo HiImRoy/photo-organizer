@@ -44,7 +44,20 @@ const semanticCatalog: SemanticLabelDescriptor[] = [
   ["forest", "森林"],
   ["abstract", "抽象"],
   ["unknown", "未知"],
-].map(([id, displayName]) => ({ id, displayName, threshold: 0.16 }));
+].map(([id, displayName]) => ({
+  id,
+  displayName,
+  threshold: 0.16,
+  isPrimaryCategory: [
+    "portrait",
+    "landscape",
+    "architecture",
+    "product",
+    "animal",
+    "document",
+    "unknown",
+  ].includes(id),
+}));
 
 const library: LibrarySummary = {
   id: 9100,
@@ -55,6 +68,7 @@ const library: LibrarySummary = {
   assetCount: 18,
   presentCount: 18,
   missingCount: 0,
+  semanticPendingCount: 7,
 };
 
 const names = [
@@ -121,9 +135,12 @@ const assets: AssetListItem[] = names.map((fileName, index) => {
     contrast: 0.31 + ((index * 5) % 43) / 100,
     toneLabel: index % 3 === 0 ? "low_key" : index % 3 === 1 ? "balanced" : "high_key",
     saturation: 0.22 + ((index * 9) % 54) / 100,
+    chroma: 0.18 + ((index * 11) % 58) / 100,
     saturationLabel: index % 3 === 0 ? "low" : index % 3 === 1 ? "medium" : "high",
     dominantColor: palette[index % palette.length],
     dominantColorCategory: ["blue", "gray", "cyan", "orange"][index % 4],
+    neutralRatio: 0.18,
+    dominantColorCoverage: 0.52,
     semanticStatus: "completed",
     semanticError: null,
     semanticAnalyzedAt: "2026-08-07T03:12:00Z",

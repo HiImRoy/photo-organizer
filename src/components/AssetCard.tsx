@@ -1,3 +1,5 @@
+import { useEffect, useRef } from "react";
+
 import { formatPercent } from "../format";
 import type { AssetListItem } from "../types";
 import { CheckIcon } from "./Icons";
@@ -6,24 +8,46 @@ import { Thumbnail } from "./Thumbnail";
 interface AssetCardProps {
   asset: AssetListItem;
   selected: boolean;
-  marked?: boolean;
-  onSelect: (asset: AssetListItem) => void;
-  onToggleMarked?: (asset: AssetListItem) => void;
+  onSelect: (
+    asset: AssetListItem,
+    modifiers?: { ctrlKey?: boolean; metaKey?: boolean; shiftKey?: boolean },
+  ) => void;
+  onOpen?: (asset: AssetListItem) => void;
 }
 
-export function AssetCard({
-  asset,
-  selected,
-  marked = false,
-  onSelect,
-  onToggleMarked,
-}: AssetCardProps) {
+export function AssetCard({ asset, selected, onSelect, onOpen }: AssetCardProps) {
+  const clickTimer = useRef<number | null>(null);
+  useEffect(
+    () => () => {
+      if (clickTimer.current !== null) window.clearTimeout(clickTimer.current);
+    },
+    [],
+  );
+
   return (
     <div className="asset-card-shell">
       <button
         type="button"
         className={`asset-card${selected ? " is-selected" : ""}`}
-        onClick={() => onSelect(asset)}
+        onClick={(event) => {
+          const modifiers = {
+            ctrlKey: event.ctrlKey,
+            metaKey: event.metaKey,
+            shiftKey: event.shiftKey,
+          };
+          if (clickTimer.current !== null) window.clearTimeout(clickTimer.current);
+          clickTimer.current = window.setTimeout(() => {
+            onSelect(asset, modifiers);
+            clickTimer.current = null;
+          }, 180);
+        }}
+        onDoubleClick={(event) => {
+          event.preventDefault();
+          event.stopPropagation();
+          if (clickTimer.current !== null) window.clearTimeout(clickTimer.current);
+          clickTimer.current = null;
+          onOpen?.(asset);
+        }}
         aria-pressed={selected}
         aria-label={`${asset.fileName}${selected ? "，已选中" : ""}`}
         title={asset.fileName}
@@ -57,25 +81,18 @@ export function AssetCard({
           </div>
           {asset.semanticLabels.length > 0 ? (
             <div className="asset-labels">
-              {asset.semanticLabels.slice(0, 2).map((label) => (
-                <span key={label.labelId}>{label.displayName}</span>
-              ))}
+              {[
+                ...asset.semanticLabels.filter((label) => label.isPrimary),
+                ...asset.semanticLabels.filter((label) => !label.isPrimary),
+              ]
+                .slice(0, 2)
+                .map((label) => (
+                  <span key={label.labelId}>{label.displayName}</span>
+                ))}
             </div>
           ) : null}
         </div>
       </button>
-      {onToggleMarked ? (
-        <button
-          type="button"
-          className={`asset-mark-toggle${marked ? " is-marked" : ""}`}
-          onClick={() => onToggleMarked(asset)}
-          aria-pressed={marked}
-          aria-label={`${asset.fileName}${marked ? "，取消整理预览选择" : "，加入整理预览选择"}`}
-          title={marked ? "取消整理预览选择" : "加入整理预览选择"}
-        >
-          {marked ? <CheckIcon width="12" height="12" /> : "＋"}
-        </button>
-      ) : null}
     </div>
   );
 }

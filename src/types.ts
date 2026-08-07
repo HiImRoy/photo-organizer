@@ -14,6 +14,7 @@ export interface LibrarySummary {
   assetCount: number;
   presentCount: number;
   missingCount: number;
+  semanticPendingCount: number;
 }
 
 export interface SemanticLabelResult {
@@ -58,9 +59,12 @@ export interface AssetListItem {
   contrast: number | null;
   toneLabel: string | null;
   saturation: number | null;
+  chroma: number | null;
   saturationLabel: string | null;
   dominantColor: string | null;
   dominantColorCategory: string | null;
+  neutralRatio: number | null;
+  dominantColorCoverage: number | null;
   semanticStatus: string;
   semanticError: string | null;
   semanticAnalyzedAt: string | null;
@@ -154,6 +158,7 @@ export interface SemanticLabelDescriptor {
   id: string;
   displayName: string;
   threshold: number;
+  isPrimaryCategory: boolean;
 }
 
 export interface SemanticProgress {

@@ -239,6 +239,29 @@ pub fn start_semantic_analysis(
 }
 
 #[tauri::command]
+pub fn start_semantic_analysis_selected(
+    library_id: i64,
+    asset_ids: Vec<i64>,
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+) -> Result<StartSemanticResponse, String> {
+    if asset_ids.is_empty() {
+        return Err("请先选择至少一张图片。".into());
+    }
+    let classifier = state.semantic.read().clone();
+    if !classifier.metadata().installed {
+        return Err("本地语义模型尚未就绪，请先准备模型。".into());
+    }
+    let job_id = uuid::Uuid::new_v4().to_string();
+    let candidates = state
+        .repository
+        .create_semantic_job_for_assets(&job_id, library_id, &asset_ids)
+        .map_err(ipc_error)?;
+    spawn_with_app(&state, app, job_id.clone(), library_id, candidates)?;
+    Ok(StartSemanticResponse { job_id })
+}
+
+#[tauri::command]
 pub fn reanalyze_asset(
     library_id: i64,
     asset_id: i64,

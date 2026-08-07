@@ -258,6 +258,17 @@ export async function startSemanticAnalysis(
   return invoke<{ jobId: string }>("start_semantic_analysis", { libraryId, force });
 }
 
+export async function startSemanticAnalysisForAssets(
+  libraryId: number,
+  assetIds: number[],
+): Promise<{ jobId: string }> {
+  if (!desktopRuntime) throw new Error("语义分析仅在 PhotoOrganizer 桌面应用中可用。");
+  return invoke<{ jobId: string }>("start_semantic_analysis_selected", {
+    libraryId,
+    assetIds,
+  });
+}
+
 export async function reanalyzeAsset(
   libraryId: number,
   assetId: number,

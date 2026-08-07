@@ -70,6 +70,7 @@ pub fn run() {
             ipc::list_semantic_groups,
             ipc::get_semantic_progress,
             ipc::start_semantic_analysis,
+            ipc::start_semantic_analysis_selected,
             ipc::reanalyze_asset,
             ipc::pause_semantic_analysis,
             ipc::resume_semantic_analysis,

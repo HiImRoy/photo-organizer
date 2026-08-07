@@ -11,6 +11,7 @@ pub struct LibrarySummary {
     pub asset_count: i64,
     pub present_count: i64,
     pub missing_count: i64,
+    pub semantic_pending_count: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -44,9 +45,12 @@ pub struct AssetListItem {
     pub contrast: Option<f64>,
     pub tone_label: Option<String>,
     pub saturation: Option<f64>,
+    pub chroma: Option<f64>,
     pub saturation_label: Option<String>,
     pub dominant_color: Option<String>,
     pub dominant_color_category: Option<String>,
+    pub neutral_ratio: Option<f64>,
+    pub dominant_color_coverage: Option<f64>,
     pub semantic_status: String,
     pub semantic_error: Option<String>,
     pub semantic_analyzed_at: Option<String>,
@@ -307,6 +311,7 @@ pub struct ExistingAssetSnapshot {
     pub file_size: i64,
     pub modified_at: i64,
     pub analysis_status: String,
+    pub analysis_algorithm_version: Option<String>,
     pub thumbnail_status: Option<String>,
     pub cache_path: Option<String>,
 }
@@ -327,6 +332,7 @@ pub struct BasicImageFeatures {
     pub contrast_label: String,
     pub saturation_mean: f64,
     pub saturation_median: f64,
+    pub chroma_mean: f64,
     pub dominant_color_rgb: String,
     pub dominant_color_category: String,
     pub dominant_colors_json: String,
@@ -335,6 +341,7 @@ pub struct BasicImageFeatures {
     pub neutral_ratio: f64,
     pub colorfulness: f64,
     pub monochrome_probability: f64,
+    pub dominant_color_coverage: f64,
     pub saturation_label: String,
     pub algorithm_version: String,
 }

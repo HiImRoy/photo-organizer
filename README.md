@@ -79,5 +79,6 @@ npm.cmd run evaluate:photos
 - [专业化界面重构计划](docs/plans/0002-professional-ui.md)
 - [语义分类与专业工作区计划](docs/plans/0003-semantic-classification-and-workspace.md)
 - [整理预览 Dry-run 计划](docs/plans/0004-organization-dry-run.md)
+- [图库体验与分类质量优化计划](docs/plans/0004-library-ux-and-classification-refinement.md)
 
 项目决策记录在 `docs/decisions/`。当前版本与限制以执行计划和发布说明为准。

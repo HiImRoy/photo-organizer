@@ -22,6 +22,7 @@ const library: LibrarySummary = {
   assetCount: 2,
   presentCount: 2,
   missingCount: 0,
+  semanticPendingCount: 0,
 };
 
 const plan: OrganizationPlan = {

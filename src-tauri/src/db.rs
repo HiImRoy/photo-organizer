@@ -20,6 +20,7 @@ use crate::semantic::{
 const INITIAL_MIGRATION: &str = include_str!("../migrations/0001_initial.sql");
 const SEMANTIC_MIGRATION: &str = include_str!("../migrations/0002_semantic_workspace.sql");
 const ORGANIZATION_MIGRATION: &str = include_str!("../migrations/0003_organization_dry_run.sql");
+const LIBRARY_UX_MIGRATION: &str = include_str!("../migrations/0004_library_ux_refinement.sql");
 
 #[derive(Debug, Clone)]
 pub struct Repository {
@@ -64,6 +65,7 @@ impl Repository {
             (1_i64, INITIAL_MIGRATION),
             (2_i64, SEMANTIC_MIGRATION),
             (3_i64, ORGANIZATION_MIGRATION),
+            (4_i64, LIBRARY_UX_MIGRATION),
         ] {
             if current < version {
                 let transaction = connection.transaction()?;
@@ -245,9 +247,11 @@ impl Repository {
         connection
             .query_row(
                 "SELECT a.id, a.file_size, a.modified_at, a.analysis_status,
-                        t.status, t.cache_path
+                        t.status, t.cache_path, COALESCE(tf.algorithm_version, cf.algorithm_version)
                  FROM assets a
                  LEFT JOIN thumbnails t ON t.asset_id = a.id AND t.spec = ?3
+                 LEFT JOIN tone_features tf ON tf.asset_id = a.id
+                 LEFT JOIN color_features cf ON cf.asset_id = a.id
                  WHERE a.library_id = ?1 AND a.absolute_path = ?2",
                 params![library_id, absolute_path, crate::imaging::THUMBNAIL_SPEC],
                 |row| {
@@ -258,6 +262,7 @@ impl Repository {
                         analysis_status: row.get(3)?,
                         thumbnail_status: row.get(4)?,
                         cache_path: row.get(5)?,
+                        analysis_algorithm_version: row.get(6)?,
                     })
                 },
             )
@@ -425,14 +430,15 @@ impl Repository {
         )?;
         transaction.execute(
             "INSERT INTO color_features(
-                asset_id, saturation_mean, saturation_median, dominant_color_rgb,
+                asset_id, saturation_mean, saturation_median, chroma_mean, dominant_color_rgb,
                 dominant_color_category, dominant_colors_json, hue_histogram_json,
                 warmth_score, neutral_ratio, colorfulness, monochrome_probability,
-                saturation_label, algorithm_version, analyzed_at
-             ) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
+                dominant_color_coverage, saturation_label, algorithm_version, analyzed_at
+             ) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)
              ON CONFLICT(asset_id) DO UPDATE SET
                 saturation_mean=excluded.saturation_mean,
                 saturation_median=excluded.saturation_median,
+                chroma_mean=excluded.chroma_mean,
                 dominant_color_rgb=excluded.dominant_color_rgb,
                 dominant_color_category=excluded.dominant_color_category,
                 dominant_colors_json=excluded.dominant_colors_json,
@@ -441,6 +447,7 @@ impl Repository {
                 neutral_ratio=excluded.neutral_ratio,
                 colorfulness=excluded.colorfulness,
                 monochrome_probability=excluded.monochrome_probability,
+                dominant_color_coverage=excluded.dominant_color_coverage,
                 saturation_label=excluded.saturation_label,
                 algorithm_version=excluded.algorithm_version,
                 analyzed_at=excluded.analyzed_at",
@@ -448,6 +455,7 @@ impl Repository {
                 asset_id,
                 features.saturation_mean,
                 features.saturation_median,
+                features.chroma_mean,
                 features.dominant_color_rgb,
                 features.dominant_color_category,
                 features.dominant_colors_json,
@@ -456,6 +464,7 @@ impl Repository {
                 features.neutral_ratio,
                 features.colorfulness,
                 features.monochrome_probability,
+                features.dominant_color_coverage,
                 features.saturation_label,
                 features.algorithm_version,
                 timestamp,
@@ -543,7 +552,11 @@ impl Repository {
             "SELECT l.id, l.root_path, l.created_at, l.last_scan_at, l.status,
                     COUNT(a.id) AS asset_count,
                     COALESCE(SUM(CASE WHEN a.file_status='present' THEN 1 ELSE 0 END), 0),
-                    COALESCE(SUM(CASE WHEN a.file_status='missing' THEN 1 ELSE 0 END), 0)
+                    COALESCE(SUM(CASE WHEN a.file_status='missing' THEN 1 ELSE 0 END), 0),
+                    COALESCE(SUM(CASE WHEN a.file_status='present'
+                                      AND a.analysis_status='completed'
+                                      AND a.semantic_status NOT IN ('completed')
+                                      THEN 1 ELSE 0 END), 0)
              FROM libraries l
              LEFT JOIN assets a ON a.library_id = l.id
              GROUP BY l.id
@@ -559,6 +572,7 @@ impl Repository {
                 asset_count: row.get(5)?,
                 present_count: row.get(6)?,
                 missing_count: row.get(7)?,
+                semantic_pending_count: row.get(8)?,
             })
         })?;
         rows.collect::<Result<Vec<_>, _>>().map_err(AppError::from)
@@ -594,8 +608,9 @@ impl Repository {
                     a.lens_model, a.exposure_time, a.aperture, a.iso, a.focal_length,
                     a.file_status, a.scan_status, a.analysis_status, a.error_message, t.status,
                     tf.brightness_mean, tf.contrast, tf.tone_label,
-                    cf.saturation_mean, cf.saturation_label, cf.dominant_color_rgb,
-                    cf.dominant_color_category, a.semantic_status, a.semantic_error,
+                    cf.saturation_mean, cf.chroma_mean, cf.saturation_label, cf.dominant_color_rgb,
+                    cf.dominant_color_category, cf.neutral_ratio, cf.dominant_color_coverage,
+                    a.semantic_status, a.semantic_error,
                     a.semantic_analyzed_at
              FROM assets a
              LEFT JOIN thumbnails t ON t.asset_id=a.id AND t.spec=?
@@ -646,12 +661,15 @@ impl Repository {
                 contrast: row.get(25)?,
                 tone_label: row.get(26)?,
                 saturation: row.get(27)?,
-                saturation_label: row.get(28)?,
-                dominant_color: row.get(29)?,
-                dominant_color_category: row.get(30)?,
-                semantic_status: row.get(31)?,
-                semantic_error: row.get(32)?,
-                semantic_analyzed_at: row.get(33)?,
+                chroma: row.get(28)?,
+                saturation_label: row.get(29)?,
+                dominant_color: row.get(30)?,
+                dominant_color_category: row.get(31)?,
+                neutral_ratio: row.get(32)?,
+                dominant_color_coverage: row.get(33)?,
+                semantic_status: row.get(34)?,
+                semantic_error: row.get(35)?,
+                semantic_analyzed_at: row.get(36)?,
                 semantic_labels: Vec::new(),
             })
         })?;
@@ -871,7 +889,17 @@ impl Repository {
                 .map(|value| value.to_string_lossy().into_owned())
                 .filter(|value| value != ".")
                 .unwrap_or_default();
-            *counts.entry(parent).or_default() += 1;
+            if parent.is_empty() {
+                continue;
+            }
+            let mut current = PathBuf::from(parent);
+            loop {
+                let relative = current.to_string_lossy().into_owned();
+                *counts.entry(relative).or_default() += 1;
+                if !current.pop() {
+                    break;
+                }
+            }
         }
         Ok(counts
             .into_iter()
@@ -953,6 +981,26 @@ impl Repository {
         force: bool,
         only_asset_id: Option<i64>,
     ) -> AppResult<Vec<SemanticAssetCandidate>> {
+        self.create_semantic_job_with_ids(job_id, library_id, force, only_asset_id, None)
+    }
+
+    pub fn create_semantic_job_for_assets(
+        &self,
+        job_id: &str,
+        library_id: i64,
+        asset_ids: &[i64],
+    ) -> AppResult<Vec<SemanticAssetCandidate>> {
+        self.create_semantic_job_with_ids(job_id, library_id, false, None, Some(asset_ids))
+    }
+
+    fn create_semantic_job_with_ids(
+        &self,
+        job_id: &str,
+        library_id: i64,
+        force: bool,
+        only_asset_id: Option<i64>,
+        only_asset_ids: Option<&[i64]>,
+    ) -> AppResult<Vec<SemanticAssetCandidate>> {
         let mut connection = self.open()?;
         let transaction = connection.transaction()?;
         let active_job: Option<String> = transaction
@@ -976,7 +1024,14 @@ impl Repository {
              WHERE a.library_id=?1 AND a.file_status='present' AND a.analysis_status='completed'",
         );
         let mut values = vec![Value::Integer(library_id)];
-        if let Some(asset_id) = only_asset_id {
+        if let Some(asset_ids) = only_asset_ids {
+            if asset_ids.is_empty() {
+                sql.push_str(" AND 0=1");
+            } else {
+                sql.push_str(&format!(" AND a.id IN ({})", placeholders(asset_ids.len())));
+                values.extend(asset_ids.iter().copied().map(Value::Integer));
+            }
+        } else if let Some(asset_id) = only_asset_id {
             sql.push_str(" AND a.id=?");
             values.push(Value::Integer(asset_id));
         }
@@ -1435,8 +1490,14 @@ fn asset_filter_sql(library_id: i64, filter: &AssetFilter) -> (String, Vec<Value
         .as_deref()
         .filter(|value| !value.is_empty())
     {
-        clauses.push("a.relative_path LIKE ? ESCAPE '\\'".into());
-        values.push(Value::Text(format!("{}%", escape_like(prefix))));
+        clauses.push(
+            "(a.relative_path=? OR a.relative_path LIKE ? ESCAPE '\\' OR a.relative_path LIKE ? ESCAPE '\\')"
+                .into(),
+        );
+        let escaped = escape_like(prefix);
+        values.push(Value::Text(prefix.into()));
+        values.push(Value::Text(format!("{}\\\\%", escaped)));
+        values.push(Value::Text(format!("{}/%", escaped)));
     }
     match filter.semantic_state.as_deref() {
         Some("not_analyzed") => {
@@ -1561,7 +1622,7 @@ mod tests {
         let repository = Repository::new(temp.path().join("database.sqlite3"));
         repository.initialize().expect("first initialization");
         repository.initialize().expect("second initialization");
-        assert_eq!(repository.migration_version().expect("version"), 3);
+        assert_eq!(repository.migration_version().expect("version"), 4);
         let connection = repository.open().expect("connection");
         for table in [
             "organization_plans",

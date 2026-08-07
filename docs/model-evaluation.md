@@ -15,7 +15,7 @@
 
 第一版 catalog 固定 21 个稳定 ID：`portrait`、`group`、`landscape`、`architecture`、`indoor`、`street`、`vehicle`、`product`、`still_life`、`food`、`animal`、`screenshot`、`document`、`night`、`flower`、`mountain`、`water`、`forest`、`sunset`、`abstract`、`unknown`。界面显示中文名。
 
-每类使用版本化英文提示词和阈值（第一版通常为 0.16，截图/文档为 0.17）。达到阈值并处于最高分 0.055 窗口内的标签按相似度排序，最多保留四个；只要有非未知标签就排除 `unknown`。主标签取最高相似度，同分按 catalog 顺序。相似度是 embedding 的余弦相似度，不是概率或准确率。
+每类使用版本化英文提示词和阈值（第一版通常为 0.16，截图/文档为 0.17）。达到阈值并处于最高分 0.055 窗口内的标签按相似度排序，最多保留四个；只要有非未知标签就排除 `unknown`。M4 的 `photo-organizer-semantic-v2` 将 `portrait`、`landscape`、`architecture`、`product`、`animal`、`document`、`unknown` 作为一级候选，选择其中相似度最高的一个写入 `is_primary=1`；`night`、`mountain`、`water`、`forest`、`flower`、`sunset`、`street` 等仍以 `is_primary=0` 作为辅助标签展示和筛选。相似度是 embedding 的余弦相似度，不是概率或准确率。
 
 ## 资源完整性
 

@@ -31,7 +31,7 @@ User-selected source directory: read-only during scan and analysis
 - `src/`：React 工作区、类型化 Tauri client、确定性视觉夹具和组件测试。
 - `src-tauri/src/db.rs`：连接、事务、迁移、任务持久化、参数化筛选和分组统计。
 - `scanner.rs`：只读目录遍历、fingerprint、增量判定、基础分析和缺失标记。
-- `imaging.rs`：解码、方向处理、应用私有缩略图、连续影调/色彩特征。
+- `imaging.rs`：解码、方向处理、应用私有缩略图、连续影调/色彩特征；主色使用有彩色像素加权，单独保存中性色比例和主色覆盖率。
 - `semantic.rs`：TinyCLIP 预处理、tokenizer、ONNX Runtime、余弦相似度、catalog 与 benchmark。
 - `semantic_tasks.rs`：单 worker 后台分析、单项失败隔离、进度和终态。
 - `tasks.rs`：扫描取消 token 与语义暂停/继续/取消控制器。
@@ -52,7 +52,7 @@ User-selected source directory: read-only during scan and analysis
 
 `Repository::list_assets` 构造参数化 SQLite `WHERE`，计数查询和分页查询共享同一条件：搜索、语义标签 any/all、影调、主色、亮度、饱和度、拍摄时间、原始目录和语义状态。排序、总数和分页均在数据库层完成，React 不对当前页做替代性过滤。
 
-主要语义标签分组由数据库统计 `is_primary=1` 且 fingerprint、模型和分析版本均为当前值的记录。主标签规则见 ADR-0004 和模型评估文档。
+主要语义标签分组由数据库统计 `is_primary=1` 且 fingerprint、模型和分析版本均为当前值的记录。M4 一级分类为人像、风景、城市/建筑、静物/产品、动物、文档/截图、其他；夜景、山、水体、森林、花卉、日落、街道等保留为辅助标签。原始目录由图库根目录和完整相对路径祖先构成，父目录过滤覆盖所有后代。
 
 ## 安全与故障边界
 

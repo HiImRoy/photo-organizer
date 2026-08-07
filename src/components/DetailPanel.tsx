@@ -97,6 +97,9 @@ export function DetailPanel({
               <Metric label="亮度" value={formatPercent(asset.brightness)} />
               <Metric label="对比度" value={formatPercent(asset.contrast)} />
               <Metric label="饱和度" value={formatPercent(asset.saturation)} />
+              <Metric label="色度" value={formatPercent(asset.chroma)} />
+              <Metric label="有彩色占比" value={formatPercent(asset.dominantColorCoverage)} />
+              <Metric label="中性色占比" value={formatPercent(asset.neutralRatio)} />
               <Metric
                 label="影调"
                 value={asset.toneLabel ? (toneLabels[asset.toneLabel] ?? asset.toneLabel) : "—"}
@@ -117,7 +120,7 @@ export function DetailPanel({
                   <div key={label.labelId}>
                     <span>
                       {label.displayName}
-                      {label.isPrimary ? <small>主要</small> : null}
+                      <small>{label.isPrimary ? "一级分类" : "辅助标签"}</small>
                     </span>
                     <strong>{label.similarity.toFixed(3)}</strong>
                     <i

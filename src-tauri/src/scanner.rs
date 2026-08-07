@@ -114,6 +114,8 @@ where
             if existing.file_size == snapshot.file_size
                 && existing.modified_at == snapshot.modified_at
                 && existing.analysis_status == "completed"
+                && existing.analysis_algorithm_version.as_deref()
+                    == Some(crate::imaging::ANALYSIS_VERSION)
                 && cache_ready
             {
                 repository.touch_asset_seen(existing.id, generation)?;
@@ -374,6 +376,29 @@ mod tests {
                 .count(),
             3
         );
+        let folders = repository
+            .list_library_folders(library.id)
+            .expect("folder tree");
+        assert!(
+            folders
+                .iter()
+                .any(|folder| folder.relative_path == "中文 路径")
+        );
+        let nested = repository
+            .list_assets(
+                library.id,
+                AssetSortField::FileName,
+                SortDirection::Asc,
+                1,
+                100,
+                &crate::models::AssetFilter {
+                    folder_prefix: Some("中文 路径".into()),
+                    ..crate::models::AssetFilter::default()
+                },
+            )
+            .expect("nested folder filter");
+        assert_eq!(nested.total, 1);
+        assert_eq!(nested.items[0].relative_path, "中文 路径\\红色.JPG");
         assert!(
             page.items
                 .iter()

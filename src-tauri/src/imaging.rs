@@ -1,4 +1,3 @@
-use std::cmp::Reverse;
 use std::collections::HashMap;
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufReader, Write};
@@ -12,7 +11,7 @@ use crate::error::{AppError, AppResult};
 use crate::models::{BasicImageFeatures, ExifMetadata, ProcessedImage};
 
 pub const THUMBNAIL_SPEC: &str = "grid-320-v1";
-pub const ANALYSIS_VERSION: &str = "basic-rgb-v1";
+pub const ANALYSIS_VERSION: &str = "basic-color-v2";
 
 pub fn process_image(
     source_path: &Path,
@@ -66,10 +65,13 @@ pub fn analyze_rgba(image: &RgbaImage) -> BasicImageFeatures {
     let mut brightness = Vec::new();
     let mut saturation = Vec::new();
     let mut color_bins: HashMap<u16, (u64, u64, u64, u64)> = HashMap::new();
+    let mut weighted_color_bins: HashMap<u16, (f64, f64, f64, f64)> = HashMap::new();
     let mut hue_histogram = [0u64; 12];
     let mut warm_sum = 0.0;
     let mut warm_weight = 0.0;
     let mut neutral_count = 0u64;
+    let mut chromatic_weight_total = 0.0;
+    let mut chroma_sum = 0.0;
     let mut rg_sum = 0.0;
     let mut rg_sq_sum = 0.0;
     let mut yb_sum = 0.0;
@@ -87,6 +89,8 @@ pub fn analyze_rgba(image: &RgbaImage) -> BasicImageFeatures {
             let b = f64::from(pixel[2]) / 255.0;
             let light = 0.2126 * r + 0.7152 * g + 0.0722 * b;
             let (sat, hue) = saturation_and_hue(r, g, b);
+            let chroma = (r.max(g).max(b) - r.min(g).min(b)).clamp(0.0, 1.0);
+            chroma_sum += chroma;
             brightness.push(light);
             saturation.push(sat);
 
@@ -99,13 +103,30 @@ pub fn analyze_rgba(image: &RgbaImage) -> BasicImageFeatures {
             entry.2 += u64::from(pixel[1]);
             entry.3 += u64::from(pixel[2]);
 
-            if sat < 0.12 {
+            if sat < 0.14 || chroma < 0.08 {
                 neutral_count += 1;
             } else {
                 let bucket = ((hue / 30.0).floor() as usize).min(11);
                 hue_histogram[bucket] += 1;
                 warm_sum += (hue - 30.0).to_radians().cos() * sat;
                 warm_weight += sat;
+
+                // Saturated pixels are the useful signal for a representative
+                // colour. Keep dark/highlight pixels in the competition, but
+                // reduce their influence instead of letting silhouettes or
+                // clipped whites dominate the result.
+                let shadow_weight = (0.28 + (light / 0.42).clamp(0.0, 1.0) * 0.72).clamp(0.28, 1.0);
+                let highlight_weight =
+                    (0.28 + ((1.0 - light) / 0.28).clamp(0.0, 1.0) * 0.72).clamp(0.28, 1.0);
+                let weight = sat.powf(0.72) * chroma.sqrt() * shadow_weight * highlight_weight;
+                if light > 0.015 && weight > 0.02 {
+                    let weighted = weighted_color_bins.entry(key).or_default();
+                    weighted.0 += weight;
+                    weighted.1 += weight * f64::from(pixel[0]);
+                    weighted.2 += weight * f64::from(pixel[1]);
+                    weighted.3 += weight * f64::from(pixel[2]);
+                    chromatic_weight_total += weight;
+                }
             }
 
             let rg = r - g;
@@ -137,33 +158,51 @@ pub fn analyze_rgba(image: &RgbaImage) -> BasicImageFeatures {
     let highlight_ratio =
         brightness.iter().filter(|value| **value >= 0.90).count() as f64 / sample_count;
 
-    let mut ranked_colors: Vec<(u64, u8, u8, u8)> = color_bins
+    let mut ranked_colors: Vec<(f64, u8, u8, u8)> = weighted_color_bins
         .values()
-        .map(|(count, red, green, blue)| {
-            let divisor = (*count).max(1);
+        .map(|(weight, red, green, blue)| {
+            let divisor = (*weight).max(f64::EPSILON);
             (
-                *count,
-                (red / divisor) as u8,
-                (green / divisor) as u8,
-                (blue / divisor) as u8,
+                *weight,
+                (red / divisor).round().clamp(0.0, 255.0) as u8,
+                (green / divisor).round().clamp(0.0, 255.0) as u8,
+                (blue / divisor).round().clamp(0.0, 255.0) as u8,
             )
         })
         .collect();
-    ranked_colors.sort_by_key(|entry| Reverse(entry.0));
+    if ranked_colors.is_empty() {
+        ranked_colors = color_bins
+            .values()
+            .map(|(count, red, green, blue)| {
+                let divisor = (*count).max(1);
+                (
+                    0.0,
+                    (red / divisor) as u8,
+                    (green / divisor) as u8,
+                    (blue / divisor) as u8,
+                )
+            })
+            .collect();
+    }
+    ranked_colors.sort_by(|left, right| right.0.total_cmp(&left.0));
 
     let (dominant_r, dominant_g, dominant_b) = ranked_colors
         .first()
         .map(|(_, r, g, b)| (*r, *g, *b))
         .unwrap_or((0, 0, 0));
     let dominant_color_rgb = format!("#{dominant_r:02X}{dominant_g:02X}{dominant_b:02X}");
-    let dominant_color_category = color_category(dominant_r, dominant_g, dominant_b).to_owned();
+    let dominant_color_category = if chromatic_weight_total / sample_count >= 0.06 {
+        color_category(dominant_r, dominant_g, dominant_b).to_owned()
+    } else {
+        neutral_category(brightness_mean, saturation_mean).to_owned()
+    };
     let top_colors: Vec<serde_json::Value> = ranked_colors
         .iter()
         .take(5)
         .map(|(count, red, green, blue)| {
             serde_json::json!({
                 "color": format!("#{red:02X}{green:02X}{blue:02X}"),
-                "ratio": *count as f64 / sample_count,
+                "ratio": *count / sample_count,
             })
         })
         .collect();
@@ -221,6 +260,7 @@ pub fn analyze_rgba(image: &RgbaImage) -> BasicImageFeatures {
         .into(),
         saturation_mean,
         saturation_median,
+        chroma_mean: (chroma_sum / sample_count).clamp(0.0, 1.0),
         dominant_color_rgb,
         dominant_color_category,
         dominant_colors_json: serde_json::to_string(&top_colors).unwrap_or_else(|_| "[]".into()),
@@ -229,6 +269,7 @@ pub fn analyze_rgba(image: &RgbaImage) -> BasicImageFeatures {
         neutral_ratio,
         colorfulness: colorfulness.clamp(0.0, 2.0),
         monochrome_probability,
+        dominant_color_coverage: (chromatic_weight_total / sample_count).clamp(0.0, 1.0),
         saturation_label: if saturation_mean < 0.16 {
             "low"
         } else if saturation_mean > 0.52 {
@@ -331,7 +372,7 @@ fn color_category(red: u8, green: u8, blue: u8) -> &'static str {
     let b = f64::from(blue) / 255.0;
     let brightness = 0.2126 * r + 0.7152 * g + 0.0722 * b;
     let (saturation, hue) = saturation_and_hue(r, g, b);
-    if saturation < 0.12 {
+    if saturation < 0.14 {
         return if brightness < 0.14 {
             "black"
         } else if brightness > 0.88 {
@@ -350,6 +391,11 @@ fn color_category(red: u8, green: u8, blue: u8) -> &'static str {
         value if value < 315.0 => "purple",
         _ => "red",
     }
+}
+
+fn neutral_category(brightness: f64, saturation: f64) -> &'static str {
+    let _ = (brightness, saturation);
+    "neutral"
 }
 
 fn mean(values: &[f64]) -> f64 {
@@ -511,6 +557,24 @@ mod tests {
         let features = analyze_rgba(&image);
         assert!(features.saturation_mean > 0.99);
         assert_eq!(features.dominant_color_category, "red");
+    }
+
+    #[test]
+    fn chromatic_pixels_beat_large_dark_silhouette_and_gray_stays_neutral() {
+        let mut sunset = RgbaImage::from_pixel(32, 32, Rgba([4, 5, 8, 255]));
+        for y in 20..32 {
+            for x in 0..32 {
+                sunset.put_pixel(x, y, Rgba([230, 55, 18, 255]));
+            }
+        }
+        let sunset_features = analyze_rgba(&sunset);
+        assert_eq!(sunset_features.dominant_color_category, "red");
+        assert!(sunset_features.dominant_color_coverage > 0.06);
+
+        let gray = RgbaImage::from_pixel(32, 32, Rgba([124, 126, 128, 255]));
+        let gray_features = analyze_rgba(&gray);
+        assert_eq!(gray_features.dominant_color_category, "neutral");
+        assert!(gray_features.neutral_ratio > 0.9);
     }
 
     #[test]

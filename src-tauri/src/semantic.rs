@@ -15,7 +15,7 @@ use tokenizers::{PaddingParams, PaddingStrategy, Tokenizer, TruncationParams};
 
 pub const MODEL_NAME: &str = "TinyCLIP-ViT-8M-16-Text-3M-YFCC15M";
 pub const MODEL_VERSION: &str = "onnx-int8-2025-08-06";
-pub const ANALYSIS_VERSION: &str = "photo-organizer-semantic-v1";
+pub const ANALYSIS_VERSION: &str = "photo-organizer-semantic-v2";
 pub const MODEL_FILE: &str = "model-int8.onnx";
 pub const TOKENIZER_FILE: &str = "tokenizer.json";
 pub const MODEL_SHA256: &str = "10921310ddef06557ec1598d1260470a0a4db53f70ffe0deb60b946dcad6d27a";
@@ -100,6 +100,7 @@ pub struct SemanticLabelDescriptor {
     pub id: String,
     pub display_name: String,
     pub threshold: f32,
+    pub is_primary_category: bool,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -131,7 +132,7 @@ const LABELS: [LabelDefinition; 21] = [
     },
     LabelDefinition {
         id: "architecture",
-        display_name: "建筑",
+        display_name: "城市 / 建筑",
         prompt: "an architectural photograph of a building",
         threshold: 0.16,
     },
@@ -155,7 +156,7 @@ const LABELS: [LabelDefinition; 21] = [
     },
     LabelDefinition {
         id: "product",
-        display_name: "产品",
+        display_name: "静物 / 产品",
         prompt: "a commercial product photograph",
         threshold: 0.16,
     },
@@ -185,7 +186,7 @@ const LABELS: [LabelDefinition; 21] = [
     },
     LabelDefinition {
         id: "document",
-        display_name: "文档",
+        display_name: "文档 / 截图",
         prompt: "a scanned document or a photographed page with text",
         threshold: 0.17,
     },
@@ -268,8 +269,23 @@ pub fn semantic_catalog() -> Vec<SemanticLabelDescriptor> {
             id: label.id.into(),
             display_name: label.display_name.into(),
             threshold: label.threshold,
+            is_primary_category: is_primary_category(label.id),
         })
         .collect()
+}
+
+const PRIMARY_CATEGORY_IDS: [&str; 7] = [
+    "portrait",
+    "landscape",
+    "architecture",
+    "product",
+    "animal",
+    "document",
+    "unknown",
+];
+
+fn is_primary_category(label_id: &str) -> bool {
+    PRIMARY_CATEGORY_IDS.contains(&label_id)
 }
 
 #[derive(Debug, Default)]
@@ -666,6 +682,12 @@ fn cosine_similarity(left: &[f32], right: &[f32]) -> f32 {
 
 fn select_predictions(scores: &[f32]) -> Vec<SemanticPrediction> {
     let unknown_index = LABELS.len() - 1;
+    let best_primary = scores
+        .iter()
+        .enumerate()
+        .filter(|(index, _)| is_primary_category(LABELS[*index].id))
+        .max_by(|left, right| left.1.total_cmp(right.1).then(right.0.cmp(&left.0)))
+        .map(|(index, score)| (index, *score));
     let mut accepted = scores
         .iter()
         .enumerate()
@@ -674,13 +696,33 @@ fn select_predictions(scores: &[f32]) -> Vec<SemanticPrediction> {
         .collect::<Vec<_>>();
     accepted.sort_by(|left, right| right.1.total_cmp(&left.1).then(left.0.cmp(&right.0)));
 
+    if accepted
+        .iter()
+        .all(|(index, _)| !is_primary_category(LABELS[*index].id))
+        && let Some(primary) = best_primary
+    {
+        accepted.push(primary);
+    }
     if let Some((_, top_score)) = accepted.first().copied() {
-        accepted.retain(|(_, score)| *score >= top_score - TOP_SCORE_WINDOW);
+        accepted.retain(|(index, score)| {
+            *score >= top_score - TOP_SCORE_WINDOW || is_primary_category(LABELS[*index].id)
+        });
     }
     if accepted.iter().any(|(index, _)| *index != unknown_index) {
         accepted.retain(|(index, _)| *index != unknown_index);
     }
     accepted.truncate(MAX_LABELS);
+    if !accepted
+        .iter()
+        .any(|(index, _)| is_primary_category(LABELS[*index].id))
+        && let Some(primary) = best_primary
+    {
+        if accepted.len() == MAX_LABELS {
+            accepted.pop();
+        }
+        accepted.push(primary);
+        accepted.sort_by(|left, right| right.1.total_cmp(&left.1).then(left.0.cmp(&right.0)));
+    }
     if accepted.is_empty() {
         accepted.push((
             unknown_index,
@@ -688,15 +730,19 @@ fn select_predictions(scores: &[f32]) -> Vec<SemanticPrediction> {
         ));
     }
 
+    let primary_index = accepted
+        .iter()
+        .filter(|(index, _)| is_primary_category(LABELS[*index].id))
+        .max_by(|left, right| left.1.total_cmp(&right.1).then(right.0.cmp(&left.0)))
+        .map(|(index, _)| *index);
     accepted
         .into_iter()
-        .enumerate()
-        .map(|(rank, (index, similarity))| SemanticPrediction {
+        .map(|(index, similarity)| SemanticPrediction {
             label_id: LABELS[index].id.into(),
             display_name: LABELS[index].display_name.into(),
             similarity,
             threshold: LABELS[index].threshold,
-            is_primary: rank == 0,
+            is_primary: primary_index == Some(index),
         })
         .collect()
 }
@@ -941,6 +987,20 @@ mod tests {
         ids.sort_unstable();
         ids.dedup();
         assert_eq!(ids.len(), catalog.len());
+        assert_eq!(
+            catalog
+                .iter()
+                .filter(|label| label.is_primary_category)
+                .count(),
+            7
+        );
+        assert!(
+            !catalog
+                .iter()
+                .find(|label| label.id == "night")
+                .unwrap()
+                .is_primary_category
+        );
     }
 
     #[test]
@@ -950,8 +1010,12 @@ mod tests {
         scores[13] = 0.24;
         let predictions = select_predictions(&scores);
         assert_eq!(predictions[0].label_id, "night");
-        assert!(predictions[0].is_primary);
-        assert!(predictions.iter().any(|label| label.label_id == "portrait"));
+        assert!(!predictions[0].is_primary);
+        assert!(
+            predictions
+                .iter()
+                .any(|label| label.label_id == "portrait" && label.is_primary)
+        );
     }
 
     #[test]

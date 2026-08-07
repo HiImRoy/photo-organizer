@@ -17,6 +17,7 @@ import {
   resumeSemanticAnalysis,
   startLibraryScan,
   startSemanticAnalysis,
+  startSemanticAnalysisForAssets,
   subscribeScanProgress,
   subscribeSemanticProgress,
 } from "./api";
@@ -55,6 +56,12 @@ import {
 } from "./types";
 
 const PAGE_SIZE = 120;
+
+type SelectionModifiers = {
+  ctrlKey?: boolean;
+  metaKey?: boolean;
+  shiftKey?: boolean;
+};
 
 const sortLabels: Record<SortField, string> = {
   file_name: "文件名",
@@ -171,12 +178,14 @@ export default function App() {
     let active = true;
     if (selectedLibraryId === null) return undefined;
     void Promise.all([
+      fetchLibraries(),
       fetchLibraryFolders(selectedLibraryId),
       fetchSemanticGroups(selectedLibraryId),
       fetchSemanticProgress(selectedLibraryId),
     ])
-      .then(([nextFolders, nextGroups, progress]) => {
+      .then(([nextLibraries, nextFolders, nextGroups, progress]) => {
         if (!active) return;
+        setLibraries(nextLibraries);
         setFolders(nextFolders);
         setSemanticGroups(nextGroups);
         setSemanticProgress(progress);
@@ -288,6 +297,22 @@ export default function App() {
     }
   }
 
+  async function analyzeSelected() {
+    setError(null);
+    if (!selectedLibrary || selectedAssetIds.length === 0) return;
+    try {
+      if (semanticStatus?.status !== "ready") {
+        const status = await prepareSemanticModel();
+        setSemanticStatus(status);
+        return;
+      }
+      const { jobId } = await startSemanticAnalysisForAssets(selectedLibrary.id, selectedAssetIds);
+      setSemanticProgress(pendingSemanticProgress(jobId, selectedLibrary.id, semanticStatus));
+    } catch (reason) {
+      setError(messageFrom(reason));
+    }
+  }
+
   async function analyzeOne(asset: AssetListItem) {
     try {
       const { jobId } = await reanalyzeAsset(asset.libraryId, asset.id);
@@ -336,16 +361,51 @@ export default function App() {
     if (next === "single" && !selectedAsset) setSelectedAsset(assets[0] ?? null);
   }
 
-  function selectAsset(asset: AssetListItem) {
+  function selectAsset(asset: AssetListItem, modifiers: SelectionModifiers = {}) {
     setSelectedAsset(asset);
-    setSelectedAssetIds((current) => (current.length ? current : [asset.id]));
+    if (modifiers.shiftKey && selectedAsset) {
+      const anchorIndex = assets.findIndex((item) => item.id === selectedAsset.id);
+      const targetIndex = assets.findIndex((item) => item.id === asset.id);
+      if (anchorIndex >= 0 && targetIndex >= 0) {
+        const start = Math.min(anchorIndex, targetIndex);
+        const end = Math.max(anchorIndex, targetIndex);
+        setSelectedAssetIds(assets.slice(start, end + 1).map((item) => item.id));
+        return;
+      }
+    }
+    if (modifiers.ctrlKey || modifiers.metaKey) {
+      setSelectedAssetIds((current) =>
+        current.includes(asset.id)
+          ? current.filter((id) => id !== asset.id)
+          : [...current, asset.id],
+      );
+      return;
+    }
+    setSelectedAssetIds([asset.id]);
   }
 
-  function toggleMarkedAsset(asset: AssetListItem) {
-    setSelectedAssetIds((current) =>
-      current.includes(asset.id) ? current.filter((id) => id !== asset.id) : [...current, asset.id],
-    );
+  function clearSelection() {
+    setSelectedAssetIds([]);
   }
+
+  function openSinglePreview(asset: AssetListItem) {
+    setSelectedAsset(asset);
+    setViewMode("single");
+  }
+
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        if (viewMode === "single") setViewMode("grid");
+        clearSelection();
+      } else if (event.key === "Enter" && selectedAsset && viewMode === "grid") {
+        event.preventDefault();
+        openSinglePreview(selectedAsset);
+      }
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [selectedAsset, viewMode]);
 
   return (
     <div
@@ -451,8 +511,24 @@ export default function App() {
             disabled={!selectedLibrary || semanticRunning}
           >
             <PlayIcon width="14" height="14" />
-            {semanticStatus?.status === "ready" ? "语义分析" : "准备模型"}
+            {semanticStatus?.status === "ready" ? "分析全部" : "准备模型"}
           </button>
+          {selectedAssetIds.length > 0 ? (
+            <>
+              <button
+                className="tool-button is-active"
+                type="button"
+                onClick={() => void analyzeSelected()}
+                disabled={semanticRunning}
+              >
+                <PlayIcon width="14" height="14" />
+                分析选中
+              </button>
+              <button className="tool-button" type="button" onClick={clearSelection}>
+                清除选择
+              </button>
+            </>
+          ) : null}
           {selectedLibrary ? (
             <button
               className={workspaceMode === "organization" ? "tool-button is-active" : "tool-button"}
@@ -494,7 +570,12 @@ export default function App() {
               onFilterChange={updateFilter}
             />
 
-            <main className="center-workspace">
+            <main
+              className="center-workspace"
+              onClick={(event) => {
+                if (event.target === event.currentTarget) clearSelection();
+              }}
+            >
               {error ? (
                 <div className="global-error" role="alert">
                   <span>{error}</span>
@@ -527,8 +608,17 @@ export default function App() {
                       <span>
                         {activeFilterCount ? `已应用 ${activeFilterCount} 项筛选` : "全部图片"}
                       </span>
+                      {selectedAssetIds.length > 0 ? (
+                        <em className="selection-count">已选择 {selectedAssetIds.length} 张</em>
+                      ) : null}
                     </div>
                     <div>
+                      {selectedLibrary.semanticPendingCount > 0 ? (
+                        <span className="analysis-hint">
+                          已导入 {selectedLibrary.presentCount} 张图片，
+                          {selectedLibrary.semanticPendingCount} 张尚未完成语义分析
+                        </span>
+                      ) : null}
                       {activeFilterCount ? (
                         <button type="button" onClick={() => updateFilter(emptyAssetFilter)}>
                           清除筛选
@@ -551,6 +641,7 @@ export default function App() {
                       assets={assets}
                       selected={selectedAsset}
                       onSelect={selectAsset}
+                      onClose={() => setViewMode("grid")}
                     />
                   ) : assets.length ? (
                     <GridWorkspace
@@ -558,8 +649,8 @@ export default function App() {
                       selected={selectedAsset}
                       grouped={groupBySemantic}
                       onSelect={selectAsset}
-                      markedIds={selectedAssetIds}
-                      onToggleMarked={toggleMarkedAsset}
+                      onOpen={openSinglePreview}
+                      onClearSelection={clearSelection}
                     />
                   ) : (
                     <section className="library-empty">
@@ -636,27 +727,32 @@ function GridWorkspace({
   selected,
   grouped,
   onSelect,
-  markedIds,
-  onToggleMarked,
+  onOpen,
+  onClearSelection,
 }: {
   assets: AssetListItem[];
   selected: AssetListItem | null;
   grouped: boolean;
-  onSelect: (asset: AssetListItem) => void;
-  markedIds: number[];
-  onToggleMarked: (asset: AssetListItem) => void;
+  onSelect: (asset: AssetListItem, modifiers?: SelectionModifiers) => void;
+  onOpen: (asset: AssetListItem) => void;
+  onClearSelection: () => void;
 }) {
   if (!grouped)
     return (
-      <section className="asset-grid" aria-label="图片网格">
+      <section
+        className="asset-grid"
+        aria-label="图片网格"
+        onClick={(event) => {
+          if (event.target === event.currentTarget) onClearSelection();
+        }}
+      >
         {assets.map((asset) => (
           <AssetCard
             key={asset.id}
             asset={asset}
             selected={selected?.id === asset.id}
             onSelect={onSelect}
-            marked={markedIds.includes(asset.id)}
-            onToggleMarked={onToggleMarked}
+            onOpen={onOpen}
           />
         ))}
       </section>
@@ -680,15 +776,19 @@ function GridWorkspace({
               <strong>{label}</strong>
               <span>{items.length} 张</span>
             </div>
-            <div className="asset-grid">
+            <div
+              className="asset-grid"
+              onClick={(event) => {
+                if (event.target === event.currentTarget) onClearSelection();
+              }}
+            >
               {items.map((asset) => (
                 <AssetCard
                   key={asset.id}
                   asset={asset}
                   selected={selected?.id === asset.id}
                   onSelect={onSelect}
-                  marked={markedIds.includes(asset.id)}
-                  onToggleMarked={onToggleMarked}
+                  onOpen={onOpen}
                 />
               ))}
             </div>
@@ -703,25 +803,17 @@ function SinglePreview({
   assets,
   selected,
   onSelect,
+  onClose,
 }: {
   assets: AssetListItem[];
   selected: AssetListItem | null;
-  onSelect: (asset: AssetListItem) => void;
+  onSelect: (asset: AssetListItem, modifiers?: SelectionModifiers) => void;
+  onClose: () => void;
 }) {
   return (
     <section className="single-workspace">
       {selected ? (
-        <div className="single-canvas">
-          <Thumbnail asset={selected} />
-          <div className="single-caption">
-            <strong>{selected.fileName}</strong>
-            <span>
-              {selected.width && selected.height
-                ? `${selected.width} × ${selected.height}`
-                : "尺寸未知"}
-            </span>
-          </div>
-        </div>
+        <ZoomablePreview asset={selected} onClose={onClose} />
       ) : (
         <div className="single-empty">没有可预览的图片</div>
       )}
@@ -731,7 +823,13 @@ function SinglePreview({
             type="button"
             key={asset.id}
             className={selected?.id === asset.id ? "is-active" : ""}
-            onClick={() => onSelect(asset)}
+            onClick={(event) =>
+              onSelect(asset, {
+                ctrlKey: event.ctrlKey,
+                metaKey: event.metaKey,
+                shiftKey: event.shiftKey,
+              })
+            }
             aria-label={asset.fileName}
           >
             <Thumbnail asset={asset} />
@@ -739,6 +837,79 @@ function SinglePreview({
         ))}
       </div>
     </section>
+  );
+}
+
+function ZoomablePreview({ asset, onClose }: { asset: AssetListItem; onClose: () => void }) {
+  const [zoom, setZoom] = useState(1);
+  const [offset, setOffset] = useState({ x: 0, y: 0 });
+  const [dragging, setDragging] = useState(false);
+  const [dragStart, setDragStart] = useState({ x: 0, y: 0 });
+
+  function reset(nextZoom = 1) {
+    setZoom(nextZoom);
+    setOffset({ x: 0, y: 0 });
+  }
+
+  return (
+    <div className="single-canvas">
+      <div className="preview-toolbar" aria-label="预览缩放工具">
+        <button type="button" onClick={() => setZoom((value) => Math.max(0.5, value - 0.25))}>
+          −
+        </button>
+        <button type="button" onClick={() => reset(1)}>
+          适应窗口
+        </button>
+        <button type="button" onClick={() => reset(1)}>
+          100%
+        </button>
+        <button type="button" onClick={() => reset(1)}>
+          重置
+        </button>
+        <button type="button" onClick={() => setZoom((value) => Math.min(4, value + 0.25))}>
+          ＋
+        </button>
+        <span>{Math.round(zoom * 100)}%</span>
+      </div>
+      <div
+        className={`zoom-stage${dragging ? " is-dragging" : ""}`}
+        onWheel={(event) => {
+          event.preventDefault();
+          setZoom((value) => Math.max(0.5, Math.min(4, value + (event.deltaY < 0 ? 0.25 : -0.25))));
+        }}
+        onPointerDown={(event) => {
+          if (zoom <= 1) return;
+          event.currentTarget.setPointerCapture(event.pointerId);
+          setDragging(true);
+          setDragStart({ x: event.clientX - offset.x, y: event.clientY - offset.y });
+        }}
+        onPointerMove={(event) => {
+          if (!dragging) return;
+          setOffset({ x: event.clientX - dragStart.x, y: event.clientY - dragStart.y });
+        }}
+        onPointerUp={(event) => {
+          if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+            event.currentTarget.releasePointerCapture(event.pointerId);
+          }
+          setDragging(false);
+        }}
+        onDoubleClick={(event) => {
+          if (event.target instanceof HTMLImageElement) reset(zoom > 1 ? 1 : 2);
+          else onClose();
+        }}
+      >
+        <div
+          className="zoom-content"
+          style={{ transform: `translate3d(${offset.x}px, ${offset.y}px, 0) scale(${zoom})` }}
+        >
+          <Thumbnail asset={asset} />
+        </div>
+      </div>
+      <div className="single-caption">
+        <strong>{asset.fileName}</strong>
+        <span>{asset.width && asset.height ? `${asset.width} × ${asset.height}` : "尺寸未知"}</span>
+      </div>
+    </div>
   );
 }
 
