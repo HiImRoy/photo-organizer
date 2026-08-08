@@ -18,18 +18,19 @@ use crate::models::{
 };
 use crate::organization;
 use crate::paths::AppPaths;
-use crate::scanner::{scan_library, validate_scan_root};
+use crate::scanner::{scan_library, validate_scan_root_with_app_data};
 use crate::semantic::{
     SemanticClassifier, SemanticLabelDescriptor, SemanticRuntimeStatus, TinyClipClassifier,
     semantic_catalog,
 };
 use crate::semantic_tasks::spawn_semantic_job;
-use crate::tasks::{SemanticTaskRegistry, TaskRegistry};
+use crate::tasks::{SemanticTaskRegistry, SourceScanGuard, SourceScanRegistry, TaskRegistry};
 
 pub struct AppState {
     pub repository: Repository,
     pub paths: AppPaths,
     pub tasks: Arc<TaskRegistry>,
+    pub source_scans: Arc<SourceScanRegistry>,
     pub semantic_tasks: Arc<SemanticTaskRegistry>,
     pub semantic: Arc<RwLock<Arc<dyn SemanticClassifier>>>,
 }
@@ -44,6 +45,7 @@ impl AppState {
             repository,
             paths,
             tasks: Arc::new(TaskRegistry::default()),
+            source_scans: Arc::new(SourceScanRegistry::default()),
             semantic_tasks: Arc::new(SemanticTaskRegistry::default()),
             semantic: Arc::new(RwLock::new(semantic)),
         }
@@ -90,23 +92,96 @@ pub fn start_scan(
     app: tauri::AppHandle,
     state: State<'_, AppState>,
 ) -> Result<StartScanResponse, String> {
-    let canonical_root = validate_scan_root(Path::new(&root_path)).map_err(ipc_error)?;
+    let source_identity =
+        validate_scan_root_with_app_data(Path::new(&root_path), &state.paths.data_dir)
+            .map_err(ipc_error)?;
+    let _scan_guard = state
+        .source_scans
+        .try_acquire(&source_identity.identity_key)
+        .ok_or_else(|| "该图库或其嵌套图库正在扫描，请稍后重试".to_owned())?;
     let (task_id, cancellation) = state.tasks.create();
     let response = StartScanResponse {
         task_id: task_id.clone(),
     };
-    let repository = state.repository.clone();
-    let paths = state.paths.clone();
-    let tasks = state.tasks.clone();
-    let thread_task_id = task_id.clone();
+    spawn_scan_task(
+        app,
+        state.repository.clone(),
+        state.paths.clone(),
+        state.tasks.clone(),
+        task_id.clone(),
+        cancellation,
+        source_identity.source_path,
+        scan_guard,
+        None,
+    )
+    .map_err(ipc_error)
+    .or_else(|error| {
+        state.tasks.remove(&task_id);
+        Err(error)
+    })?;
 
+    Ok(response)
+}
+
+#[tauri::command]
+pub fn rescan_library(
+    library_id: i64,
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+) -> Result<StartScanResponse, String> {
+    let source = state
+        .repository
+        .library_source_root(library_id)
+        .map_err(ipc_error)?
+        .ok_or_else(|| format!("library {library_id} does not exist"))?;
+    let source_identity = validate_scan_root_with_app_data(&source.source_path, &state.paths.data_dir)
+        .map_err(ipc_error)?;
+    let scan_guard = state
+        .source_scans
+        .try_acquire(&source_identity.identity_key)
+        .ok_or_else(|| "该图库或其嵌套图库正在扫描，请稍后重试".to_owned())?;
+    let (task_id, cancellation) = state.tasks.create();
+    let response = StartScanResponse {
+        task_id: task_id.clone(),
+    };
+    spawn_scan_task(
+        app,
+        state.repository.clone(),
+        state.paths.clone(),
+        state.tasks.clone(),
+        task_id.clone(),
+        cancellation,
+        source_identity.source_path,
+        scan_guard,
+        Some(library_id),
+    )
+    .map_err(ipc_error)
+    .or_else(|error| {
+        state.tasks.remove(&task_id);
+        Err(error)
+    })?;
+    Ok(response)
+}
+
+fn spawn_scan_task(
+    app: tauri::AppHandle,
+    repository: Repository,
+    paths: AppPaths,
+    tasks: Arc<TaskRegistry>,
+    task_id: String,
+    cancellation: Arc<std::sync::atomic::AtomicBool>,
+    root: PathBuf,
+    scan_guard: SourceScanGuard,
+    library_id_hint: Option<i64>,
+) -> AppResult<()> {
+    let thread_task_id = task_id.clone();
     std::thread::Builder::new()
         .name(format!("scan-{thread_task_id}"))
         .spawn(move || {
             let result = scan_library(
                 &repository,
                 &paths.thumbnail_dir,
-                &canonical_root,
+                &root,
                 &thread_task_id,
                 &cancellation,
                 |progress| {
@@ -116,12 +191,14 @@ pub fn start_scan(
                 },
             );
             if let Err(error) = result {
-                let root = canonical_root.to_string_lossy();
-                let library_id = repository.list_libraries().ok().and_then(|libraries| {
-                    libraries
-                        .into_iter()
-                        .find(|library| library.root_path == root)
-                        .map(|library| library.id)
+                let root_string = root.to_string_lossy().into_owned();
+                let library_id = library_id_hint.or_else(|| {
+                    repository.list_libraries().ok().and_then(|libraries| {
+                        libraries
+                            .into_iter()
+                            .find(|library| library.source_path == root_string)
+                            .map(|library| library.id)
+                    })
                 });
                 if let Err(database_error) =
                     repository.fail_scan(&thread_task_id, library_id, &error.to_string())
@@ -137,13 +214,10 @@ pub fn start_scan(
                 log::error!("scan {thread_task_id} failed: {error}");
             }
             tasks.remove(&thread_task_id);
+            drop(scan_guard);
         })
-        .map_err(|error| {
-            state.tasks.remove(&task_id);
-            ipc_error(AppError::Io(error))
-        })?;
-
-    Ok(response)
+        .map(|_| ())
+        .map_err(AppError::Io)
 }
 
 #[tauri::command]
@@ -182,10 +256,17 @@ pub fn get_preview_data_url(
 
 #[tauri::command]
 pub fn remove_library(library_id: i64, state: State<'_, AppState>) -> Result<bool, String> {
-    let cache_entries = state
+    let scan_guard = state
         .repository
-        .library_cache_entries(library_id)
-        .map_err(ipc_error)?;
+        .library_source_root(library_id)
+        .map_err(ipc_error)?
+        .map(|source| {
+            state
+                .source_scans
+                .try_acquire(&source.identity_key)
+                .ok_or_else(|| "该图库或其嵌套图库正在扫描，请稍后重试".to_owned())
+        })
+        .transpose()?;
     let jobs = state
         .repository
         .active_job_ids_for_library(library_id)
@@ -199,13 +280,12 @@ pub fn remove_library(library_id: i64, state: State<'_, AppState>) -> Result<boo
             let _ = state.repository.cancel_semantic_job(&job_id);
         }
     }
-
-    let removed = state
+    let result = state
         .repository
-        .remove_library(library_id)
+        .remove_library_with_reconciliation(library_id)
         .map_err(ipc_error)?;
-    if removed {
-        for (asset_id, fingerprint, thumbnail_path) in cache_entries {
+    if result.removed {
+        for (asset_id, fingerprint, thumbnail_path) in result.removed_cache_entries {
             if let Some(path) = thumbnail_path {
                 remove_cache_file_if_safe(&state.paths.thumbnail_dir, &path);
             }
@@ -215,14 +295,19 @@ pub fn remove_library(library_id: i64, state: State<'_, AppState>) -> Result<boo
             );
         }
     }
-    Ok(removed)
+    Ok(result.removed)
 }
 
 #[tauri::command]
-pub fn open_library_in_explorer(root_path: String) -> Result<(), String> {
-    if !Path::new(&root_path).is_dir() {
-        return Err("原始目录不可访问".into());
-    }
+pub fn open_library_in_explorer(library_id: i64, state: State<'_, AppState>) -> Result<(), String> {
+    let source = state
+        .repository
+        .library_source_root(library_id)
+        .map_err(ipc_error)?
+        .ok_or_else(|| format!("library {library_id} does not exist"))?;
+    let root_path = validate_scan_root_with_app_data(&source.source_path, &state.paths.data_dir)
+        .map_err(ipc_error)?
+        .source_path;
     std::process::Command::new("explorer.exe")
         .arg(&root_path)
         .spawn()

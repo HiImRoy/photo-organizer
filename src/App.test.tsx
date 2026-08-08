@@ -10,6 +10,7 @@ const api = vi.hoisted(() => ({
   fetchLibraries: vi.fn(),
   fetchAssets: vi.fn(),
   startLibraryScan: vi.fn(),
+  rescanLibrary: vi.fn(),
   cancelLibraryScan: vi.fn(),
   fetchThumbnail: vi.fn(),
   fetchPreview: vi.fn(),
@@ -36,6 +37,11 @@ vi.mock("./api", () => api);
 const library: LibrarySummary = {
   id: 7,
   rootPath: "C:\\fixtures\\中文 图库",
+  name: "中文 图库",
+  sourcePath: "C:\\fixtures\\中文 图库",
+  sourceIdentityKey: "c:/fixtures/中文 图库",
+  parentLibraryId: null,
+  displayOrder: 0,
   createdAt: "2026-08-06T10:00:00Z",
   lastScanAt: "2026-08-06T10:10:00Z",
   status: "ready",
@@ -118,6 +124,7 @@ beforeEach(() => {
   api.fetchLibraries.mockResolvedValue([]);
   api.fetchAssets.mockResolvedValue({ items: [], total: 0, page: 1, pageSize: 200 });
   api.startLibraryScan.mockResolvedValue({ taskId: "task-1" });
+  api.rescanLibrary.mockResolvedValue({ taskId: "task-2" });
   api.cancelLibraryScan.mockResolvedValue({ taskId: "task-1", accepted: true });
   api.fetchThumbnail.mockResolvedValue("data:image/jpeg;base64,ZmFrZQ==");
   api.fetchPreview.mockResolvedValue("data:image/jpeg;base64,ZmFrZQ==");
@@ -210,6 +217,30 @@ describe("PhotoOrganizer application shell", () => {
     expect(screen.getByText("1200 × 800")).toBeInTheDocument();
     expect(screen.getByText("#D76A52")).toBeInTheDocument();
     await waitFor(() => expect(api.fetchThumbnail).toHaveBeenCalledWith(12));
+  });
+
+  it("renders an explicit source-derived library tree without folder navigation", async () => {
+    const user = userEvent.setup();
+    const childLibrary: LibrarySummary = {
+      ...library,
+      id: 8,
+      name: "子图库",
+      rootPath: "C:\\fixtures\\中文 图库\\子图库",
+      sourcePath: "C:\\fixtures\\中文 图库\\子图库",
+      sourceIdentityKey: "c:/fixtures/中文 图库/子图库",
+      parentLibraryId: library.id,
+      presentCount: 1,
+      assetCount: 1,
+    };
+    api.fetchLibraries.mockResolvedValue([library, childLibrary]);
+    render(<App />);
+
+    expect(await screen.findByRole("button", { name: "折叠 中文 图库" })).toBeInTheDocument();
+    expect(screen.queryByText("原始文件夹")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "＋ 导入图库" })).toBeInTheDocument();
+    expect(screen.getByText("子图库")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "折叠 中文 图库" }));
+    expect(screen.queryByText("子图库")).not.toBeInTheDocument();
   });
 
   it("updates scan progress and sends cancellation", async () => {

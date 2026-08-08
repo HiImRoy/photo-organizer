@@ -8,6 +8,11 @@ export type ViewMode = "grid" | "single";
 export interface LibrarySummary {
   id: number;
   rootPath: string;
+  name: string;
+  sourcePath: string;
+  sourceIdentityKey: string;
+  parentLibraryId: number | null;
+  displayOrder: number;
   createdAt: string;
   lastScanAt: string | null;
   status: string;

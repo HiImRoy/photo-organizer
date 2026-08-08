@@ -1,25 +1,24 @@
-import { useMemo, useState } from "react";
+import { useState } from "react";
 
 import type {
   AssetFilter,
-  FolderSummary,
   LibrarySummary,
   SemanticGroupSummary,
   SemanticLabelDescriptor,
   SemanticRuntimeStatus,
 } from "../types";
-import { ChevronIcon, FolderIcon, LibraryIcon, PanelIcon, ShieldIcon } from "./Icons";
+import { ChevronIcon, LibraryIcon, PanelIcon, ShieldIcon } from "./Icons";
 
 interface SidebarProps {
   collapsed: boolean;
   libraries: LibrarySummary[];
   selectedLibraryId: number | null;
-  folders: FolderSummary[];
   groups: SemanticGroupSummary[];
   catalog: SemanticLabelDescriptor[];
   filter: AssetFilter;
   semanticStatus: SemanticRuntimeStatus | null;
   onToggle: () => void;
+  onImportLibrary: () => void;
   onSelectLibrary: (id: number) => void;
   onRescanLibrary: (library: LibrarySummary) => void;
   onOpenLibrary: (library: LibrarySummary) => void;
@@ -50,12 +49,12 @@ export function Sidebar(props: SidebarProps) {
     collapsed,
     libraries,
     selectedLibraryId,
-    folders,
     groups,
     catalog,
     filter,
     semanticStatus,
     onToggle,
+    onImportLibrary,
     onSelectLibrary,
     onRescanLibrary,
     onOpenLibrary,
@@ -63,10 +62,9 @@ export function Sidebar(props: SidebarProps) {
     onRemoveLibrary,
     onFilterChange,
   } = props;
-  const [expandedFolders, setExpandedFolders] = useState<Set<string>>(new Set());
+  const [collapsedLibraryIds, setCollapsedLibraryIds] = useState<Set<number>>(new Set());
   const [openLibraryMenuId, setOpenLibraryMenuId] = useState<number | null>(null);
-  const folderTree = useMemo(() => buildFolderTree(folders), [folders]);
-  const selectedLibrary = libraries.find((library) => library.id === selectedLibraryId) ?? null;
+  const libraryTree = buildLibraryTree(libraries);
 
   if (collapsed) {
     return (
@@ -75,7 +73,6 @@ export function Sidebar(props: SidebarProps) {
           <PanelIcon width="17" height="17" />
         </button>
         <LibraryIcon width="18" height="18" />
-        <FolderIcon width="18" height="18" />
       </aside>
     );
   }
@@ -90,135 +87,41 @@ export function Sidebar(props: SidebarProps) {
       </div>
 
       <PanelSection title="图库">
-        <div className="nav-list">
-          {libraries.map((library) => {
-            const label = library.rootPath.split(/[\\/]/).at(-1) || library.rootPath;
-            const menuOpen = openLibraryMenuId === library.id;
-            return (
-              <div
-                className="library-nav-row"
-                key={library.id}
-                onContextMenu={(event) => {
-                  event.preventDefault();
-                  setOpenLibraryMenuId(library.id);
-                }}
-              >
-                <button
-                  type="button"
-                  className={library.id === selectedLibraryId ? "nav-row is-active" : "nav-row"}
-                  onClick={() => onSelectLibrary(library.id)}
-                  title={library.rootPath}
-                >
-                  <LibraryIcon width="15" height="15" />
-                  <span>{library.status === "unavailable" ? "位置不可用" : label}</span>
-                  <small>{library.presentCount}</small>
-                </button>
-                <button
-                  type="button"
-                  className="library-menu-trigger"
-                  aria-label={`${label}图库菜单`}
-                  onClick={(event) => {
-                    event.stopPropagation();
-                    setOpenLibraryMenuId(menuOpen ? null : library.id);
-                  }}
-                >
-                  …
-                </button>
-                {menuOpen ? (
-                  <div className="library-context-menu" role="menu">
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setOpenLibraryMenuId(null);
-                        onRescanLibrary(library);
-                      }}
-                    >
-                      重新扫描
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setOpenLibraryMenuId(null);
-                        onOpenLibrary(library);
-                      }}
-                    >
-                      在资源管理器中显示
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setOpenLibraryMenuId(null);
-                        onShowLibraryInfo(library);
-                      }}
-                    >
-                      图库信息
-                    </button>
-                    <button
-                      type="button"
-                      className="danger-action"
-                      onClick={() => {
-                        setOpenLibraryMenuId(null);
-                        onRemoveLibrary(library);
-                      }}
-                    >
-                      从资料库移除
-                    </button>
-                  </div>
-                ) : null}
-              </div>
-            );
-          })}
-        </div>
-      </PanelSection>
-
-      <PanelSection title="原始文件夹">
-        <div className="nav-list compact">
-          <button
-            type="button"
-            className={!filter.folderPrefix ? "nav-row is-active" : "nav-row"}
-            onClick={() => onFilterChange({ ...filter, folderPrefix: null })}
-          >
-            <FolderIcon width="14" height="14" />
-            <span>全部目录</span>
-          </button>
-          {selectedLibrary ? (
-            <button
-              type="button"
-              className={!filter.folderPrefix ? "nav-row is-active" : "nav-row"}
-              onClick={() => onFilterChange({ ...filter, folderPrefix: null })}
-              title={selectedLibrary.rootPath}
-            >
-              <LibraryIcon width="14" height="14" />
-              <span>
-                {selectedLibrary.rootPath.split(/[\\/]/).at(-1) || selectedLibrary.rootPath}
-              </span>
-              <small>{selectedLibrary.presentCount}</small>
-            </button>
-          ) : null}
-          {folderTree.map((node) => (
-            <FolderTreeNode
-              key={node.relativePath}
+        <div className="nav-list library-tree">
+          {libraryTree.map((node) => (
+            <LibraryTreeNode
+              key={node.library.id}
               node={node}
               depth={0}
-              expanded={expandedFolders.has(node.relativePath)}
-              onToggle={() =>
-                setExpandedFolders((current) => {
+              expanded={!collapsedLibraryIds.has(node.library.id)}
+              collapsedLibraryIds={collapsedLibraryIds}
+              selectedLibraryId={selectedLibraryId}
+              openLibraryMenuId={openLibraryMenuId}
+              onToggle={(id) =>
+                setCollapsedLibraryIds((current) => {
                   const next = new Set(current);
-                  if (next.has(node.relativePath)) next.delete(node.relativePath);
-                  else next.add(node.relativePath);
+                  if (next.has(id)) next.delete(id);
+                  else next.add(id);
                   return next;
                 })
               }
-              selectedPath={filter.folderPrefix}
-              onSelect={(path) => onFilterChange({ ...filter, folderPrefix: path })}
-              expandedFolders={expandedFolders}
-              setExpandedFolders={setExpandedFolders}
+              onOpenMenu={setOpenLibraryMenuId}
+              onSelectLibrary={onSelectLibrary}
+              onRescanLibrary={onRescanLibrary}
+              onOpenLibrary={onOpenLibrary}
+              onShowLibraryInfo={onShowLibraryInfo}
+              onRemoveLibrary={onRemoveLibrary}
             />
           ))}
+          {libraryTree.length === 0 ? <span className="empty-nav-state">尚未导入图库</span> : null}
+          <button className="nav-row import-library-row" type="button" onClick={onImportLibrary}>
+            <LibraryIcon width="15" height="15" />
+            <span>＋ 导入图库</span>
+          </button>
         </div>
       </PanelSection>
 
-      <PanelSection title="快捷入口">
+      <PanelSection title="更多筛选">
         <div className="nav-list compact">
           <FilterRow
             active={filter.semanticState === "not_analyzed"}
@@ -386,111 +289,171 @@ export function Sidebar(props: SidebarProps) {
   );
 }
 
-interface FolderTreeNodeData {
-  name: string;
-  relativePath: string;
-  assetCount: number;
-  children: FolderTreeNodeData[];
+interface LibraryTreeNodeData {
+  library: LibrarySummary;
+  children: LibraryTreeNodeData[];
 }
 
-function FolderTreeNode({
+function buildLibraryTree(libraries: LibrarySummary[]): LibraryTreeNodeData[] {
+  const nodes = new Map<number, LibraryTreeNodeData>();
+  for (const library of libraries) nodes.set(library.id, { library, children: [] });
+
+  const roots: LibraryTreeNodeData[] = [];
+  for (const node of nodes.values()) {
+    const parent =
+      node.library.parentLibraryId === null ? null : nodes.get(node.library.parentLibraryId);
+    if (parent && parent.library.id !== node.library.id) parent.children.push(node);
+    else roots.push(node);
+  }
+
+  const sortNodes = (items: LibraryTreeNodeData[]) => {
+    items.sort(
+      (left, right) =>
+        left.library.displayOrder - right.library.displayOrder ||
+        left.library.name.localeCompare(right.library.name, "zh-CN"),
+    );
+    for (const item of items) sortNodes(item.children);
+  };
+  sortNodes(roots);
+  return roots;
+}
+
+function LibraryTreeNode({
   node,
   depth,
   expanded,
+  collapsedLibraryIds,
+  selectedLibraryId,
+  openLibraryMenuId,
   onToggle,
-  selectedPath,
-  onSelect,
-  expandedFolders,
-  setExpandedFolders,
+  onOpenMenu,
+  onSelectLibrary,
+  onRescanLibrary,
+  onOpenLibrary,
+  onShowLibraryInfo,
+  onRemoveLibrary,
 }: {
-  node: FolderTreeNodeData;
+  node: LibraryTreeNodeData;
   depth: number;
   expanded: boolean;
-  onToggle: () => void;
-  selectedPath: string | null;
-  onSelect: (path: string) => void;
-  expandedFolders: Set<string>;
-  setExpandedFolders: React.Dispatch<React.SetStateAction<Set<string>>>;
+  collapsedLibraryIds: Set<number>;
+  selectedLibraryId: number | null;
+  openLibraryMenuId: number | null;
+  onToggle: (id: number) => void;
+  onOpenMenu: (id: number | null) => void;
+  onSelectLibrary: (id: number) => void;
+  onRescanLibrary: (library: LibrarySummary) => void;
+  onOpenLibrary: (library: LibrarySummary) => void;
+  onShowLibraryInfo: (library: LibrarySummary) => void;
+  onRemoveLibrary: (library: LibrarySummary) => void;
 }) {
+  const { library } = node;
+  const menuOpen = openLibraryMenuId === library.id;
+  const label = library.name || library.sourcePath;
   return (
     <>
-      <div className="folder-tree-row" style={{ paddingLeft: `${8 + depth * 14}px` }}>
+      <div
+        className="library-tree-row"
+        style={{ paddingLeft: `${8 + depth * 14}px` }}
+        onContextMenu={(event) => {
+          event.preventDefault();
+          onOpenMenu(library.id);
+        }}
+      >
         <button
           type="button"
-          className="folder-tree-expander"
-          onClick={onToggle}
-          aria-label={expanded ? `折叠 ${node.name}` : `展开 ${node.name}`}
+          className="library-tree-expander"
+          onClick={() => onToggle(library.id)}
+          aria-label={expanded ? `折叠 ${label}` : `展开 ${label}`}
           disabled={!node.children.length}
         >
           <ChevronIcon width="11" height="11" />
         </button>
         <button
           type="button"
-          className={selectedPath === node.relativePath ? "nav-row is-active" : "nav-row"}
-          onClick={() => onSelect(node.relativePath)}
-          title={node.relativePath}
+          className={library.id === selectedLibraryId ? "nav-row is-active" : "nav-row"}
+          onClick={() => onSelectLibrary(library.id)}
+          title={library.sourcePath}
         >
-          <FolderIcon width="14" height="14" />
-          <span>{node.name}</span>
-          <small>{node.assetCount}</small>
+          <LibraryIcon width="15" height="15" />
+          <span>{library.status === "unavailable" ? `${label}（位置不可用）` : label}</span>
+          <small>{library.presentCount}</small>
         </button>
+        <button
+          type="button"
+          className="library-menu-trigger"
+          aria-label={`${label}图库菜单`}
+          onClick={(event) => {
+            event.stopPropagation();
+            onOpenMenu(menuOpen ? null : library.id);
+          }}
+        >
+          …
+        </button>
+        {menuOpen ? (
+          <div className="library-context-menu" role="menu">
+            <button
+              type="button"
+              onClick={() => {
+                onOpenMenu(null);
+                onRescanLibrary(library);
+              }}
+            >
+              重新扫描
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                onOpenMenu(null);
+                onOpenLibrary(library);
+              }}
+            >
+              在资源管理器中显示
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                onOpenMenu(null);
+                onShowLibraryInfo(library);
+              }}
+            >
+              图库信息
+            </button>
+            <button
+              type="button"
+              className="danger-action"
+              onClick={() => {
+                onOpenMenu(null);
+                onRemoveLibrary(library);
+              }}
+            >
+              从资料库移除
+            </button>
+          </div>
+        ) : null}
       </div>
       {expanded
         ? node.children.map((child) => (
-            <FolderTreeNode
-              key={child.relativePath}
+            <LibraryTreeNode
+              key={child.library.id}
               node={child}
               depth={depth + 1}
-              expanded={expandedFolders.has(child.relativePath)}
-              onToggle={() =>
-                setExpandedFolders((current) => {
-                  const next = new Set(current);
-                  if (next.has(child.relativePath)) next.delete(child.relativePath);
-                  else next.add(child.relativePath);
-                  return next;
-                })
-              }
-              selectedPath={selectedPath}
-              onSelect={onSelect}
-              expandedFolders={expandedFolders}
-              setExpandedFolders={setExpandedFolders}
+              expanded={!collapsedLibraryIds.has(child.library.id)}
+              collapsedLibraryIds={collapsedLibraryIds}
+              selectedLibraryId={selectedLibraryId}
+              openLibraryMenuId={openLibraryMenuId}
+              onToggle={onToggle}
+              onOpenMenu={onOpenMenu}
+              onSelectLibrary={onSelectLibrary}
+              onRescanLibrary={onRescanLibrary}
+              onOpenLibrary={onOpenLibrary}
+              onShowLibraryInfo={onShowLibraryInfo}
+              onRemoveLibrary={onRemoveLibrary}
             />
           ))
         : null}
     </>
   );
-}
-
-function buildFolderTree(folders: FolderSummary[]): FolderTreeNodeData[] {
-  const roots: FolderTreeNodeData[] = [];
-  const byPath = new Map<string, FolderTreeNodeData>();
-  const sorted = folders
-    .filter((folder) => folder.relativePath)
-    .slice()
-    .sort((left, right) => left.relativePath.localeCompare(right.relativePath));
-  for (const folder of sorted) {
-    const parts = folder.relativePath.split(/[\\/]+/).filter(Boolean);
-    let parent: FolderTreeNodeData | null = null;
-    let path = "";
-    for (const part of parts) {
-      path = path ? `${path}\\${part}` : part;
-      let node = byPath.get(path);
-      if (!node) {
-        node = { name: part, relativePath: path, assetCount: 0, children: [] };
-        byPath.set(path, node);
-        if (parent) parent.children.push(node);
-        else roots.push(node);
-      }
-      if (
-        path === folder.relativePath ||
-        path.replaceAll("\\", "/") === folder.relativePath.replaceAll("\\", "/")
-      ) {
-        node.assetCount = folder.assetCount;
-      }
-      parent = node;
-    }
-  }
-  return roots;
 }
 
 function PanelSection({

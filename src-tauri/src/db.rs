@@ -1,9 +1,10 @@
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use chrono::{SecondsFormat, Utc};
 use rusqlite::types::Value;
-use rusqlite::{Connection, OptionalExtension, params, params_from_iter};
+use rusqlite::{Connection, OptionalExtension, Transaction, params, params_from_iter};
 
 use crate::error::{AppError, AppResult};
 use crate::models::{
@@ -16,11 +17,14 @@ use crate::semantic::{
     ANALYSIS_VERSION as SEMANTIC_ANALYSIS_VERSION, MODEL_NAME, MODEL_VERSION,
     SemanticAnalysisOutput,
 };
+use crate::source_identity::{identity_key, is_same_or_descendant};
 
 const INITIAL_MIGRATION: &str = include_str!("../migrations/0001_initial.sql");
 const SEMANTIC_MIGRATION: &str = include_str!("../migrations/0002_semantic_workspace.sql");
 const ORGANIZATION_MIGRATION: &str = include_str!("../migrations/0003_organization_dry_run.sql");
 const LIBRARY_UX_MIGRATION: &str = include_str!("../migrations/0004_library_ux_refinement.sql");
+const LIBRARY_SOURCE_MIGRATION: &str = include_str!("../migrations/0005_library_source_hierarchy.sql");
+const ASSET_IDENTITY_MIGRATION: &str = include_str!("../migrations/0006_asset_global_identity.sql");
 
 #[derive(Debug, Clone)]
 pub struct Repository {
@@ -32,6 +36,19 @@ pub struct SemanticAssetCandidate {
     pub id: i64,
     pub absolute_path: PathBuf,
     pub fingerprint: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LibrarySourceRoot {
+    pub library_id: i64,
+    pub source_path: PathBuf,
+    pub identity_key: String,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct LibraryRemovalResult {
+    pub removed: bool,
+    pub removed_cache_entries: Vec<(i64, String, Option<PathBuf>)>,
 }
 
 impl Repository {
@@ -66,6 +83,8 @@ impl Repository {
             (2_i64, SEMANTIC_MIGRATION),
             (3_i64, ORGANIZATION_MIGRATION),
             (4_i64, LIBRARY_UX_MIGRATION),
+            (5_i64, LIBRARY_SOURCE_MIGRATION),
+            (6_i64, ASSET_IDENTITY_MIGRATION),
         ] {
             if current < version {
                 let transaction = connection.transaction()?;
@@ -77,7 +96,126 @@ impl Repository {
                 transaction.commit()?;
             }
         }
+        self.backfill_path_identities()?;
         self.recover_interrupted_jobs()?;
+        Ok(())
+    }
+
+    fn backfill_path_identities(&self) -> AppResult<()> {
+        let mut connection = self.open()?;
+        let transaction = connection.transaction()?;
+        let library_needs_backfill: bool = transaction.query_row(
+            "SELECT EXISTS(
+                SELECT 1 FROM libraries
+                WHERE source_identity_key = '' OR source_path = ''
+            )",
+            [],
+            |row| row.get(0),
+        )?;
+        let asset_needs_backfill: bool = transaction.query_row(
+            "SELECT EXISTS(
+                SELECT 1 FROM assets
+                WHERE asset_identity_key = ''
+            )",
+            [],
+            |row| row.get(0),
+        )?;
+
+        if library_needs_backfill {
+            let libraries = {
+                let mut statement =
+                    transaction.prepare("SELECT id, root_path FROM libraries ORDER BY id")?;
+                statement
+                    .query_map([], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)))?
+                    .collect::<Result<Vec<_>, _>>()?
+            };
+            for (library_id, root_path) in libraries {
+                let source_path = std::fs::canonicalize(&root_path)
+                    .unwrap_or_else(|_| PathBuf::from(&root_path));
+                let source_path_string = source_path.to_string_lossy().into_owned();
+                let source_identity_key = identity_key(&source_path);
+                let name = library_name(&source_path, &root_path);
+                transaction.execute(
+                    "UPDATE libraries
+                     SET name=?2, source_path=?3, source_identity_key=?4
+                     WHERE id=?1",
+                    params![library_id, name, source_path_string, source_identity_key],
+                )?;
+            }
+        }
+
+        if asset_needs_backfill {
+            let assets = {
+                let mut statement =
+                    transaction.prepare("SELECT id, absolute_path FROM assets ORDER BY id")?;
+                statement
+                    .query_map([], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)))?
+                    .collect::<Result<Vec<_>, _>>()?
+            };
+            for (asset_id, absolute_path) in assets {
+                let canonical_path = std::fs::canonicalize(&absolute_path)
+                    .unwrap_or_else(|_| PathBuf::from(&absolute_path));
+                transaction.execute(
+                    "UPDATE assets SET asset_identity_key=?2 WHERE id=?1",
+                    params![asset_id, identity_key(&canonical_path)],
+                )?;
+            }
+        }
+
+        let libraries = {
+            let mut statement = transaction.prepare(
+                "SELECT id, source_identity_key
+                 FROM libraries
+                 WHERE source_identity_key <> ''
+                 ORDER BY id",
+            )?;
+            statement
+                .query_map([], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)))?
+                .collect::<Result<Vec<_>, _>>()?
+        };
+        let mut duplicate_libraries = HashMap::<String, Vec<i64>>::new();
+        for (library_id, source_identity_key) in &libraries {
+            duplicate_libraries
+                .entry(source_identity_key.clone())
+                .or_default()
+                .push(*library_id);
+        }
+
+        let assets = {
+            let mut statement = transaction.prepare(
+                "SELECT id, asset_identity_key
+                 FROM assets
+                 WHERE asset_identity_key <> ''
+                 ORDER BY id",
+            )?;
+            statement
+                .query_map([], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)))?
+                .collect::<Result<Vec<_>, _>>()?
+        };
+        let mut duplicate_assets = HashMap::<String, Vec<i64>>::new();
+        for (asset_id, asset_identity_key) in &assets {
+            duplicate_assets
+                .entry(asset_identity_key.clone())
+                .or_default()
+                .push(*asset_id);
+        }
+
+        merge_duplicate_assets(&transaction, &duplicate_assets)?;
+        merge_duplicate_libraries(&transaction, &duplicate_libraries)?;
+
+        rebuild_library_hierarchy(&transaction)?;
+
+        transaction.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_libraries_source_identity
+             ON libraries(source_identity_key)",
+            [],
+        )?;
+        transaction.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_assets_identity
+             ON assets(asset_identity_key)",
+            [],
+        )?;
+        transaction.commit()?;
         Ok(())
     }
 
@@ -128,23 +266,45 @@ impl Repository {
     }
 
     pub fn begin_scan(&self, root_path: &str, task_id: &str) -> AppResult<(i64, i64)> {
+        let source_path = Path::new(root_path);
+        let source_identity_key = identity_key(source_path);
+        let name = library_name(source_path, root_path);
+        self.begin_scan_with_identity(
+            root_path,
+            &source_identity_key,
+            &name,
+            task_id,
+        )
+    }
+
+    pub fn begin_scan_with_identity(
+        &self,
+        root_path: &str,
+        source_identity_key: &str,
+        name: &str,
+        task_id: &str,
+    ) -> AppResult<(i64, i64)> {
         let mut connection = self.open()?;
         let transaction = connection.transaction()?;
         let timestamp = now();
         transaction.execute(
-            "INSERT OR IGNORE INTO libraries(root_path, created_at, status)
-             VALUES(?1, ?2, 'ready')",
-            params![root_path, timestamp],
+            "INSERT OR IGNORE INTO libraries(
+                root_path, name, source_path, source_identity_key, created_at, status
+             ) VALUES(?1, ?2, ?1, ?3, ?4, 'ready')",
+            params![root_path, name, source_identity_key, timestamp],
         )?;
         transaction.execute(
             "UPDATE libraries
-             SET status = 'scanning', last_error = NULL, scan_generation = scan_generation + 1
-             WHERE root_path = ?1",
-            [root_path],
+             SET root_path = ?2, source_path = ?2, name = ?3,
+                 status = 'scanning', last_error = NULL, scan_generation = scan_generation + 1
+             WHERE source_identity_key = ?1",
+            params![source_identity_key, root_path, name],
         )?;
+        rebuild_library_hierarchy(&transaction)?;
         let (library_id, generation): (i64, i64) = transaction.query_row(
-            "SELECT id, scan_generation FROM libraries WHERE root_path = ?1",
-            [root_path],
+            "SELECT id, scan_generation
+             FROM libraries WHERE source_identity_key = ?1",
+            [source_identity_key],
             |row| Ok((row.get(0)?, row.get(1)?)),
         )?;
         transaction.execute(
@@ -173,6 +333,78 @@ impl Repository {
             params![task_id, as_i64(processed), as_i64(total), now()],
         )?;
         Ok(())
+    }
+
+    pub fn library_source_roots(&self) -> AppResult<Vec<LibrarySourceRoot>> {
+        let connection = self.open()?;
+        let mut statement = connection.prepare(
+            "SELECT id, source_path, source_identity_key
+             FROM libraries
+             WHERE source_identity_key <> ''
+             ORDER BY id",
+        )?;
+        let rows = statement.query_map([], |row| {
+            Ok(LibrarySourceRoot {
+                library_id: row.get(0)?,
+                source_path: PathBuf::from(row.get::<_, String>(1)?),
+                identity_key: row.get(2)?,
+            })
+        })?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(AppError::from)
+    }
+
+    pub fn library_source_root(&self, library_id: i64) -> AppResult<Option<LibrarySourceRoot>> {
+        let connection = self.open()?;
+        connection
+            .query_row(
+                "SELECT id, source_path, source_identity_key
+                 FROM libraries
+                 WHERE id=?1 AND source_identity_key <> ''",
+                [library_id],
+                |row| {
+                    Ok(LibrarySourceRoot {
+                        library_id: row.get(0)?,
+                        source_path: PathBuf::from(row.get::<_, String>(1)?),
+                        identity_key: row.get(2)?,
+                    })
+                },
+            )
+            .optional()
+            .map_err(AppError::from)
+    }
+
+    pub fn resolve_library_owner(&self, path: &Path) -> AppResult<Option<LibrarySourceRoot>> {
+        let path_key = identity_key(path);
+        Ok(self
+            .library_source_roots()?
+            .into_iter()
+            .filter(|root| is_same_or_descendant(&root.identity_key, &path_key))
+            .max_by_key(|root| path_depth(&root.identity_key)))
+    }
+
+    pub fn descendant_source_roots(&self, library_id: i64) -> AppResult<Vec<LibrarySourceRoot>> {
+        let connection = self.open()?;
+        let mut statement = connection.prepare(
+            "WITH RECURSIVE descendants(library_id) AS (
+                 SELECT id FROM libraries WHERE parent_library_id=?1
+                 UNION
+                 SELECT child.id
+                 FROM libraries child
+                 JOIN descendants parent ON child.parent_library_id=parent.library_id
+             )
+             SELECT libraries.id, libraries.source_path, libraries.source_identity_key
+             FROM libraries
+             JOIN descendants ON descendants.library_id=libraries.id
+             ORDER BY LENGTH(libraries.source_identity_key) DESC",
+        )?;
+        let rows = statement.query_map([library_id], |row| {
+            Ok(LibrarySourceRoot {
+                library_id: row.get(0)?,
+                source_path: PathBuf::from(row.get::<_, String>(1)?),
+                identity_key: row.get(2)?,
+            })
+        })?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(AppError::from)
     }
 
     pub fn complete_scan(&self, task_id: &str, library_id: i64, generation: i64) -> AppResult<u64> {
@@ -240,8 +472,7 @@ impl Repository {
 
     pub fn find_existing_asset(
         &self,
-        library_id: i64,
-        absolute_path: &str,
+        asset_identity_key: &str,
     ) -> AppResult<Option<ExistingAssetSnapshot>> {
         let connection = self.open()?;
         connection
@@ -249,11 +480,11 @@ impl Repository {
                 "SELECT a.id, a.file_size, a.modified_at, a.analysis_status,
                         t.status, t.cache_path, COALESCE(tf.algorithm_version, cf.algorithm_version)
                  FROM assets a
-                 LEFT JOIN thumbnails t ON t.asset_id = a.id AND t.spec = ?3
+                 LEFT JOIN thumbnails t ON t.asset_id = a.id AND t.spec = ?2
                  LEFT JOIN tone_features tf ON tf.asset_id = a.id
                  LEFT JOIN color_features cf ON cf.asset_id = a.id
-                 WHERE a.library_id = ?1 AND a.absolute_path = ?2",
-                params![library_id, absolute_path, crate::imaging::THUMBNAIL_SPEC],
+                 WHERE a.asset_identity_key = ?1",
+                params![asset_identity_key, crate::imaging::THUMBNAIL_SPEC],
                 |row| {
                     Ok(ExistingAssetSnapshot {
                         id: row.get(0)?,
@@ -270,14 +501,21 @@ impl Repository {
             .map_err(AppError::from)
     }
 
-    pub fn touch_asset_seen(&self, asset_id: i64, generation: i64) -> AppResult<()> {
+    pub fn touch_asset_seen(
+        &self,
+        asset_id: i64,
+        library_id: i64,
+        relative_path: &str,
+        generation: i64,
+    ) -> AppResult<()> {
         let connection = self.open()?;
         connection.execute(
             "UPDATE assets
-             SET file_status = 'present', scan_status = 'indexed', error_message = NULL,
-                 last_seen_at = ?2, last_seen_scan = ?3
+                 SET library_id = ?2, relative_path = ?3,
+                 file_status = 'present', scan_status = 'indexed', error_message = NULL,
+                 last_seen_at = ?4, last_seen_scan = ?5
              WHERE id = ?1",
-            params![asset_id, now(), generation],
+            params![asset_id, library_id, relative_path, now(), generation],
         )?;
         Ok(())
     }
@@ -293,19 +531,22 @@ impl Repository {
         let mut connection = self.open()?;
         let transaction = connection.transaction()?;
         let timestamp = now();
+        let asset_identity_key = identity_key(Path::new(&snapshot.absolute_path));
         transaction.execute(
             "INSERT INTO assets(
-                library_id, absolute_path, relative_path, file_name, extension,
-                file_size, modified_at, fingerprint, width, height, orientation,
-                capture_time, camera_make, camera_model, lens_model, exposure_time,
-                aperture, iso, focal_length, file_status, scan_status, analysis_status,
-                error_message, first_seen_at, last_seen_at, last_seen_scan
+                library_id, asset_identity_key, absolute_path, relative_path,
+                file_name, extension, file_size, modified_at, fingerprint,
+                width, height, orientation, capture_time, camera_make, camera_model,
+                lens_model, exposure_time, aperture, iso, focal_length,
+                file_status, scan_status, analysis_status, error_message,
+                first_seen_at, last_seen_at, last_seen_scan
              ) VALUES(
                 ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14,
-                ?15, ?16, ?17, ?18, ?19, 'present', 'indexed', 'completed', NULL,
-                ?20, ?20, ?21
+                ?15, ?16, ?17, ?18, ?19, ?20, 'present', 'indexed', 'completed',
+                NULL, ?21, ?21, ?22
              )
-             ON CONFLICT(library_id, absolute_path) DO UPDATE SET
+             ON CONFLICT(asset_identity_key) DO UPDATE SET
+                library_id = excluded.library_id,
                 relative_path = excluded.relative_path,
                 file_name = excluded.file_name,
                 extension = excluded.extension,
@@ -343,6 +584,7 @@ impl Repository {
                 last_seen_scan = excluded.last_seen_scan",
             params![
                 library_id,
+                asset_identity_key,
                 snapshot.absolute_path,
                 snapshot.relative_path,
                 snapshot.file_name,
@@ -366,8 +608,8 @@ impl Repository {
             ],
         )?;
         let asset_id: i64 = transaction.query_row(
-            "SELECT id FROM assets WHERE library_id = ?1 AND absolute_path = ?2",
-            params![library_id, snapshot.absolute_path],
+            "SELECT id FROM assets WHERE asset_identity_key = ?1",
+            [&asset_identity_key],
             |row| row.get(0),
         )?;
         transaction.execute(
@@ -485,14 +727,17 @@ impl Repository {
         let mut connection = self.open()?;
         let transaction = connection.transaction()?;
         let timestamp = now();
+        let asset_identity_key = identity_key(Path::new(&snapshot.absolute_path));
         transaction.execute(
             "INSERT INTO assets(
-                library_id, absolute_path, relative_path, file_name, extension,
-                file_size, modified_at, fingerprint, file_status, scan_status,
-                analysis_status, error_message, first_seen_at, last_seen_at, last_seen_scan
-             ) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 'present', 'failed',
-                      'failed', ?9, ?10, ?10, ?11)
-             ON CONFLICT(library_id, absolute_path) DO UPDATE SET
+                library_id, asset_identity_key, absolute_path, relative_path,
+                file_name, extension, file_size, modified_at, fingerprint,
+                file_status, scan_status, analysis_status, error_message,
+                first_seen_at, last_seen_at, last_seen_scan
+             ) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 'present', 'failed',
+                      'failed', ?10, ?11, ?11, ?12)
+             ON CONFLICT(asset_identity_key) DO UPDATE SET
+                library_id=excluded.library_id,
                 relative_path=excluded.relative_path,
                 file_name=excluded.file_name,
                 extension=excluded.extension,
@@ -507,6 +752,7 @@ impl Repository {
                 last_seen_scan=excluded.last_seen_scan",
             params![
                 library_id,
+                asset_identity_key,
                 snapshot.absolute_path,
                 snapshot.relative_path,
                 snapshot.file_name,
@@ -520,8 +766,8 @@ impl Repository {
             ],
         )?;
         let asset_id: i64 = transaction.query_row(
-            "SELECT id FROM assets WHERE library_id=?1 AND absolute_path=?2",
-            params![library_id, snapshot.absolute_path],
+            "SELECT id FROM assets WHERE asset_identity_key=?1",
+            [&asset_identity_key],
             |row| row.get(0),
         )?;
         transaction.execute(
@@ -549,7 +795,15 @@ impl Repository {
     pub fn list_libraries(&self) -> AppResult<Vec<LibrarySummary>> {
         let connection = self.open()?;
         let mut statement = connection.prepare(
-            "SELECT l.id, l.root_path, l.created_at, l.last_scan_at, l.status,
+            "WITH RECURSIVE library_scope(root_id, library_id) AS (
+                 SELECT id, id FROM libraries
+                 UNION
+                 SELECT scope.root_id, child.id
+                 FROM library_scope scope
+                 JOIN libraries child ON child.parent_library_id = scope.library_id
+             )
+             SELECT l.id, l.root_path, l.name, l.source_path, l.source_identity_key,
+                    l.parent_library_id, l.display_order, l.created_at, l.last_scan_at, l.status,
                     COUNT(a.id) AS asset_count,
                     COALESCE(SUM(CASE WHEN a.file_status='present' THEN 1 ELSE 0 END), 0),
                     COALESCE(SUM(CASE WHEN a.file_status='missing' THEN 1 ELSE 0 END), 0),
@@ -558,28 +812,35 @@ impl Repository {
                                       AND a.semantic_status NOT IN ('completed')
                                       THEN 1 ELSE 0 END), 0)
              FROM libraries l
-             LEFT JOIN assets a ON a.library_id = l.id
+             LEFT JOIN library_scope scope ON scope.root_id = l.id
+             LEFT JOIN assets a ON a.library_id = scope.library_id
              GROUP BY l.id
-             ORDER BY COALESCE(l.last_scan_at, l.created_at) DESC, l.id DESC",
+             ORDER BY l.display_order ASC,
+                      COALESCE(l.last_scan_at, l.created_at) DESC, l.id DESC",
         )?;
         let rows = statement.query_map([], |row| {
             Ok(LibrarySummary {
                 id: row.get(0)?,
                 root_path: row.get(1)?,
-                created_at: row.get(2)?,
-                last_scan_at: row.get(3)?,
-                status: row.get(4)?,
-                asset_count: row.get(5)?,
-                present_count: row.get(6)?,
-                missing_count: row.get(7)?,
-                semantic_pending_count: row.get(8)?,
+                name: row.get(2)?,
+                source_path: row.get(3)?,
+                source_identity_key: row.get(4)?,
+                parent_library_id: row.get(5)?,
+                display_order: row.get(6)?,
+                created_at: row.get(7)?,
+                last_scan_at: row.get(8)?,
+                status: row.get(9)?,
+                asset_count: row.get(10)?,
+                present_count: row.get(11)?,
+                missing_count: row.get(12)?,
+                semantic_pending_count: row.get(13)?,
             })
         })?;
         let mut libraries = rows
             .collect::<Result<Vec<_>, _>>()
             .map_err(AppError::from)?;
         for library in &mut libraries {
-            if library.status == "ready" && !Path::new(&library.root_path).is_dir() {
+            if library.status == "ready" && !Path::new(&library.source_path).is_dir() {
                 library.status = "unavailable".into();
             }
         }
@@ -597,15 +858,108 @@ impl Repository {
             .map_err(AppError::from)
     }
 
-    /// Remove only the indexed representation of a library. Foreign-key
-    /// cascades clear assets, thumbnails, semantic rows, jobs and plans; the
-    /// source directory is intentionally never opened or modified here.
-    pub fn remove_library(&self, library_id: i64) -> AppResult<bool> {
-        let connection = self.open()?;
-        let transaction = connection.unchecked_transaction()?;
-        let deleted = transaction.execute("DELETE FROM libraries WHERE id=?1", [library_id])?;
+    /// Remove only the indexed representation of a library. Assets are
+    /// reassigned to the most specific remaining source root before the
+    /// library row is deleted. Source directories are never opened or
+    /// modified here.
+    pub fn remove_library_with_reconciliation(
+        &self,
+        library_id: i64,
+    ) -> AppResult<LibraryRemovalResult> {
+        let mut connection = self.open()?;
+        let transaction = connection.transaction()?;
+        let exists: bool = transaction.query_row(
+            "SELECT EXISTS(SELECT 1 FROM libraries WHERE id=?1)",
+            [library_id],
+            |row| row.get(0),
+        )?;
+        if !exists {
+            transaction.commit()?;
+            return Ok(LibraryRemovalResult::default());
+        }
+
+        let remaining_roots = {
+            let mut statement = transaction.prepare(
+                "SELECT id, source_path, source_identity_key
+                 FROM libraries
+                 WHERE id <> ?1 AND source_identity_key <> ''
+                 ORDER BY id",
+            )?;
+            statement
+                .query_map([library_id], |row| {
+                    Ok(LibrarySourceRoot {
+                        library_id: row.get(0)?,
+                        source_path: PathBuf::from(row.get::<_, String>(1)?),
+                        identity_key: row.get(2)?,
+                    })
+                })?
+                .collect::<Result<Vec<_>, _>>()?
+        };
+
+        let affected_assets = {
+            let mut statement = transaction.prepare(
+                "SELECT a.id, a.absolute_path, a.fingerprint, a.file_status, t.cache_path
+                 FROM assets a
+                 LEFT JOIN thumbnails t
+                   ON t.asset_id=a.id AND t.spec=?2
+                 WHERE a.library_id=?1
+                 ORDER BY a.id",
+            )?;
+            statement
+                .query_map(
+                    params![library_id, crate::imaging::THUMBNAIL_SPEC],
+                    |row| {
+                        Ok((
+                            row.get::<_, i64>(0)?,
+                            PathBuf::from(row.get::<_, String>(1)?),
+                            row.get::<_, String>(2)?,
+                            row.get::<_, String>(3)?,
+                            row.get::<_, Option<String>>(4)?.map(PathBuf::from),
+                        ))
+                    },
+                )?
+                .collect::<Result<Vec<_>, _>>()?
+        };
+
+        let mut removed_cache_entries = Vec::new();
+        for (asset_id, absolute_path, _fingerprint, file_status, cache_path) in affected_assets {
+            let path_key = identity_key(&absolute_path);
+            let owner = remaining_roots
+                .iter()
+                .filter(|root| is_same_or_descendant(&root.identity_key, &path_key))
+                .max_by_key(|root| path_depth(&root.identity_key));
+            if let Some(owner) = owner {
+                let relative_path = relative_path_for_owner(&owner.source_path, &absolute_path);
+                transaction.execute(
+                    "UPDATE assets
+                     SET library_id=?2, relative_path=?3, file_status=?4
+                     WHERE id=?1",
+                    params![asset_id, owner.library_id, relative_path, file_status],
+                )?;
+            } else {
+                let fingerprint = transaction.query_row(
+                    "SELECT fingerprint FROM assets WHERE id=?1",
+                    [asset_id],
+                    |row| row.get::<_, String>(0),
+                )?;
+                transaction.execute("DELETE FROM assets WHERE id=?1", [asset_id])?;
+                removed_cache_entries.push((asset_id, fingerprint, cache_path));
+            }
+        }
+
+        transaction.execute("DELETE FROM libraries WHERE id=?1", [library_id])?;
+        rebuild_library_hierarchy(&transaction)?;
         transaction.commit()?;
-        Ok(deleted > 0)
+        Ok(LibraryRemovalResult {
+            removed: true,
+            removed_cache_entries,
+        })
+    }
+
+    pub fn remove_library(&self, library_id: i64) -> AppResult<bool> {
+        Ok(self
+            .remove_library_with_reconciliation(library_id)?
+            .removed)
     }
 
     pub fn active_job_ids_for_library(&self, library_id: i64) -> AppResult<Vec<(String, String)>> {
@@ -974,10 +1328,18 @@ impl Repository {
     pub fn list_semantic_groups(&self, library_id: i64) -> AppResult<Vec<SemanticGroupSummary>> {
         let connection = self.open()?;
         let mut statement = connection.prepare(
-            "SELECT sl.label, sl.display_name, COUNT(*)
+            "WITH RECURSIVE library_scope(library_id) AS (
+                 SELECT id FROM libraries WHERE id=?1
+                 UNION
+                 SELECT child.id
+                 FROM libraries child
+                 JOIN library_scope scope ON child.parent_library_id = scope.library_id
+             )
+             SELECT sl.label, sl.display_name, COUNT(*)
              FROM semantic_labels sl
              JOIN assets a ON a.id=sl.asset_id
-             WHERE a.library_id=?1 AND a.file_status='present'
+             WHERE a.library_id IN (SELECT library_id FROM library_scope)
+               AND a.file_status='present'
                AND sl.is_primary=1 AND sl.source_fingerprint=a.fingerprint
                AND sl.model_name=?2 AND sl.model_version=?3 AND sl.analysis_version=?4
              GROUP BY sl.label, sl.display_name
@@ -1067,7 +1429,16 @@ impl Repository {
         let active_job: Option<String> = transaction
             .query_row(
                 "SELECT id FROM analysis_jobs
-                 WHERE library_id=?1 AND job_type='semantic_classification'
+                 WHERE library_id IN (
+                     WITH RECURSIVE library_scope(library_id) AS (
+                         SELECT id FROM libraries WHERE id=?1
+                         UNION
+                         SELECT child.id FROM libraries child
+                         JOIN library_scope scope ON child.parent_library_id=scope.library_id
+                     )
+                     SELECT library_id FROM library_scope
+                 )
+                   AND job_type='semantic_classification'
                    AND status IN('queued', 'running', 'paused', 'cancelling')
                  ORDER BY created_at DESC LIMIT 1",
                 [library_id],
@@ -1082,7 +1453,16 @@ impl Repository {
         let mut sql = String::from(
             "SELECT a.id, a.absolute_path, a.fingerprint
              FROM assets a
-             WHERE a.library_id=?1 AND a.file_status='present' AND a.analysis_status='completed'",
+             WHERE a.library_id IN (
+                 WITH RECURSIVE library_scope(library_id) AS (
+                     SELECT id FROM libraries WHERE id=?1
+                     UNION
+                     SELECT child.id FROM libraries child
+                     JOIN library_scope scope ON child.parent_library_id=scope.library_id
+                 )
+                 SELECT library_id FROM library_scope
+             )
+               AND a.file_status='present' AND a.analysis_status='completed'",
         );
         let mut values = vec![Value::Integer(library_id)];
         if let Some(asset_ids) = only_asset_ids {
@@ -1448,7 +1828,19 @@ impl Repository {
 }
 
 fn asset_filter_sql(library_id: i64, filter: &AssetFilter) -> (String, Vec<Value>) {
-    let mut clauses = vec!["a.library_id=?".to_string()];
+    let mut clauses = vec![
+        "a.library_id IN (
+            WITH RECURSIVE library_scope(library_id) AS (
+                SELECT id FROM libraries WHERE id=?
+                UNION
+                SELECT child.id
+                FROM libraries child
+                JOIN library_scope scope ON child.parent_library_id = scope.library_id
+            )
+            SELECT library_id FROM library_scope
+        )"
+        .to_string(),
+    ];
     let mut values = vec![Value::Integer(library_id)];
     if let Some(search) = filter
         .search
@@ -1669,8 +2061,229 @@ fn now() -> String {
     Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true)
 }
 
+fn merge_duplicate_assets(
+    transaction: &Transaction<'_>,
+    duplicates: &HashMap<String, Vec<i64>>,
+) -> AppResult<()> {
+    for ids in duplicates.values().filter(|ids| ids.len() > 1) {
+        let survivor = ids[0];
+        for duplicate in ids.iter().skip(1).copied() {
+            transaction.execute(
+                "INSERT OR IGNORE INTO thumbnails(
+                    asset_id, cache_path, spec, source_modified_at, source_size,
+                    status, error_message, updated_at
+                 )
+                 SELECT ?1, cache_path, spec, source_modified_at, source_size,
+                        status, error_message, updated_at
+                 FROM thumbnails WHERE asset_id=?2",
+                params![survivor, duplicate],
+            )?;
+            transaction.execute(
+                "INSERT OR IGNORE INTO tone_features(
+                    asset_id, brightness_mean, brightness_median, brightness_low_percentile,
+                    brightness_high_percentile, shadow_ratio, highlight_ratio, contrast,
+                    dynamic_range, tone_label, exposure_label, contrast_label,
+                    algorithm_version, analyzed_at
+                 )
+                 SELECT ?1, brightness_mean, brightness_median, brightness_low_percentile,
+                        brightness_high_percentile, shadow_ratio, highlight_ratio, contrast,
+                        dynamic_range, tone_label, exposure_label, contrast_label,
+                        algorithm_version, analyzed_at
+                 FROM tone_features WHERE asset_id=?2",
+                params![survivor, duplicate],
+            )?;
+            transaction.execute(
+                "INSERT OR IGNORE INTO color_features(
+                    asset_id, saturation_mean, saturation_median, chroma_mean,
+                    dominant_color_rgb, dominant_color_category, dominant_colors_json,
+                    hue_histogram_json, warmth_score, neutral_ratio, colorfulness,
+                    monochrome_probability, dominant_color_coverage, saturation_label,
+                    algorithm_version, analyzed_at
+                 )
+                 SELECT ?1, saturation_mean, saturation_median, chroma_mean,
+                        dominant_color_rgb, dominant_color_category, dominant_colors_json,
+                        hue_histogram_json, warmth_score, neutral_ratio, colorfulness,
+                        monochrome_probability, dominant_color_coverage, saturation_label,
+                        algorithm_version, analyzed_at
+                 FROM color_features WHERE asset_id=?2",
+                params![survivor, duplicate],
+            )?;
+            transaction.execute(
+                "INSERT OR IGNORE INTO semantic_labels(
+                    asset_id, label, similarity, model_name, model_version,
+                    analysis_version, generated_at, is_manual, is_excluded,
+                    display_name, threshold, source_fingerprint, is_primary
+                 )
+                 SELECT ?1, label, similarity, model_name, model_version,
+                        analysis_version, generated_at, is_manual, is_excluded,
+                        display_name, threshold, source_fingerprint, is_primary
+                 FROM semantic_labels WHERE asset_id=?2",
+                params![survivor, duplicate],
+            )?;
+            transaction.execute(
+                "INSERT OR IGNORE INTO semantic_embeddings(
+                    asset_id, model_name, model_version, analysis_version,
+                    source_fingerprint, dimensions, vector_blob, generated_at
+                 )
+                 SELECT ?1, model_name, model_version, analysis_version,
+                        source_fingerprint, dimensions, vector_blob, generated_at
+                 FROM semantic_embeddings WHERE asset_id=?2",
+                params![survivor, duplicate],
+            )?;
+            transaction.execute(
+                "INSERT OR IGNORE INTO analysis_job_items(
+                    job_id, asset_id, source_fingerprint, status, attempts,
+                    error_message, updated_at
+                 )
+                 SELECT job_id, ?1, source_fingerprint, status, attempts,
+                        error_message, updated_at
+                 FROM analysis_job_items WHERE asset_id=?2",
+                params![survivor, duplicate],
+            )?;
+            transaction.execute(
+                "DELETE FROM analysis_job_items WHERE asset_id=?1",
+                [duplicate],
+            )?;
+
+            let organization_items = {
+                let mut statement = transaction.prepare(
+                    "SELECT id, plan_id
+                     FROM organization_plan_items
+                     WHERE asset_id=?1",
+                )?;
+                statement
+                    .query_map([duplicate], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)))?
+                    .collect::<Result<Vec<_>, _>>()?
+            };
+            for (duplicate_item_id, plan_id) in organization_items {
+                let survivor_item_id: Option<i64> = transaction
+                    .query_row(
+                        "SELECT id FROM organization_plan_items
+                         WHERE plan_id=?1 AND asset_id=?2",
+                        params![plan_id, survivor],
+                        |row| row.get(0),
+                    )
+                    .optional()?;
+                if let Some(survivor_item_id) = survivor_item_id {
+                    transaction.execute(
+                        "UPDATE organization_plan_issues SET item_id=?1 WHERE item_id=?2",
+                        params![survivor_item_id, duplicate_item_id],
+                    )?;
+                    transaction.execute(
+                        "DELETE FROM organization_plan_items WHERE id=?1",
+                        [duplicate_item_id],
+                    )?;
+                } else {
+                    transaction.execute(
+                        "UPDATE organization_plan_items SET asset_id=?1 WHERE id=?2",
+                        params![survivor, duplicate_item_id],
+                    )?;
+                }
+            }
+
+            transaction.execute("DELETE FROM assets WHERE id=?1", [duplicate])?;
+        }
+    }
+    Ok(())
+}
+
+fn merge_duplicate_libraries(
+    transaction: &Transaction<'_>,
+    duplicates: &HashMap<String, Vec<i64>>,
+) -> AppResult<()> {
+    for ids in duplicates.values().filter(|ids| ids.len() > 1) {
+        let survivor = ids[0];
+        for duplicate in ids.iter().skip(1).copied() {
+            transaction.execute(
+                "UPDATE assets SET library_id=?1 WHERE library_id=?2",
+                params![survivor, duplicate],
+            )?;
+            transaction.execute(
+                "UPDATE analysis_jobs SET library_id=?1 WHERE library_id=?2",
+                params![survivor, duplicate],
+            )?;
+            transaction.execute(
+                "UPDATE file_operation_jobs SET library_id=?1 WHERE library_id=?2",
+                params![survivor, duplicate],
+            )?;
+            transaction.execute(
+                "UPDATE organization_plans SET library_id=?1 WHERE library_id=?2",
+                params![survivor, duplicate],
+            )?;
+            transaction.execute(
+                "UPDATE libraries SET parent_library_id=?1 WHERE parent_library_id=?2",
+                params![survivor, duplicate],
+            )?;
+            transaction.execute("DELETE FROM libraries WHERE id=?1", [duplicate])?;
+        }
+    }
+    Ok(())
+}
+
 fn as_i64(value: u64) -> i64 {
     value.min(i64::MAX as u64) as i64
+}
+
+fn library_name(source_path: &Path, fallback: &str) -> String {
+    source_path
+        .file_name()
+        .or_else(|| Path::new(fallback).file_name())
+        .map(|value| value.to_string_lossy().into_owned())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| "图库".into())
+}
+
+fn path_depth(value: &str) -> usize {
+    value.split('/').filter(|component| !component.is_empty()).count()
+}
+
+fn relative_path_for_owner(owner_source_path: &Path, absolute_path: &Path) -> String {
+    if let Ok(relative) = absolute_path.strip_prefix(owner_source_path) {
+        return relative.to_string_lossy().into_owned();
+    }
+
+    let owner_key = identity_key(owner_source_path);
+    let asset_key = identity_key(absolute_path);
+    if is_same_or_descendant(&owner_key, &asset_key) {
+        let owner_component_count = owner_source_path.components().count();
+        let mut relative = PathBuf::new();
+        for component in absolute_path.components().skip(owner_component_count) {
+            relative.push(component.as_os_str());
+        }
+        return relative.to_string_lossy().into_owned();
+    }
+
+    absolute_path.to_string_lossy().into_owned()
+}
+
+fn rebuild_library_hierarchy(transaction: &Transaction<'_>) -> AppResult<()> {
+    let libraries = {
+        let mut statement = transaction.prepare(
+            "SELECT id, source_identity_key
+             FROM libraries
+             WHERE source_identity_key <> ''
+             ORDER BY id",
+        )?;
+        statement
+            .query_map([], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)))?
+            .collect::<Result<Vec<_>, _>>()?
+    };
+
+    for (library_id, source_identity_key) in &libraries {
+        let parent_library_id = libraries
+            .iter()
+            .filter(|(candidate_id, candidate_key)| {
+                candidate_id != library_id
+                    && is_same_or_descendant(candidate_key, source_identity_key)
+            })
+            .max_by_key(|(_, candidate_key)| path_depth(candidate_key))
+            .map(|(candidate_id, _)| *candidate_id);
+        transaction.execute(
+            "UPDATE libraries SET parent_library_id=?2 WHERE id=?1",
+            params![library_id, parent_library_id],
+        )?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -1683,7 +2296,7 @@ mod tests {
         let repository = Repository::new(temp.path().join("database.sqlite3"));
         repository.initialize().expect("first initialization");
         repository.initialize().expect("second initialization");
-        assert_eq!(repository.migration_version().expect("version"), 4);
+        assert_eq!(repository.migration_version().expect("version"), 6);
         let connection = repository.open().expect("connection");
         for table in [
             "organization_plans",

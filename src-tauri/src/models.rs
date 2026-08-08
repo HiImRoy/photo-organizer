@@ -5,6 +5,11 @@ use serde::{Deserialize, Serialize};
 pub struct LibrarySummary {
     pub id: i64,
     pub root_path: String,
+    pub name: String,
+    pub source_path: String,
+    pub source_identity_key: String,
+    pub parent_library_id: Option<i64>,
+    pub display_order: i64,
     pub created_at: String,
     pub last_scan_at: Option<String>,
     pub status: String,

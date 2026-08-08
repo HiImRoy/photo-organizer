@@ -4,9 +4,48 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use parking_lot::{Condvar, Mutex};
 
+use crate::source_identity::is_same_or_descendant;
+
 #[derive(Debug, Default)]
 pub struct TaskRegistry {
     cancellations: Mutex<HashMap<String, Arc<AtomicBool>>>,
+}
+
+#[derive(Debug, Default)]
+pub struct SourceScanRegistry {
+    active: Mutex<Vec<String>>,
+}
+
+#[derive(Debug)]
+pub struct SourceScanGuard {
+    registry: Arc<SourceScanRegistry>,
+    identity_key: String,
+}
+
+impl SourceScanRegistry {
+    pub fn try_acquire(self: &Arc<Self>, identity_key: &str) -> Option<SourceScanGuard> {
+        let mut active = self.active.lock();
+        if active.iter().any(|current| {
+            is_same_or_descendant(current, identity_key)
+                || is_same_or_descendant(identity_key, current)
+        }) {
+            return None;
+        }
+        active.push(identity_key.to_owned());
+        Some(SourceScanGuard {
+            registry: self.clone(),
+            identity_key: identity_key.to_owned(),
+        })
+    }
+}
+
+impl Drop for SourceScanGuard {
+    fn drop(&mut self) {
+        self.registry
+            .active
+            .lock()
+            .retain(|current| current != &self.identity_key);
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -156,6 +195,18 @@ mod tests {
         assert!(token.load(Ordering::Relaxed));
         registry.remove(&task_id);
         assert!(!registry.cancel(&task_id));
+    }
+
+    #[test]
+    fn overlapping_source_scans_are_serialized() {
+        let registry = Arc::new(SourceScanRegistry::default());
+        let parent = registry
+            .try_acquire("c:/photos")
+            .expect("parent lock");
+        assert!(registry.try_acquire("c:/photos/child").is_none());
+        assert!(registry.try_acquire("c:/photos-other").is_some());
+        drop(parent);
+        assert!(registry.try_acquire("c:/photos/child").is_some());
     }
 
     #[test]

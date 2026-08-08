@@ -6,7 +6,6 @@ import {
   chooseLibraryFolder,
   fetchAssets,
   fetchLibraries,
-  fetchLibraryFolders,
   fetchPreview,
   fetchSemanticCatalog,
   fetchSemanticGroups,
@@ -17,6 +16,7 @@ import {
   prepareSemanticModel,
   reanalyzeAsset,
   removeLibrary,
+  rescanLibrary as requestLibraryRescan,
   resumeSemanticAnalysis,
   startLibraryScan,
   startSemanticAnalysis,
@@ -46,7 +46,6 @@ import {
   emptyAssetFilter,
   type AssetFilter,
   type AssetListItem,
-  type FolderSummary,
   type LibrarySummary,
   type ScanProgress,
   type SemanticGroupSummary,
@@ -84,7 +83,6 @@ export default function App() {
   const [currentLibraryId, setCurrentLibraryId] = useState<number | null>(null);
   const [assets, setAssets] = useState<AssetListItem[]>([]);
   const [assetTotal, setAssetTotal] = useState(0);
-  const [folders, setFolders] = useState<FolderSummary[]>([]);
   const [semanticGroups, setSemanticGroups] = useState<SemanticGroupSummary[]>([]);
   const [semanticCatalog, setSemanticCatalog] = useState<SemanticLabelDescriptor[]>([]);
   const [activeAssetId, setActiveAssetId] = useState<number | null>(null);
@@ -130,9 +128,7 @@ export default function App() {
     semanticProgress !== null &&
     ["queued", "running", "paused", "cancelling"].includes(semanticProgress.status);
   const activeFilterCount = countActiveFilters(filter);
-  const libraryName = selectedLibrary
-    ? selectedLibrary.rootPath.split(/[\\/]/).at(-1) || selectedLibrary.rootPath
-    : "PhotoOrganizer";
+  const libraryName = selectedLibrary?.name || "PhotoOrganizer";
 
   useEffect(() => {
     let active = true;
@@ -141,7 +137,11 @@ export default function App() {
         if (!active) return;
         if (libraryResult.status === "fulfilled") {
           setLibraries(libraryResult.value);
-          setCurrentLibraryId(libraryResult.value[0]?.id ?? null);
+          setCurrentLibraryId((current) =>
+            current !== null && libraryResult.value.some((library) => library.id === current)
+              ? current
+              : (libraryResult.value[0]?.id ?? null),
+          );
         } else {
           setError(messageFrom(libraryResult.reason));
         }
@@ -212,14 +212,12 @@ export default function App() {
     if (currentLibraryId === null) return undefined;
     void Promise.all([
       fetchLibraries(),
-      fetchLibraryFolders(currentLibraryId),
       fetchSemanticGroups(currentLibraryId),
       fetchSemanticProgress(currentLibraryId),
     ])
-      .then(([nextLibraries, nextFolders, nextGroups, progress]) => {
+      .then(([nextLibraries, nextGroups, progress]) => {
         if (!active) return;
         setLibraries(nextLibraries);
-        setFolders(nextFolders);
         setSemanticGroups(nextGroups);
         setSemanticProgress(progress);
       })
@@ -489,7 +487,7 @@ export default function App() {
 
   async function rescanLibrary(library: LibrarySummary) {
     try {
-      const result = await startLibraryScan(library.rootPath);
+      const result = await requestLibraryRescan(library.id);
       setScanProgress({
         taskId: result.taskId,
         libraryId: library.id,
@@ -501,7 +499,7 @@ export default function App() {
         failed: 0,
         skipped: 0,
         missing: 0,
-        currentPath: library.rootPath,
+        currentPath: library.sourcePath,
         error: null,
       });
     } catch (reason) {
@@ -539,7 +537,7 @@ export default function App() {
             <LibraryIcon width="17" height="17" />
           </span>
           <div>
-            <strong title={selectedLibrary?.rootPath}>{libraryName}</strong>
+            <strong title={selectedLibrary?.sourcePath}>{libraryName}</strong>
             <small>PhotoOrganizer</small>
           </div>
         </div>
@@ -682,22 +680,22 @@ export default function App() {
               collapsed={leftCollapsed}
               libraries={libraries}
               selectedLibraryId={currentLibraryId}
-              folders={folders}
               groups={semanticGroups}
               catalog={semanticCatalog}
               filter={filter}
               semanticStatus={semanticStatus}
               onToggle={() => setLeftCollapsed((value) => !value)}
+              onImportLibrary={() => void importFolder()}
               onSelectLibrary={selectLibrary}
               onRescanLibrary={(library) => void rescanLibrary(library)}
               onOpenLibrary={(library) =>
-                void openLibraryInExplorer(library.rootPath).catch((reason) =>
+                void openLibraryInExplorer(library.id).catch((reason) =>
                   setError(messageFrom(reason)),
                 )
               }
               onShowLibraryInfo={(library) =>
                 window.alert(
-                  `${library.rootPath}\n\n图片：${library.presentCount}\n缺失：${library.missingCount}`,
+                  `${library.name}\n${library.sourcePath}\n\n图片：${library.presentCount}\n缺失：${library.missingCount}`,
                 )
               }
               onRemoveLibrary={(library) => void removeLibraryById(library)}
@@ -1268,7 +1266,6 @@ function countActiveFilters(filter: AssetFilter) {
     Number(filter.brightnessMin !== null || filter.brightnessMax !== null) +
     Number(filter.saturationMin !== null || filter.saturationMax !== null) +
     Number(Boolean(filter.capturedFrom || filter.capturedTo)) +
-    Number(Boolean(filter.folderPrefix)) +
     Number(Boolean(filter.semanticState))
   );
 }

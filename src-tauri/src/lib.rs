@@ -9,6 +9,7 @@ pub mod paths;
 pub mod scanner;
 pub mod semantic;
 pub mod semantic_tasks;
+pub mod source_identity;
 pub mod tasks;
 
 #[cfg(feature = "desktop")]
@@ -61,6 +62,7 @@ pub fn run() {
             ipc::list_libraries,
             ipc::list_assets,
             ipc::start_scan,
+            ipc::rescan_library,
             ipc::cancel_scan,
             ipc::get_thumbnail_data_url,
             ipc::get_preview_data_url,

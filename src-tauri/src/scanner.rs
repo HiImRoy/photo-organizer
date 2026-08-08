@@ -4,16 +4,21 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::UNIX_EPOCH;
 
-use crate::db::Repository;
+use crate::db::{LibrarySourceRoot, Repository};
 use crate::error::{AppError, AppResult};
 use crate::imaging::process_image;
 use crate::models::{FileSnapshot, ScanProgress, ScanSummary};
+use crate::source_identity::{existing_identity, identity_key, is_same_or_descendant, SourceIdentity};
 
 pub fn validate_scan_root(root: &Path) -> AppResult<PathBuf> {
-    if !root.is_dir() {
-        return Err(AppError::InvalidRoot(root.to_path_buf()));
-    }
-    root.canonicalize().map_err(AppError::from)
+    Ok(existing_identity(root)?.source_path)
+}
+
+pub fn validate_scan_root_with_app_data(
+    root: &Path,
+    app_data_root: &Path,
+) -> AppResult<SourceIdentity> {
+    crate::source_identity::validate_source_root(root, app_data_root)
 }
 
 pub fn is_supported_image(path: &Path) -> bool {
@@ -38,16 +43,32 @@ pub fn scan_library<F>(
 where
     F: Fn(ScanProgress),
 {
-    let root = validate_scan_root(root)?;
+    let root_identity = existing_identity(root)?;
+    let root = root_identity.source_path;
     let root_string = path_to_string(&root);
-    let (library_id, generation) = repository.begin_scan(&root_string, task_id)?;
+    let name = root
+        .file_name()
+        .map(|value| value.to_string_lossy().into_owned())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| "图库".into());
+    let (library_id, generation) = repository.begin_scan_with_identity(
+        &root_string,
+        &root_identity.identity_key,
+        &name,
+        task_id,
+    )?;
+    let descendant_roots = repository.descendant_source_roots(library_id)?;
     let mut progress = ScanProgress::starting(task_id);
     progress.library_id = Some(library_id);
     progress.stage = "discovering".into();
     emit(progress.clone());
 
     let mut candidates = Vec::new();
-    for entry in walkdir::WalkDir::new(&root).follow_links(false) {
+    for entry in walkdir::WalkDir::new(&root)
+        .follow_links(false)
+        .into_iter()
+        .filter_entry(|entry| !is_pruned_source_root(entry.path(), &descendant_roots))
+    {
         match entry {
             Ok(entry) if entry.file_type().is_file() => {
                 if is_supported_image(entry.path()) {
@@ -81,11 +102,17 @@ where
             return Ok(summary_from_progress(&progress, library_id));
         }
 
+        let Some(owner) = repository.resolve_library_owner(&path)? else {
+            continue;
+        };
+        if owner.library_id != library_id {
+            continue;
+        }
         progress.current_path = Some(path_to_string(&path));
-        let snapshot = match snapshot_file(&root, &path) {
+        let snapshot = match snapshot_file(&owner.source_path, &path) {
             Ok(snapshot) => snapshot,
             Err(error) => {
-                let fallback = fallback_snapshot(&root, &path);
+                let fallback = fallback_snapshot(&owner.source_path, &path);
                 let fingerprint = fallback_fingerprint(&fallback);
                 repository.upsert_failed_asset(
                     library_id,
@@ -103,9 +130,8 @@ where
             }
         };
 
-        if let Some(existing) =
-            repository.find_existing_asset(library_id, &snapshot.absolute_path)?
-        {
+        let asset_identity_key = identity_key(Path::new(&snapshot.absolute_path));
+        if let Some(existing) = repository.find_existing_asset(&asset_identity_key)? {
             let cache_ready = existing.thumbnail_status.as_deref() == Some("ready")
                 && existing
                     .cache_path
@@ -118,7 +144,12 @@ where
                     == Some(crate::imaging::ANALYSIS_VERSION)
                 && cache_ready
             {
-                repository.touch_asset_seen(existing.id, generation)?;
+                repository.touch_asset_seen(
+                    existing.id,
+                    owner.library_id,
+                    &snapshot.relative_path,
+                    generation,
+                )?;
                 progress.processed += 1;
                 progress.skipped += 1;
                 progress.error = None;
@@ -273,6 +304,13 @@ fn summary_from_progress(progress: &ScanProgress, library_id: i64) -> ScanSummar
 
 fn path_to_string(path: &Path) -> String {
     path.to_string_lossy().into_owned()
+}
+
+fn is_pruned_source_root(path: &Path, descendants: &[LibrarySourceRoot]) -> bool {
+    let path_key = identity_key(path);
+    descendants
+        .iter()
+        .any(|root| is_same_or_descendant(&root.identity_key, &path_key))
 }
 
 #[cfg(test)]
@@ -540,6 +578,123 @@ mod tests {
         assert_eq!(library.asset_count, 2);
         assert_eq!(library.present_count, 1);
         assert_eq!(library.missing_count, 1);
+    }
+
+    #[test]
+    fn nested_library_scan_converges_owner_prunes_parent_and_reconciles_on_remove() {
+        let (_temp, paths, repository, source) = setup();
+        let child = source.join("显式子图库");
+        let image = child.join("nested.png");
+        save_pixel(&image, Rgba([120, 40, 220, 255]), (8, 8));
+        let before = hash_file(&image).expect("source hash before");
+
+        scan_library(
+            &repository,
+            &paths.thumbnail_dir,
+            &source,
+            "parent-first",
+            &AtomicBool::new(false),
+            |_| {},
+        )
+        .expect("parent scan");
+        let parent = repository
+            .list_libraries()
+            .expect("parent library")
+            .into_iter()
+            .find(|library| library.source_path == source.to_string_lossy().to_string())
+            .expect("parent library row");
+        let before_child = repository
+            .list_assets(
+                parent.id,
+                AssetSortField::FileName,
+                SortDirection::Asc,
+                1,
+                20,
+                &crate::models::AssetFilter::default(),
+            )
+            .expect("parent assets before child import");
+        assert_eq!(before_child.total, 1);
+        let asset_id = before_child.items[0].id;
+
+        scan_library(
+            &repository,
+            &paths.thumbnail_dir,
+            &child,
+            "child-import",
+            &AtomicBool::new(false),
+            |_| {},
+        )
+        .expect("child scan");
+        let child_library = repository
+            .list_libraries()
+            .expect("libraries after child import")
+            .into_iter()
+            .find(|library| library.source_path == child.to_string_lossy().to_string())
+            .expect("child library row");
+        assert_eq!(child_library.parent_library_id, Some(parent.id));
+
+        let child_assets = repository
+            .list_assets(
+                child_library.id,
+                AssetSortField::FileName,
+                SortDirection::Asc,
+                1,
+                20,
+                &crate::models::AssetFilter::default(),
+            )
+            .expect("child assets");
+        assert_eq!(child_assets.total, 1);
+        assert_eq!(child_assets.items[0].id, asset_id);
+        assert_eq!(child_assets.items[0].library_id, child_library.id);
+
+        let parent_rescan = scan_library(
+            &repository,
+            &paths.thumbnail_dir,
+            &source,
+            "parent-rescan",
+            &AtomicBool::new(false),
+            |_| {},
+        )
+        .expect("parent rescan");
+        assert_eq!(parent_rescan.discovered, 0);
+        assert_eq!(parent_rescan.missing, 0);
+        let parent_assets_after_prune = repository
+            .list_assets(
+                parent.id,
+                AssetSortField::FileName,
+                SortDirection::Asc,
+                1,
+                20,
+                &crate::models::AssetFilter::default(),
+            )
+            .expect("recursive parent assets");
+        assert_eq!(parent_assets_after_prune.total, 1);
+
+        let removal = repository
+            .remove_library_with_reconciliation(child_library.id)
+            .expect("remove child library");
+        assert!(removal.removed);
+        let after_child_remove = repository
+            .list_assets(
+                parent.id,
+                AssetSortField::FileName,
+                SortDirection::Asc,
+                1,
+                20,
+                &crate::models::AssetFilter::default(),
+            )
+            .expect("asset after child removal");
+        assert_eq!(after_child_remove.total, 1);
+        assert_eq!(after_child_remove.items[0].id, asset_id);
+        assert_eq!(after_child_remove.items[0].library_id, parent.id);
+        assert_eq!(hash_file(&image).expect("source hash after child removal"), before);
+
+        repository
+            .remove_library_with_reconciliation(parent.id)
+            .expect("remove parent library");
+        assert!(repository.list_libraries().expect("libraries after parent removal").is_empty());
+        assert!(image.is_file());
+        assert_eq!(hash_file(&image).expect("source hash after parent removal"), before);
     }
 
     #[test]

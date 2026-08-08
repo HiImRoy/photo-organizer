@@ -62,6 +62,11 @@ const semanticCatalog: SemanticLabelDescriptor[] = [
 const library: LibrarySummary = {
   id: 9100,
   rootPath,
+  name: "专业界面验收图库",
+  sourcePath: rootPath,
+  sourceIdentityKey: "c:/test-data/专业界面验收图库",
+  parentLibraryId: null,
+  displayOrder: 0,
   createdAt: "2026-08-01T08:00:00Z",
   lastScanAt: "2026-08-07T02:42:00Z",
   status: "ready",

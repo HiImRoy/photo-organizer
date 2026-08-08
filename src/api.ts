@@ -180,6 +180,11 @@ export async function startLibraryScan(rootPath: string): Promise<{ taskId: stri
   return invoke<{ taskId: string }>("start_scan", { rootPath });
 }
 
+export async function rescanLibrary(libraryId: number): Promise<{ taskId: string }> {
+  if (!desktopRuntime) throw new Error("重新扫描仅在 PhotoOrganizer 桌面应用中可用。");
+  return invoke<{ taskId: string }>("rescan_library", { libraryId });
+}
+
 export async function cancelLibraryScan(
   taskId: string,
 ): Promise<{ taskId: string; accepted: boolean }> {
@@ -214,9 +219,9 @@ export async function removeLibrary(libraryId: number): Promise<boolean> {
   return invoke<boolean>("remove_library", { libraryId });
 }
 
-export async function openLibraryInExplorer(rootPath: string): Promise<void> {
+export async function openLibraryInExplorer(libraryId: number): Promise<void> {
   if (!desktopRuntime) return;
-  await invoke("open_library_in_explorer", { rootPath });
+  await invoke("open_library_in_explorer", { libraryId });
 }
 
 export async function fetchSemanticStatus(): Promise<SemanticRuntimeStatus> {

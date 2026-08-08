@@ -16,6 +16,11 @@ vi.mock("../api", () => api);
 const library: LibrarySummary = {
   id: 4,
   rootPath: "C:\\fixtures\\中文 图库",
+  name: "中文 图库",
+  sourcePath: "C:\\fixtures\\中文 图库",
+  sourceIdentityKey: "c:/fixtures/中文 图库",
+  parentLibraryId: null,
+  displayOrder: 0,
   createdAt: "2026-08-06T10:00:00Z",
   lastScanAt: "2026-08-06T10:10:00Z",
   status: "ready",
