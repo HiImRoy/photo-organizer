@@ -1,13 +1,14 @@
+use std::collections::HashMap;
 use std::fs::{self, File};
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::UNIX_EPOCH;
+use std::time::{Duration, Instant, UNIX_EPOCH};
 
 use crate::db::{LibrarySourceRoot, Repository};
 use crate::error::{AppError, AppResult};
 use crate::imaging::process_image_with_source_bytes;
-use crate::models::{FileSnapshot, ScanProgress, ScanSummary};
+use crate::models::{FileSnapshot, ScanPerformance, ScanProgress, ScanSummary};
 use crate::source_identity::{
     SourceIdentity, existing_identity, identity_key, is_same_or_descendant,
 };
@@ -35,10 +36,85 @@ pub fn is_supported_image(path: &Path) -> bool {
 }
 
 const MAX_IN_MEMORY_SOURCE_BYTES: u64 = 32 * 1024 * 1024;
+const SCAN_PROGRESS_EVENT_INTERVAL: Duration = Duration::from_millis(120);
+const SCAN_PROGRESS_DB_INTERVAL: Duration = Duration::from_millis(300);
+const SCAN_PROGRESS_DB_BATCH: u64 = 32;
 
 struct FingerprintedSource {
     fingerprint: String,
     bytes: Option<Vec<u8>>,
+}
+
+struct ScanProgressReporter<'a, F> {
+    repository: &'a Repository,
+    task_id: &'a str,
+    emit: F,
+    last_event_at: Instant,
+    last_persist_at: Instant,
+    last_persisted: u64,
+}
+
+impl<'a, F> ScanProgressReporter<'a, F>
+where
+    F: Fn(ScanProgress),
+{
+    fn new(repository: &'a Repository, task_id: &'a str, emit: F) -> Self {
+        let now = Instant::now();
+        Self {
+            repository,
+            task_id,
+            emit,
+            last_event_at: now,
+            last_persist_at: now,
+            last_persisted: 0,
+        }
+    }
+
+    fn force(
+        &mut self,
+        progress: &mut ScanProgress,
+        performance: &ScanPerformance,
+    ) -> AppResult<()> {
+        progress.performance = performance.clone();
+        let now = Instant::now();
+        self.repository.update_job_progress(
+            self.task_id,
+            progress.processed,
+            progress.discovered,
+        )?;
+        self.last_persisted = progress.processed;
+        self.last_persist_at = now;
+        (self.emit)(progress.clone());
+        self.last_event_at = now;
+        Ok(())
+    }
+
+    fn report(
+        &mut self,
+        progress: &mut ScanProgress,
+        performance: &ScanPerformance,
+    ) -> AppResult<()> {
+        progress.performance = performance.clone();
+        let now = Instant::now();
+        let should_persist = progress.processed.saturating_sub(self.last_persisted)
+            >= SCAN_PROGRESS_DB_BATCH
+            || now.duration_since(self.last_persist_at) >= SCAN_PROGRESS_DB_INTERVAL;
+        if should_persist {
+            self.repository.update_job_progress(
+                self.task_id,
+                progress.processed,
+                progress.discovered,
+            )?;
+            self.last_persisted = progress.processed;
+            self.last_persist_at = now;
+        }
+
+        if now.duration_since(self.last_event_at) >= SCAN_PROGRESS_EVENT_INTERVAL {
+            (self.emit)(progress.clone());
+            self.last_event_at = now;
+        }
+        Ok(())
+    }
 }
 
 pub fn scan_library<F>(
@@ -66,14 +142,181 @@ where
         &name,
         task_id,
     )?;
-    let descendant_roots = repository.descendant_source_roots(library_id)?;
+    scan_library_scope(
+        repository,
+        thumbnail_dir,
+        &root,
+        task_id,
+        cancelled,
+        library_id,
+        generation,
+        true,
+        emit,
+    )
+}
+
+/// Discover one Library source root for every directory that directly contains
+/// at least one supported image. The selected root is always included, even if
+/// it contains no images. Empty/intermediate directories remain invisible.
+pub fn discover_import_source_roots(root: &Path) -> AppResult<Vec<SourceIdentity>> {
+    let root_identity = existing_identity(root)?;
+    let mut roots = HashMap::<String, SourceIdentity>::new();
+    roots.insert(root_identity.identity_key.clone(), root_identity.clone());
+
+    for entry in walkdir::WalkDir::new(&root_identity.source_path)
+        .follow_links(false)
+        .into_iter()
+    {
+        let entry = entry?;
+        if !entry.file_type().is_file() || !is_supported_image(entry.path()) {
+            continue;
+        }
+        let Some(parent) = entry.path().parent() else {
+            continue;
+        };
+        let parent_identity = existing_identity(parent)?;
+        roots
+            .entry(parent_identity.identity_key.clone())
+            .or_insert(parent_identity);
+    }
+
+    let mut roots = roots.into_values().collect::<Vec<_>>();
+    roots.sort_by_key(|root| {
+        (
+            root.identity_key.matches('/').count(),
+            root.identity_key.clone(),
+        )
+    });
+    Ok(roots)
+}
+
+/// Scan each explicitly imported source root as an independent ownership
+/// scope. The root scan owns only files not covered by an explicitly imported
+/// child root; each child scope is scanned separately without creating another
+/// analysis job or rescanning sibling/parent libraries.
+pub fn scan_library_tree<F>(
+    repository: &Repository,
+    thumbnail_dir: &Path,
+    root: &Path,
+    task_id: &str,
+    cancelled: &AtomicBool,
+    targets: Vec<LibrarySourceRoot>,
+    emit: F,
+) -> AppResult<ScanSummary>
+where
+    F: Fn(ScanProgress),
+{
+    let root_identity = existing_identity(root)?;
+    let root = root_identity.source_path;
+    let root_string = path_to_string(&root);
+    let name = root
+        .file_name()
+        .map(|value| value.to_string_lossy().into_owned())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| "Library".into());
+    let (root_library_id, root_generation) = repository.begin_scan_with_identity(
+        &root_string,
+        &root_identity.identity_key,
+        &name,
+        task_id,
+    )?;
+
+    let mut ordered_targets = Vec::with_capacity(targets.len() + 1);
+    ordered_targets.push((root.clone(), root_library_id, root_generation));
+    let mut child_targets = targets
+        .into_iter()
+        .filter(|target| target.identity_key != root_identity.identity_key)
+        .filter(|target| is_same_or_descendant(&root_identity.identity_key, &target.identity_key))
+        .collect::<Vec<_>>();
+    child_targets.sort_by_key(|target| {
+        (
+            target.identity_key.matches('/').count(),
+            target.identity_key.clone(),
+        )
+    });
+    for target in child_targets {
+        let generation = repository.begin_existing_library_scan(target.library_id)?;
+        ordered_targets.push((target.source_path, target.library_id, generation));
+    }
+
+    let mut aggregate = ScanProgress::starting(task_id);
+    aggregate.library_id = Some(root_library_id);
+    aggregate.stage = "discovering".into();
+    emit(aggregate.clone());
+
+    for (scope_root, library_id, generation) in ordered_targets {
+        if cancelled.load(Ordering::Relaxed) {
+            aggregate.status = "cancelled".into();
+            aggregate.stage = "cancelled".into();
+            repository.cancel_scan(task_id, root_library_id)?;
+            emit(aggregate.clone());
+            return Ok(summary_from_progress(&aggregate, root_library_id));
+        }
+
+        let base_progress = aggregate.clone();
+        let scope_summary = scan_library_scope(
+            repository,
+            thumbnail_dir,
+            &scope_root,
+            task_id,
+            cancelled,
+            library_id,
+            generation,
+            false,
+            |local| emit(aggregate_scope_progress(&base_progress, &local)),
+        )?;
+        add_summary_to_progress(&mut aggregate, &scope_summary);
+        if scope_summary.status == "cancelled" {
+            aggregate.status = "cancelled".into();
+            aggregate.stage = "cancelled".into();
+            repository.cancel_scan(task_id, root_library_id)?;
+            emit(aggregate.clone());
+            return Ok(summary_from_progress(&aggregate, root_library_id));
+        }
+
+        aggregate.stage = "processing".into();
+        aggregate.status = "running".into();
+        repository.update_job_progress(task_id, aggregate.processed, aggregate.discovered)?;
+        emit(aggregate.clone());
+    }
+
+    // Each scope was completed independently above. This final call closes the
+    // single user-visible root job without triggering any child rescan.
+    repository.complete_scan(task_id, root_library_id, root_generation)?;
+    aggregate.status = "completed".into();
+    aggregate.stage = "completed".into();
+    aggregate.current_path = None;
+    aggregate.error = None;
+    emit(aggregate.clone());
+    Ok(summary_from_progress(&aggregate, root_library_id))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn scan_library_scope<F>(
+    repository: &Repository,
+    thumbnail_dir: &Path,
+    root: &Path,
+    task_id: &str,
+    cancelled: &AtomicBool,
+    library_id: i64,
+    generation: i64,
+    complete_job: bool,
+    emit: F,
+) -> AppResult<ScanSummary>
+where
+    F: Fn(ScanProgress),
+{
+    let descendant_roots = repository.nested_source_roots(library_id)?;
+    let mut performance = ScanPerformance::default();
     let mut progress = ScanProgress::starting(task_id);
     progress.library_id = Some(library_id);
     progress.stage = "discovering".into();
-    emit(progress.clone());
+    let mut reporter = ScanProgressReporter::new(repository, task_id, emit);
+    reporter.force(&mut progress, &performance)?;
 
+    let discovery_started = Instant::now();
     let mut candidates = Vec::new();
-    for entry in walkdir::WalkDir::new(&root)
+    for entry in walkdir::WalkDir::new(root)
         .follow_links(false)
         .into_iter()
         .filter_entry(|entry| !is_pruned_source_root(entry.path(), &descendant_roots))
@@ -90,57 +333,72 @@ where
             Err(error) => {
                 progress.failed += 1;
                 progress.error = Some(error.to_string());
-                emit(progress.clone());
+                reporter.report(&mut progress, &performance)?;
             }
         }
     }
+    add_elapsed(&mut performance.discovery_us, discovery_started);
     candidates.sort_by_key(|path| path_to_string(path));
     progress.discovered = candidates.len() as u64;
     progress.stage = "processing".into();
     progress.error = None;
-    emit(progress.clone());
-    repository.update_job_progress(task_id, 0, progress.discovered)?;
+    reporter.force(&mut progress, &performance)?;
 
     for path in candidates {
         if cancelled.load(Ordering::Relaxed) {
             progress.status = "cancelled".into();
             progress.stage = "cancelled".into();
             progress.current_path = None;
-            repository.cancel_scan(task_id, library_id)?;
-            emit(progress.clone());
+            if complete_job {
+                repository.cancel_scan(task_id, library_id)?;
+            } else {
+                repository.cancel_library_scope(library_id)?;
+            }
+            reporter.force(&mut progress, &performance)?;
             return Ok(summary_from_progress(&progress, library_id));
         }
 
+        let ownership_started = Instant::now();
         let Some(owner) = repository.resolve_library_owner(&path)? else {
+            add_elapsed(&mut performance.ownership_lookup_us, ownership_started);
             continue;
         };
+        add_elapsed(&mut performance.ownership_lookup_us, ownership_started);
         if owner.library_id != library_id {
             continue;
         }
         progress.current_path = Some(path_to_string(&path));
+
+        let metadata_started = Instant::now();
         let snapshot = match snapshot_file(&owner.source_path, &path) {
             Ok(snapshot) => snapshot,
             Err(error) => {
+                add_elapsed(&mut performance.metadata_lookup_us, metadata_started);
                 let fallback = fallback_snapshot(&owner.source_path, &path);
                 let fingerprint = fallback_fingerprint(&fallback);
-                repository.upsert_failed_asset(
+                let database_started = Instant::now();
+                let database_result = repository.upsert_failed_asset(
                     library_id,
                     generation,
                     &fallback,
                     &fingerprint,
                     &error.to_string(),
-                )?;
+                );
+                add_elapsed(&mut performance.database_write_us, database_started);
+                database_result?;
                 progress.processed += 1;
                 progress.failed += 1;
+                performance.failed_files += 1;
                 progress.error = Some(error.to_string());
-                repository.update_job_progress(task_id, progress.processed, progress.discovered)?;
-                emit(progress.clone());
+                reporter.report(&mut progress, &performance)?;
                 continue;
             }
         };
 
         let asset_identity_key = identity_key(Path::new(&snapshot.absolute_path));
-        if let Some(existing) = repository.find_existing_asset(&asset_identity_key)? {
+        let existing = repository.find_existing_asset(&asset_identity_key)?;
+        add_elapsed(&mut performance.metadata_lookup_us, metadata_started);
+        if let Some(existing) = existing {
             let cache_ready = existing.thumbnail_status.as_deref() == Some("ready")
                 && existing
                     .cache_path
@@ -153,82 +411,125 @@ where
                     == Some(crate::imaging::ANALYSIS_VERSION)
                 && cache_ready
             {
-                repository.touch_asset_seen(
+                let database_started = Instant::now();
+                let database_result = repository.touch_asset_seen(
                     existing.id,
                     owner.library_id,
                     &snapshot.relative_path,
                     generation,
-                )?;
+                );
+                add_elapsed(&mut performance.database_write_us, database_started);
+                database_result?;
                 progress.processed += 1;
                 progress.skipped += 1;
+                performance.skipped_files += 1;
                 progress.error = None;
-                repository.update_job_progress(task_id, progress.processed, progress.discovered)?;
-                emit(progress.clone());
+                reporter.report(&mut progress, &performance)?;
                 continue;
             }
         }
 
+        let fingerprint_started = Instant::now();
         let fingerprinted_source = match read_fingerprinted_source(&path) {
-            Ok(value) => value,
+            Ok(value) => {
+                add_elapsed(&mut performance.fingerprint_us, fingerprint_started);
+                value
+            }
             Err(error) => {
+                add_elapsed(&mut performance.fingerprint_us, fingerprint_started);
                 let fallback = fallback_fingerprint(&snapshot);
-                repository.upsert_failed_asset(
+                let database_started = Instant::now();
+                let database_result = repository.upsert_failed_asset(
                     library_id,
                     generation,
                     &snapshot,
                     &fallback,
                     &error.to_string(),
-                )?;
+                );
+                add_elapsed(&mut performance.database_write_us, database_started);
+                database_result?;
                 progress.processed += 1;
                 progress.failed += 1;
+                performance.failed_files += 1;
                 progress.error = Some(error.to_string());
-                repository.update_job_progress(task_id, progress.processed, progress.discovered)?;
-                emit(progress.clone());
+                reporter.report(&mut progress, &performance)?;
                 continue;
             }
         };
         let fingerprint = &fingerprinted_source.fingerprint;
 
-        match process_image_with_source_bytes(
+        let image_started = Instant::now();
+        let image_result = process_image_with_source_bytes(
             &path,
             thumbnail_dir,
             fingerprint,
             fingerprinted_source.bytes.as_deref(),
-        ) {
+        );
+        let image_processing_us = elapsed_us(image_started);
+        performance.image_processing_us = performance
+            .image_processing_us
+            .saturating_add(image_processing_us);
+        match image_result {
             Ok(processed) => {
-                repository.upsert_processed_asset(
+                performance.exif_us = performance
+                    .exif_us
+                    .saturating_add(processed.timings.exif_us);
+                performance.decode_us = performance
+                    .decode_us
+                    .saturating_add(processed.timings.decode_us);
+                performance.resize_us = performance
+                    .resize_us
+                    .saturating_add(processed.timings.resize_us);
+                performance.feature_analysis_us = performance
+                    .feature_analysis_us
+                    .saturating_add(processed.timings.feature_analysis_us);
+                performance.thumbnail_write_us = performance
+                    .thumbnail_write_us
+                    .saturating_add(processed.timings.thumbnail_write_us);
+                let database_started = Instant::now();
+                let database_result = repository.upsert_processed_asset(
                     library_id,
                     generation,
                     &snapshot,
                     fingerprint,
                     &processed,
-                )?;
+                );
+                add_elapsed(&mut performance.database_write_us, database_started);
+                database_result?;
                 progress.succeeded += 1;
+                performance.processed_files += 1;
                 progress.error = None;
             }
             Err(error) => {
-                repository.upsert_failed_asset(
+                let database_started = Instant::now();
+                let database_result = repository.upsert_failed_asset(
                     library_id,
                     generation,
                     &snapshot,
                     fingerprint,
                     &error.to_string(),
-                )?;
+                );
+                add_elapsed(&mut performance.database_write_us, database_started);
+                database_result?;
                 progress.failed += 1;
+                performance.failed_files += 1;
                 progress.error = Some(error.to_string());
             }
         }
         progress.processed += 1;
-        repository.update_job_progress(task_id, progress.processed, progress.discovered)?;
-        emit(progress.clone());
+        reporter.report(&mut progress, &performance)?;
     }
 
-    progress.missing = repository.complete_scan(task_id, library_id, generation)?;
+    progress.missing = if complete_job {
+        repository.complete_scan(task_id, library_id, generation)?
+    } else {
+        repository.complete_library_scope(library_id, generation)?
+    };
     progress.status = "completed".into();
     progress.stage = "completed".into();
     progress.current_path = None;
     progress.error = None;
-    emit(progress.clone());
+    reporter.force(&mut progress, &performance)?;
     Ok(summary_from_progress(&progress, library_id))
 }
 
@@ -331,7 +632,75 @@ fn summary_from_progress(progress: &ScanProgress, library_id: i64) -> ScanSummar
         failed: progress.failed,
         skipped: progress.skipped,
         missing: progress.missing,
+        performance: progress.performance.clone(),
     }
+}
+
+fn add_summary_to_progress(progress: &mut ScanProgress, summary: &ScanSummary) {
+    progress.discovered = progress.discovered.saturating_add(summary.discovered);
+    progress.processed = progress.processed.saturating_add(summary.processed);
+    progress.succeeded = progress.succeeded.saturating_add(summary.succeeded);
+    progress.failed = progress.failed.saturating_add(summary.failed);
+    progress.skipped = progress.skipped.saturating_add(summary.skipped);
+    progress.missing = progress.missing.saturating_add(summary.missing);
+    add_performance(&mut progress.performance, &summary.performance);
+}
+
+fn aggregate_scope_progress(base: &ScanProgress, local: &ScanProgress) -> ScanProgress {
+    let mut progress = base.clone();
+    progress.status = if local.status == "cancelled" {
+        "cancelled".into()
+    } else {
+        "running".into()
+    };
+    progress.stage = local.stage.clone();
+    progress.discovered = progress.discovered.saturating_add(local.discovered);
+    progress.processed = progress.processed.saturating_add(local.processed);
+    progress.succeeded = progress.succeeded.saturating_add(local.succeeded);
+    progress.failed = progress.failed.saturating_add(local.failed);
+    progress.skipped = progress.skipped.saturating_add(local.skipped);
+    progress.missing = progress.missing.saturating_add(local.missing);
+    progress.current_path = local.current_path.clone();
+    progress.error = local.error.clone();
+    add_performance(&mut progress.performance, &local.performance);
+    progress
+}
+
+fn add_performance(total: &mut ScanPerformance, value: &ScanPerformance) {
+    total.discovery_us = total.discovery_us.saturating_add(value.discovery_us);
+    total.ownership_lookup_us = total
+        .ownership_lookup_us
+        .saturating_add(value.ownership_lookup_us);
+    total.metadata_lookup_us = total
+        .metadata_lookup_us
+        .saturating_add(value.metadata_lookup_us);
+    total.fingerprint_us = total.fingerprint_us.saturating_add(value.fingerprint_us);
+    total.image_processing_us = total
+        .image_processing_us
+        .saturating_add(value.image_processing_us);
+    total.exif_us = total.exif_us.saturating_add(value.exif_us);
+    total.decode_us = total.decode_us.saturating_add(value.decode_us);
+    total.resize_us = total.resize_us.saturating_add(value.resize_us);
+    total.feature_analysis_us = total
+        .feature_analysis_us
+        .saturating_add(value.feature_analysis_us);
+    total.thumbnail_write_us = total
+        .thumbnail_write_us
+        .saturating_add(value.thumbnail_write_us);
+    total.database_write_us = total
+        .database_write_us
+        .saturating_add(value.database_write_us);
+    total.processed_files = total.processed_files.saturating_add(value.processed_files);
+    total.skipped_files = total.skipped_files.saturating_add(value.skipped_files);
+    total.failed_files = total.failed_files.saturating_add(value.failed_files);
+}
+
+fn elapsed_us(started: Instant) -> u64 {
+    started.elapsed().as_micros().min(u128::from(u64::MAX)) as u64
+}
+
+fn add_elapsed(total: &mut u64, started: Instant) {
+    *total = total.saturating_add(elapsed_us(started));
 }
 
 fn path_to_string(path: &Path) -> String {
@@ -412,6 +781,41 @@ mod tests {
     }
 
     #[test]
+    fn completed_scan_reports_stage_timing_snapshot() {
+        let (_temp, paths, repository, source) = setup();
+        for index in 0..3 {
+            save_pixel(
+                &source.join(format!("image-{index}.png")),
+                Rgba([20 + index as u8, 80, 160, 255]),
+                (24, 16),
+            );
+        }
+        let events = Mutex::new(Vec::new());
+        let summary = scan_library(
+            &repository,
+            &paths.thumbnail_dir,
+            &source,
+            "timing-task",
+            &AtomicBool::new(false),
+            |progress| events.lock().expect("events").push(progress),
+        )
+        .expect("scan");
+        let final_progress = events
+            .lock()
+            .expect("events")
+            .last()
+            .expect("final progress")
+            .clone();
+
+        assert_eq!(summary.processed, 3);
+        assert_eq!(final_progress.performance.processed_files, 3);
+        assert!(final_progress.performance.discovery_us > 0);
+        assert!(final_progress.performance.fingerprint_us > 0);
+        assert!(final_progress.performance.image_processing_us > 0);
+        assert!(final_progress.performance.database_write_us > 0);
+    }
+
+    #[test]
     fn nested_unicode_supported_formats_and_corruption_are_isolated() {
         let (_temp, paths, repository, source) = setup();
         let images = [
@@ -470,21 +874,14 @@ mod tests {
                 .iter()
                 .any(|folder| folder.relative_path == "中文 路径")
         );
-        let nested = repository
-            .list_assets(
-                library.id,
-                AssetSortField::FileName,
-                SortDirection::Asc,
-                1,
-                100,
-                &crate::models::AssetFilter {
-                    folder_prefix: Some("中文 路径".into()),
-                    ..crate::models::AssetFilter::default()
-                },
-            )
-            .expect("nested folder filter");
-        assert_eq!(nested.total, 1);
-        assert_eq!(nested.items[0].relative_path, "中文 路径\\红色.JPG");
+        let full_assets = repository
+            .list_assets_for_organization(library.id, &crate::models::AssetFilter::default(), None)
+            .expect("full assets");
+        assert!(
+            full_assets
+                .iter()
+                .any(|asset| asset.relative_path == "中文 路径\\红色.JPG")
+        );
         assert!(
             page.items
                 .iter()
@@ -527,7 +924,8 @@ mod tests {
             )
             .expect("save semantic result");
         let combined_filter = crate::models::AssetFilter {
-            semantic_labels: vec!["portrait".into(), "night".into()],
+            primary_categories: vec!["portrait".into()],
+            auxiliary_tags: vec!["night".into()],
             semantic_match: crate::models::SemanticMatchMode::All,
             tone_labels: semantic_asset.tone_label.clone().into_iter().collect(),
             color_categories: semantic_asset
@@ -626,6 +1024,67 @@ mod tests {
         assert_eq!(library.asset_count, 2);
         assert_eq!(library.present_count, 1);
         assert_eq!(library.missing_count, 1);
+    }
+
+    #[test]
+    fn structured_import_creates_one_library_per_image_directory_and_scans_scopes() {
+        let (_temp, paths, repository, source) = setup();
+        save_pixel(&source.join("root.png"), Rgba([220, 80, 30, 255]), (8, 8));
+        save_pixel(
+            &source.join("旅行").join("child.png"),
+            Rgba([30, 80, 220, 255]),
+            (8, 8),
+        );
+        fs::create_dir_all(source.join("空文件夹")).expect("empty directory");
+
+        let discovered = discover_import_source_roots(&source).expect("discover roots");
+        assert_eq!(discovered.len(), 2);
+        let targets = repository
+            .ensure_library_source_roots(&discovered)
+            .expect("register roots");
+        let summary = scan_library_tree(
+            &repository,
+            &paths.thumbnail_dir,
+            &source,
+            "structured-import",
+            &AtomicBool::new(false),
+            targets,
+            |_| {},
+        )
+        .expect("structured scan");
+
+        assert_eq!(summary.status, "completed");
+        assert_eq!(summary.discovered, 2);
+        assert_eq!(summary.processed, 2);
+
+        let libraries = repository.list_libraries().expect("libraries");
+        assert_eq!(libraries.len(), 2);
+        let parent = libraries
+            .iter()
+            .find(|library| library.source_identity_key == identity_key(&source))
+            .expect("root library");
+        let child = libraries
+            .iter()
+            .find(|library| library.source_path.ends_with("旅行"))
+            .expect("child library");
+        assert_eq!(child.parent_library_id, Some(parent.id));
+
+        let child_assets = repository
+            .list_assets(
+                child.id,
+                AssetSortField::FileName,
+                SortDirection::Asc,
+                1,
+                20,
+                &crate::models::AssetFilter::default(),
+            )
+            .expect("child assets");
+        assert_eq!(child_assets.total, 1);
+        assert_eq!(child_assets.items[0].library_id, child.id);
+        let child_full_assets = repository
+            .list_assets_for_organization(child.id, &crate::models::AssetFilter::default(), None)
+            .expect("child full assets");
+        assert!(child_full_assets[0].relative_path.ends_with("child.png"));
     }
 
     #[test]

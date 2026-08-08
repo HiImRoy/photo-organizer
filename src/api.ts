@@ -3,8 +3,10 @@ import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { open, save } from "@tauri-apps/plugin-dialog";
 
 import type {
+  AssetDetail,
   AssetPage,
   AssetFilter,
+  ClassificationFieldDescriptor,
   FolderSummary,
   LibrarySummary,
   OrganizationIssue,
@@ -175,9 +177,71 @@ export async function fetchAssets(options: {
   });
 }
 
-export async function startLibraryScan(rootPath: string): Promise<{ taskId: string }> {
+export async function fetchClassificationRegistry(): Promise<ClassificationFieldDescriptor[]> {
+  if (!desktopRuntime) return [];
+  return invoke<ClassificationFieldDescriptor[]>("get_classification_registry");
+}
+
+export async function fetchAssetDetail(assetId: number): Promise<AssetDetail | null> {
+  if (!desktopRuntime) return null;
+  return invoke<AssetDetail>("get_asset_detail", { assetId });
+}
+
+export async function updateClassificationOverride(
+  assetId: number,
+  field: string,
+  value: string | string[] | null,
+): Promise<AssetDetail | null> {
+  if (!desktopRuntime) return null;
+  return invoke<AssetDetail>("update_classification_override", {
+    assetId,
+    field,
+    value,
+  });
+}
+
+export async function updateTagOverride(
+  assetId: number,
+  tagId: string,
+  state: "add" | "remove" | null,
+): Promise<AssetDetail | null> {
+  if (!desktopRuntime) return null;
+  return invoke<AssetDetail>("update_tag_override", {
+    assetId,
+    tagId,
+    state,
+  });
+}
+
+export async function restoreAutoClassification(
+  assetId: number,
+  field?: string,
+): Promise<AssetDetail | null> {
+  if (!desktopRuntime) return null;
+  return invoke<AssetDetail>("restore_auto_classification", {
+    assetId,
+    field: field ?? null,
+  });
+}
+
+export async function batchUpdateClassification(
+  assetIds: number[],
+  field: string,
+  value: string | string[],
+): Promise<number> {
+  if (!desktopRuntime) return 0;
+  return invoke<number>("batch_update_classification", { assetIds, field, value });
+}
+
+export async function startLibraryScan(
+  rootPath: string,
+  options: { includeSubfolders?: boolean } = {},
+): Promise<{ taskId: string }> {
   if (!desktopRuntime) throw new Error("文件夹导入仅在 PhotoOrganizer 桌面应用中可用。");
-  return invoke<{ taskId: string }>("start_scan", { rootPath });
+  return invoke<{ taskId: string }>("start_scan", {
+    rootPath,
+    includeSubfolders: options.includeSubfolders ?? false,
+  });
 }
 
 export async function rescanLibrary(libraryId: number): Promise<{ taskId: string }> {
@@ -202,8 +266,8 @@ export async function fetchThumbnail(assetId: number): Promise<string> {
 export async function fetchPreview(
   assetId: number,
   tier: "screen" | "original" = "screen",
-  maxWidth = 2560,
-  maxHeight = 1600,
+  maxWidth = 1920,
+  maxHeight = 1200,
 ): Promise<string> {
   if (!desktopRuntime) return fetchThumbnail(assetId);
   return invoke<string>("get_preview_data_url", {
@@ -217,6 +281,22 @@ export async function fetchPreview(
 export async function removeLibrary(libraryId: number): Promise<boolean> {
   if (!desktopRuntime) return false;
   return invoke<boolean>("remove_library", { libraryId });
+}
+
+export async function setLibraryParent(
+  libraryId: number,
+  parentLibraryId: number | null,
+): Promise<boolean> {
+  if (!desktopRuntime) return false;
+  return invoke<boolean>("set_library_parent", { libraryId, parentLibraryId });
+}
+
+export async function assignAssetToLibrary(
+  assetId: number,
+  targetLibraryId: number,
+): Promise<boolean> {
+  if (!desktopRuntime) return false;
+  return invoke<boolean>("assign_asset_to_library", { assetId, targetLibraryId });
 }
 
 export async function openLibraryInExplorer(libraryId: number): Promise<void> {

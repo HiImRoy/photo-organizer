@@ -4,6 +4,68 @@ export type SortField =
 export type SortDirection = "asc" | "desc";
 export type SemanticMatchMode = "any" | "all";
 export type ViewMode = "grid" | "single";
+export type ClassificationSource = "none" | "auto" | "manual" | "mixed";
+
+export interface ClassificationFieldState<T> {
+  auto: T | null;
+  manual: T | null;
+  effective: T | null;
+  source: ClassificationSource;
+}
+
+export interface AuxiliaryTagState {
+  auto: string[];
+  manualAdditions: string[];
+  manualRemovals: string[];
+  effective: string[];
+  source: ClassificationSource;
+}
+
+export interface EffectiveClassification {
+  revision: number;
+  primaryCategory: ClassificationFieldState<string>;
+  auxiliaryTags: AuxiliaryTagState;
+  tone: ClassificationFieldState<string>;
+  dominantColorCategories: ClassificationFieldState<string[]>;
+  saturationLevel: ClassificationFieldState<string>;
+}
+
+export function emptyEffectiveClassification(revision = 0): EffectiveClassification {
+  const emptyField = (): ClassificationFieldState<string> => ({
+    auto: null,
+    manual: null,
+    effective: null,
+    source: "none",
+  });
+  return {
+    revision,
+    primaryCategory: emptyField(),
+    auxiliaryTags: {
+      auto: [],
+      manualAdditions: [],
+      manualRemovals: [],
+      effective: [],
+      source: "none",
+    },
+    tone: emptyField(),
+    dominantColorCategories: {
+      auto: null,
+      manual: null,
+      effective: null,
+      source: "none",
+    },
+    saturationLevel: emptyField(),
+  };
+}
+
+export interface ClassificationFieldDescriptor {
+  id: string;
+  displayName: string;
+  kind: "single" | "multi" | string;
+  filterable: boolean;
+  supportsManualOverride: boolean;
+  supportsRestoreAuto: boolean;
+}
 
 export interface LibrarySummary {
   id: number;
@@ -74,7 +136,12 @@ export interface AssetListItem {
   semanticError: string | null;
   semanticAnalyzedAt: string | null;
   semanticLabels: SemanticLabelResult[];
+  classification: EffectiveClassification;
 }
+
+/** Grid and detail use separate names even while sharing the stable asset fields. */
+export type AssetGridItem = AssetListItem;
+export type AssetDetail = AssetListItem;
 
 export interface AssetPage {
   items: AssetListItem[];
@@ -85,34 +152,36 @@ export interface AssetPage {
 
 export interface AssetFilter {
   search: string | null;
-  semanticLabels: string[];
+  primaryCategories: string[];
+  auxiliaryTags: string[];
   semanticMatch: SemanticMatchMode;
   toneLabels: string[];
   colorCategories: string[];
+  saturationLevels: string[];
   brightnessMin: number | null;
   brightnessMax: number | null;
   saturationMin: number | null;
   saturationMax: number | null;
   capturedFrom: string | null;
   capturedTo: string | null;
-  folderPrefix: string | null;
-  semanticState: "not_analyzed" | "failed" | null;
+  analysisStatus: "not_analyzed" | "failed" | "completed" | null;
 }
 
 export const emptyAssetFilter: AssetFilter = {
   search: null,
-  semanticLabels: [],
+  primaryCategories: [],
+  auxiliaryTags: [],
   semanticMatch: "any",
   toneLabels: [],
   colorCategories: [],
+  saturationLevels: [],
   brightnessMin: null,
   brightnessMax: null,
   saturationMin: null,
   saturationMax: null,
   capturedFrom: null,
   capturedTo: null,
-  folderPrefix: null,
-  semanticState: null,
+  analysisStatus: null,
 };
 
 export interface FolderSummary {
@@ -124,6 +193,23 @@ export interface SemanticGroupSummary {
   labelId: string;
   displayName: string;
   assetCount: number;
+}
+
+export interface ScanPerformance {
+  discoveryUs: number;
+  ownershipLookupUs: number;
+  metadataLookupUs: number;
+  fingerprintUs: number;
+  imageProcessingUs: number;
+  exifUs: number;
+  decodeUs: number;
+  resizeUs: number;
+  featureAnalysisUs: number;
+  thumbnailWriteUs: number;
+  databaseWriteUs: number;
+  processedFiles: number;
+  skippedFiles: number;
+  failedFiles: number;
 }
 
 export interface ScanProgress {
@@ -139,6 +225,7 @@ export interface ScanProgress {
   missing: number;
   currentPath: string | null;
   error: string | null;
+  performance?: ScanPerformance;
 }
 
 export interface ModelMetadata {

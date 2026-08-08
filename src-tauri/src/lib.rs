@@ -1,3 +1,4 @@
+pub mod classification;
 pub mod db;
 pub mod error;
 pub mod imaging;
@@ -21,6 +22,10 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(
             tauri_plugin_log::Builder::new()
+                .clear_targets()
+                .target(tauri_plugin_log::Target::new(
+                    tauri_plugin_log::TargetKind::Stdout,
+                ))
                 .level(log::LevelFilter::Info)
                 .build(),
         )
@@ -61,6 +66,14 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             ipc::list_libraries,
             ipc::list_assets,
+            ipc::get_classification_registry,
+            ipc::get_asset_detail,
+            ipc::update_classification_override,
+            ipc::update_tag_override,
+            ipc::restore_auto_classification,
+            ipc::batch_update_classification,
+            ipc::set_library_parent,
+            ipc::assign_asset_to_library,
             ipc::start_scan,
             ipc::rescan_library,
             ipc::cancel_scan,

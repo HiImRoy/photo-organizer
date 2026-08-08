@@ -395,12 +395,7 @@ fn render_context(
     let mut issues = Vec::new();
     let (capture_time, capture_value) =
         resolve_capture_time(asset, &rules.missing_fallback, &mut issues);
-    let primary = asset
-        .semantic_labels
-        .iter()
-        .find(|label| label.is_primary)
-        .or_else(|| asset.semantic_labels.first());
-    let semantic = primary.map(|label| label.label_id.clone());
+    let semantic = asset.classification.primary_category.effective.clone();
     let semantic_value = resolve_value(
         semantic,
         &rules.missing_fallback,
@@ -1147,6 +1142,7 @@ mod tests {
             semantic_error: None,
             semantic_analyzed_at: None,
             semantic_labels: Vec::new(),
+            classification: crate::classification::EffectiveClassification::default(),
         }
     }
 

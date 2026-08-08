@@ -3,10 +3,13 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   cancelLibraryScan,
   cancelSemanticAnalysis,
+  assignAssetToLibrary,
+  batchUpdateClassification,
   chooseLibraryFolder,
   fetchAssets,
+  fetchAssetDetail,
+  fetchClassificationRegistry,
   fetchLibraries,
-  fetchPreview,
   fetchSemanticCatalog,
   fetchSemanticGroups,
   fetchSemanticProgress,
@@ -18,9 +21,13 @@ import {
   removeLibrary,
   rescanLibrary as requestLibraryRescan,
   resumeSemanticAnalysis,
+  setLibraryParent,
   startLibraryScan,
   startSemanticAnalysis,
   startSemanticAnalysisForAssets,
+  updateClassificationOverride,
+  updateTagOverride,
+  restoreAutoClassification,
   subscribeScanProgress,
   subscribeSemanticProgress,
 } from "./api";
@@ -41,11 +48,14 @@ import {
 import { ProgressPanel } from "./components/ProgressPanel";
 import { Sidebar } from "./components/Sidebar";
 import { Thumbnail } from "./components/Thumbnail";
+import { usePreviewController, type PreviewController } from "./components/usePreviewController";
 import { formatDate } from "./format";
 import {
   emptyAssetFilter,
   type AssetFilter,
+  type AssetPage,
   type AssetListItem,
+  type ClassificationFieldDescriptor,
   type LibrarySummary,
   type ScanProgress,
   type SemanticGroupSummary,
@@ -58,11 +68,57 @@ import {
 } from "./types";
 
 const PAGE_SIZE = 120;
+const PREVIEW_PAGE_SIZE = 500;
+const IMPORT_REFRESH_INTERVAL_MS = 750;
+
+type AssetQueryOptions = {
+  libraryId: number;
+  sort: SortField;
+  direction: SortDirection;
+  filter: AssetFilter;
+};
+
+async function fetchAllPreviewAssets(options: AssetQueryOptions): Promise<AssetPage> {
+  const firstPage = await fetchAssets({
+    ...options,
+    page: 1,
+    pageSize: PREVIEW_PAGE_SIZE,
+  });
+  const pageSize = Math.max(firstPage.pageSize, 1);
+  const totalPages = Math.ceil(firstPage.total / pageSize);
+  if (totalPages <= 1 || firstPage.items.length >= firstPage.total) {
+    return { ...firstPage, page: 1 };
+  }
+
+  const remainingPages = await Promise.all(
+    Array.from({ length: totalPages - 1 }, (_, index) =>
+      fetchAssets({
+        ...options,
+        page: index + 2,
+        pageSize: PREVIEW_PAGE_SIZE,
+      }),
+    ),
+  );
+  return {
+    ...firstPage,
+    page: 1,
+    pageSize,
+    items: [firstPage, ...remainingPages].flatMap((result) => result.items),
+  };
+}
 
 type SelectionModifiers = {
   ctrlKey?: boolean;
   metaKey?: boolean;
   shiftKey?: boolean;
+};
+
+type AssetPointerDragState = {
+  assetIds: number[];
+  pointerId: number;
+  startX: number;
+  startY: number;
+  active: boolean;
 };
 
 const sortLabels: Record<SortField, string> = {
@@ -85,10 +141,13 @@ export default function App() {
   const [assetTotal, setAssetTotal] = useState(0);
   const [semanticGroups, setSemanticGroups] = useState<SemanticGroupSummary[]>([]);
   const [semanticCatalog, setSemanticCatalog] = useState<SemanticLabelDescriptor[]>([]);
+  const [classificationRegistry, setClassificationRegistry] = useState<
+    ClassificationFieldDescriptor[]
+  >([]);
   const [activeAssetId, setActiveAssetId] = useState<number | null>(null);
+  const [detailAsset, setDetailAsset] = useState<AssetListItem | null>(null);
   const [previewAssetId, setPreviewAssetId] = useState<number | null>(null);
   const [selectionAnchorId, setSelectionAnchorId] = useState<number | null>(null);
-  const [pendingPreviewDirection, setPendingPreviewDirection] = useState<-1 | 1 | null>(null);
   const [sort, setSort] = useState<SortField>("capture_time");
   const [direction, setDirection] = useState<SortDirection>("desc");
   const [filter, setFilterState] = useState<AssetFilter>(emptyAssetFilter);
@@ -108,6 +167,130 @@ export default function App() {
     visualOrganizationMode ? "organization" : "library",
   );
   const [selectedAssetIds, setSelectedAssetIds] = useState<number[]>([]);
+  const [pendingImportPath, setPendingImportPath] = useState<string | null>(null);
+  const [includeImportSubfolders, setIncludeImportSubfolders] = useState(false);
+  const [assetDropTargetLibraryId, setAssetDropTargetLibraryId] = useState<number | null>(null);
+  const [batchEditorOpen, setBatchEditorOpen] = useState(false);
+  const [batchField, setBatchField] = useState("primary_category");
+  const [batchValue, setBatchValue] = useState("");
+  const refreshTimerRef = useRef<number | null>(null);
+  const assetPointerDragRef = useRef<AssetPointerDragState | null>(null);
+  const librariesRef = useRef(libraries);
+  const assetAssignmentRef = useRef<(assetIds: number[], targetLibraryId: number) => void>(
+    () => {},
+  );
+
+  const requestDataRefresh = useCallback((immediate = false) => {
+    if (immediate) {
+      if (refreshTimerRef.current !== null) {
+        window.clearTimeout(refreshTimerRef.current);
+        refreshTimerRef.current = null;
+      }
+      setRefreshKey((value) => value + 1);
+      return;
+    }
+    if (refreshTimerRef.current !== null) return;
+    refreshTimerRef.current = window.setTimeout(() => {
+      refreshTimerRef.current = null;
+      setRefreshKey((value) => value + 1);
+    }, IMPORT_REFRESH_INTERVAL_MS);
+  }, []);
+
+  const moveAssetsToLibrary = useCallback(
+    async (assetIds: number[], targetLibraryId: number) => {
+      const results = await Promise.allSettled(
+        assetIds.map((assetId) => assignAssetToLibrary(assetId, targetLibraryId)),
+      );
+      if (
+        results.some((result) => result.status === "fulfilled" && result.value) ||
+        results.some((result) => result.status === "rejected")
+      ) {
+        requestDataRefresh(true);
+      }
+      const failure = results.find((result) => result.status === "rejected");
+      if (failure?.status === "rejected") {
+        setError(messageFrom(failure.reason));
+      }
+    },
+    [requestDataRefresh],
+  );
+
+  useEffect(() => {
+    librariesRef.current = libraries;
+    assetAssignmentRef.current = (assetId, targetLibraryId) => {
+      void moveAssetsToLibrary(assetId, targetLibraryId);
+    };
+  }, [libraries, moveAssetsToLibrary]);
+
+  useEffect(() => {
+    const findLibraryTarget = (event: PointerEvent): number | null => {
+      const pointElement =
+        typeof document.elementFromPoint === "function"
+          ? document.elementFromPoint(event.clientX, event.clientY)
+          : null;
+      const element = pointElement ?? event.target;
+      if (!(element instanceof Element)) return null;
+      const row = element.closest<HTMLElement>("[data-library-drop-id]");
+      if (!row) return null;
+      const libraryId = Number(row.dataset.libraryDropId);
+      return Number.isInteger(libraryId) && libraryId > 0 ? libraryId : null;
+    };
+
+    const handlePointerMove = (event: PointerEvent) => {
+      const drag = assetPointerDragRef.current;
+      const pointerId = event.pointerId || 1;
+      if (!drag || drag.pointerId !== pointerId) return;
+      const distance = Math.hypot(event.clientX - drag.startX, event.clientY - drag.startY);
+      if (!drag.active && distance < 6) return;
+      if (!drag.active) {
+        drag.active = true;
+      }
+      event.preventDefault();
+      const target = findLibraryTarget(event);
+      setAssetDropTargetLibraryId(
+        target !== null && librariesRef.current.some((library) => library.id === target)
+          ? target
+          : null,
+      );
+    };
+
+    const finishPointerDrag = (event: PointerEvent, cancelled: boolean) => {
+      const drag = assetPointerDragRef.current;
+      const pointerId = event.pointerId || 1;
+      if (!drag || drag.pointerId !== pointerId) return;
+      const target = drag.active && !cancelled ? findLibraryTarget(event) : null;
+      if (target !== null && librariesRef.current.some((library) => library.id === target)) {
+        assetAssignmentRef.current(drag.assetIds, target);
+      }
+      assetPointerDragRef.current = null;
+      setAssetDropTargetLibraryId(null);
+    };
+
+    const handlePointerUp = (event: PointerEvent) => finishPointerDrag(event, false);
+    const handlePointerCancel = (event: PointerEvent) => finishPointerDrag(event, true);
+    document.addEventListener("pointermove", handlePointerMove, { passive: false });
+    document.addEventListener("pointerup", handlePointerUp);
+    document.addEventListener("pointercancel", handlePointerCancel);
+    return () => {
+      document.removeEventListener("pointermove", handlePointerMove);
+      document.removeEventListener("pointerup", handlePointerUp);
+      document.removeEventListener("pointercancel", handlePointerCancel);
+    };
+  }, []);
+
+  const beginAssetPointerDrag = (
+    asset: AssetListItem,
+    event: React.PointerEvent<HTMLButtonElement>,
+  ) => {
+    if (event.button !== undefined && event.button !== 0 && event.button !== -1) return;
+    assetPointerDragRef.current = {
+      assetIds: selectedAssetIds.includes(asset.id) ? [...selectedAssetIds] : [asset.id],
+      pointerId: event.pointerId || 1,
+      startX: event.clientX,
+      startY: event.clientY,
+      active: false,
+    };
+  };
 
   const selectedLibrary = useMemo(
     () => libraries.find((library) => library.id === currentLibraryId) ?? null,
@@ -121,6 +304,10 @@ export default function App() {
     () => assets.find((asset) => asset.id === previewAssetId) ?? null,
     [assets, previewAssetId],
   );
+  const previewController = usePreviewController(
+    viewMode === "single" ? previewAsset : null,
+    viewMode === "single",
+  );
   const totalPages = Math.max(1, Math.ceil(assetTotal / PAGE_SIZE));
   const scanRunning =
     scanProgress !== null && ["running", "cancelling"].includes(scanProgress.status);
@@ -132,24 +319,28 @@ export default function App() {
 
   useEffect(() => {
     let active = true;
-    void Promise.allSettled([fetchLibraries(), fetchSemanticStatus(), fetchSemanticCatalog()]).then(
-      ([libraryResult, statusResult, catalogResult]) => {
-        if (!active) return;
-        if (libraryResult.status === "fulfilled") {
-          setLibraries(libraryResult.value);
-          setCurrentLibraryId((current) =>
-            current !== null && libraryResult.value.some((library) => library.id === current)
-              ? current
-              : (libraryResult.value[0]?.id ?? null),
-          );
-        } else {
-          setError(messageFrom(libraryResult.reason));
-        }
-        if (statusResult.status === "fulfilled") setSemanticStatus(statusResult.value);
-        if (catalogResult.status === "fulfilled") setSemanticCatalog(catalogResult.value);
-        setLoading(false);
-      },
-    );
+    void Promise.allSettled([
+      fetchLibraries(),
+      fetchSemanticStatus(),
+      fetchSemanticCatalog(),
+      fetchClassificationRegistry(),
+    ]).then(([libraryResult, statusResult, catalogResult, registryResult]) => {
+      if (!active) return;
+      if (libraryResult.status === "fulfilled") {
+        setLibraries(libraryResult.value);
+        setCurrentLibraryId((current) =>
+          current !== null && libraryResult.value.some((library) => library.id === current)
+            ? current
+            : (libraryResult.value[0]?.id ?? null),
+        );
+      } else {
+        setError(messageFrom(libraryResult.reason));
+      }
+      if (statusResult.status === "fulfilled") setSemanticStatus(statusResult.value);
+      if (catalogResult.status === "fulfilled") setSemanticCatalog(catalogResult.value);
+      if (registryResult.status === "fulfilled") setClassificationRegistry(registryResult.value);
+      setLoading(false);
+    });
     return () => {
       active = false;
     };
@@ -160,23 +351,23 @@ export default function App() {
     if (currentLibraryId === null) {
       return undefined;
     }
-    void fetchAssets({
-      libraryId: currentLibraryId,
-      sort,
-      direction,
-      page,
-      pageSize: PAGE_SIZE,
-      filter,
-    })
+    const request =
+      viewMode === "single"
+        ? fetchAllPreviewAssets({ libraryId: currentLibraryId, sort, direction, filter })
+        : fetchAssets({
+            libraryId: currentLibraryId,
+            sort,
+            direction,
+            page,
+            pageSize: PAGE_SIZE,
+            filter,
+          });
+    void request
       .then((result) => {
         if (!active) return;
         setAssets(result.items);
         setAssetTotal(result.total);
-        const fallbackId =
-          viewMode === "single"
-            ? ((pendingPreviewDirection === -1 ? result.items.at(-1)?.id : result.items[0]?.id) ??
-              null)
-            : null;
+        const fallbackId = viewMode === "single" ? (result.items[0]?.id ?? null) : null;
         setActiveAssetId((current) => {
           if (current && result.items.some((item) => item.id === current)) return current;
           return fallbackId;
@@ -185,7 +376,6 @@ export default function App() {
           if (current && result.items.some((item) => item.id === current)) return current;
           return fallbackId;
         });
-        if (pendingPreviewDirection !== null) setPendingPreviewDirection(null);
       })
       .catch((reason: unknown) => {
         if (active) setError(messageFrom(reason));
@@ -196,16 +386,38 @@ export default function App() {
     return () => {
       active = false;
     };
-  }, [
-    direction,
-    filter,
-    page,
-    refreshKey,
-    currentLibraryId,
-    sort,
-    viewMode,
-    pendingPreviewDirection,
-  ]);
+  }, [direction, filter, page, refreshKey, currentLibraryId, sort, viewMode]);
+
+  useEffect(() => {
+    let active = true;
+    if (activeAssetId === null) {
+      return undefined;
+    }
+    void fetchAssetDetail(activeAssetId)
+      .then((detail) => {
+        if (active && detail) {
+          setDetailAsset(detail);
+          setAssets((current) =>
+            current.map((item) => (item.id === detail.id ? { ...item, ...detail } : item)),
+          );
+        }
+      })
+      .catch((reason: unknown) => {
+        if (active) setError(messageFrom(reason));
+      });
+    return () => {
+      active = false;
+    };
+  }, [activeAssetId, refreshKey]);
+
+  useEffect(() => {
+    return () => {
+      if (refreshTimerRef.current !== null) {
+        window.clearTimeout(refreshTimerRef.current);
+        refreshTimerRef.current = null;
+      }
+    };
+  }, []);
 
   useEffect(() => {
     let active = true;
@@ -237,13 +449,7 @@ export default function App() {
       if (disposed) return;
       setScanProgress(progress);
       if (progress.libraryId !== null) setCurrentLibraryId(progress.libraryId);
-      if (
-        progress.status !== "running" ||
-        progress.processed === 1 ||
-        progress.processed % 4 === 0
-      ) {
-        setRefreshKey((value) => value + 1);
-      }
+      requestDataRefresh(progress.status !== "running");
       if (["completed", "cancelled", "failed"].includes(progress.status)) setCancellingScan(false);
     }).then((stop) => {
       if (disposed) stop();
@@ -252,13 +458,7 @@ export default function App() {
     void subscribeSemanticProgress((progress) => {
       if (disposed) return;
       setSemanticProgress(progress);
-      if (
-        progress.status !== "running" ||
-        progress.processed === 1 ||
-        progress.processed % 2 === 0
-      ) {
-        setRefreshKey((value) => value + 1);
-      }
+      requestDataRefresh(progress.status !== "running");
     }).then((stop) => {
       if (disposed) stop();
       else stopSemantic = stop;
@@ -268,7 +468,24 @@ export default function App() {
       stopScan?.();
       stopSemantic?.();
     };
-  }, []);
+  }, [requestDataRefresh]);
+
+  useEffect(() => {
+    if (
+      !scanProgress ||
+      scanProgress.status !== "completed" ||
+      scanProgress.failed > 0 ||
+      scanProgress.missing > 0
+    ) {
+      return undefined;
+    }
+
+    const taskId = scanProgress.taskId;
+    const dismissTimer = window.setTimeout(() => {
+      setScanProgress((current) => (current?.taskId === taskId ? null : current));
+    }, 700);
+    return () => window.clearTimeout(dismissTimer);
+  }, [scanProgress]);
 
   function updateFilter(next: AssetFilter) {
     setFilterState(next);
@@ -280,7 +497,21 @@ export default function App() {
     try {
       const rootPath = await chooseLibraryFolder();
       if (!rootPath) return;
-      const result = await startLibraryScan(rootPath);
+      setIncludeImportSubfolders(false);
+      setPendingImportPath(rootPath);
+    } catch (reason) {
+      setError(messageFrom(reason));
+    }
+  }
+
+  async function confirmImport() {
+    if (!pendingImportPath) return;
+    const rootPath = pendingImportPath;
+    try {
+      const result = await startLibraryScan(rootPath, {
+        includeSubfolders: includeImportSubfolders,
+      });
+      setPendingImportPath(null);
       setScanProgress({
         taskId: result.taskId,
         libraryId: null,
@@ -353,6 +584,58 @@ export default function App() {
     }
   }
 
+  function applyDetailUpdate(detail: AssetListItem | null) {
+    if (!detail) return;
+    setDetailAsset(detail);
+    setAssets((current) =>
+      current.map((item) => (item.id === detail.id ? { ...item, ...detail } : item)),
+    );
+  }
+
+  async function editClassification(assetId: number, field: string, value: string | string[]) {
+    try {
+      applyDetailUpdate(await updateClassificationOverride(assetId, field, value));
+    } catch (reason) {
+      setError(messageFrom(reason));
+    }
+  }
+
+  async function editTagOverride(assetId: number, tagId: string, state: "add" | "remove") {
+    try {
+      applyDetailUpdate(await updateTagOverride(assetId, tagId, state));
+    } catch (reason) {
+      setError(messageFrom(reason));
+    }
+  }
+
+  async function restoreClassification(assetId: number, field?: string) {
+    try {
+      applyDetailUpdate(await restoreAutoClassification(assetId, field));
+    } catch (reason) {
+      setError(messageFrom(reason));
+    }
+  }
+
+  async function applyBatchClassification() {
+    const value = batchValue
+      .split(",")
+      .map((item) => item.trim())
+      .filter(Boolean);
+    if (!value.length || !selectedAssetIds.length) return;
+    try {
+      await batchUpdateClassification(
+        selectedAssetIds,
+        batchField,
+        batchField === "dominant_color_category" ? value : value[0],
+      );
+      setBatchEditorOpen(false);
+      setBatchValue("");
+      requestDataRefresh(true);
+    } catch (reason) {
+      setError(messageFrom(reason));
+    }
+  }
+
   async function pauseOrResumeSemantic() {
     if (!semanticProgress) return;
     try {
@@ -400,15 +683,15 @@ export default function App() {
 
   function selectAsset(asset: AssetListItem, modifiers: SelectionModifiers = {}) {
     setActiveAssetId(asset.id);
-    if (modifiers.shiftKey && selectionAnchorId !== null) {
-      const anchorIndex = assets.findIndex((item) => item.id === selectionAnchorId);
-      const targetIndex = assets.findIndex((item) => item.id === asset.id);
-      if (anchorIndex >= 0 && targetIndex >= 0) {
-        const start = Math.min(anchorIndex, targetIndex);
-        const end = Math.max(anchorIndex, targetIndex);
-        setSelectedAssetIds(assets.slice(start, end + 1).map((item) => item.id));
+    if (modifiers.shiftKey) {
+      const range = selectionRange(asset.id);
+      if (range) {
+        setSelectedAssetIds(range);
         return;
       }
+      setSelectionAnchorId(asset.id);
+      setSelectedAssetIds([asset.id]);
+      return;
     }
     if (modifiers.ctrlKey || modifiers.metaKey) {
       setSelectionAnchorId(asset.id);
@@ -422,8 +705,28 @@ export default function App() {
     setSelectionAnchorId(asset.id);
   }
 
-  function toggleAssetSelection(asset: AssetListItem) {
+  function selectionRange(targetId: number): number[] | null {
+    if (selectionAnchorId === null) return null;
+    const anchorIndex = assets.findIndex((item) => item.id === selectionAnchorId);
+    const targetIndex = assets.findIndex((item) => item.id === targetId);
+    if (anchorIndex < 0 || targetIndex < 0) return null;
+    const start = Math.min(anchorIndex, targetIndex);
+    const end = Math.max(anchorIndex, targetIndex);
+    return assets.slice(start, end + 1).map((item) => item.id);
+  }
+
+  function toggleAssetSelection(asset: AssetListItem, modifiers: SelectionModifiers = {}) {
     setActiveAssetId(asset.id);
+    if (modifiers.shiftKey) {
+      const range = selectionRange(asset.id);
+      if (range) {
+        setSelectedAssetIds(range);
+        return;
+      }
+      setSelectedAssetIds([asset.id]);
+      setSelectionAnchorId(asset.id);
+      return;
+    }
     setSelectionAnchorId(asset.id);
     setSelectedAssetIds((current) =>
       current.includes(asset.id) ? current.filter((id) => id !== asset.id) : [...current, asset.id],
@@ -432,6 +735,7 @@ export default function App() {
 
   function clearSelection() {
     setSelectedAssetIds([]);
+    setSelectionAnchorId(null);
   }
 
   function openSinglePreview(asset: AssetListItem) {
@@ -452,15 +756,9 @@ export default function App() {
       const target = assets[index + delta];
       if (target) {
         selectPreview(target);
-        return;
-      }
-      const nextPage = page + delta;
-      if (nextPage >= 1 && nextPage <= totalPages) {
-        setPendingPreviewDirection(delta);
-        setPage(nextPage);
       }
     },
-    [assets, page, previewAsset, totalPages],
+    [assets, previewAsset],
   );
 
   async function removeLibraryById(library: LibrarySummary) {
@@ -480,6 +778,15 @@ export default function App() {
         setSelectionAnchorId(null);
         setPage(1);
       }
+    } catch (reason) {
+      setError(messageFrom(reason));
+    }
+  }
+
+  async function changeLibraryParent(library: LibrarySummary, parentLibraryId: number | null) {
+    try {
+      await setLibraryParent(library.id, parentLibraryId);
+      requestDataRefresh(true);
     } catch (reason) {
       setError(messageFrom(reason));
     }
@@ -647,6 +954,13 @@ export default function App() {
               <button className="tool-button" type="button" onClick={clearSelection}>
                 清除选择
               </button>
+              <button
+                className={batchEditorOpen ? "tool-button is-active" : "tool-button"}
+                type="button"
+                onClick={() => setBatchEditorOpen((value) => !value)}
+              >
+                批量修正
+              </button>
             </>
           ) : null}
           {selectedLibrary ? (
@@ -662,6 +976,36 @@ export default function App() {
           ) : null}
         </div>
       </header>
+
+      {batchEditorOpen && selectedAssetIds.length > 0 ? (
+        <div className="batch-classification-bar">
+          <strong>批量修正 {selectedAssetIds.length} 张图片</strong>
+          <select value={batchField} onChange={(event) => setBatchField(event.target.value)}>
+            <option value="primary_category">Primary Category</option>
+            <option value="tone">Tone</option>
+            <option value="dominant_color_category">Color Palette</option>
+            <option value="saturation_level">Saturation Level</option>
+          </select>
+          <input
+            value={batchValue}
+            placeholder={batchField === "dominant_color_category" ? "blue, orange" : "输入值"}
+            onChange={(event) => setBatchValue(event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key === "Enter") void applyBatchClassification();
+            }}
+          />
+          <button
+            className="primary-action"
+            type="button"
+            onClick={() => void applyBatchClassification()}
+          >
+            保存
+          </button>
+          <button className="tool-button" type="button" onClick={() => setBatchEditorOpen(false)}>
+            取消
+          </button>
+        </div>
+      ) : null}
 
       <div className="workspace-shell">
         {workspaceMode === "organization" && selectedLibrary ? (
@@ -684,6 +1028,7 @@ export default function App() {
               catalog={semanticCatalog}
               filter={filter}
               semanticStatus={semanticStatus}
+              assetDropTargetLibraryId={assetDropTargetLibraryId}
               onToggle={() => setLeftCollapsed((value) => !value)}
               onImportLibrary={() => void importFolder()}
               onSelectLibrary={selectLibrary}
@@ -699,11 +1044,14 @@ export default function App() {
                 )
               }
               onRemoveLibrary={(library) => void removeLibraryById(library)}
+              onChangeLibraryParent={(library, parentLibraryId) =>
+                void changeLibraryParent(library, parentLibraryId)
+              }
               onFilterChange={updateFilter}
             />
 
             <main
-              className="center-workspace"
+              className={`center-workspace${viewMode === "single" ? " is-single-preview" : ""}`}
               onClick={(event) => {
                 if (event.target === event.currentTarget) clearSelection();
               }}
@@ -772,6 +1120,7 @@ export default function App() {
                     <SinglePreview
                       assets={assets}
                       selected={previewAsset}
+                      controller={previewController}
                       onSelect={selectPreview}
                     />
                   ) : assets.length ? (
@@ -780,6 +1129,7 @@ export default function App() {
                       active={activeAsset}
                       selectedAssetIds={selectedAssetIds}
                       grouped={groupBySemantic}
+                      onStartAssetDrag={beginAssetPointerDrag}
                       onSelect={selectAsset}
                       onToggleSelection={toggleAssetSelection}
                       onOpen={openSinglePreview}
@@ -796,7 +1146,7 @@ export default function App() {
                       </p>
                     </section>
                   )}
-                  {totalPages > 1 ? (
+                  {viewMode !== "single" && totalPages > 1 ? (
                     <nav className="pagination" aria-label="图库分页">
                       <button
                         type="button"
@@ -842,15 +1192,95 @@ export default function App() {
             </main>
 
             <DetailPanel
-              asset={activeAsset}
+              asset={detailAsset?.id === activeAsset?.id ? detailAsset : activeAsset}
               collapsed={rightCollapsed}
               semanticStatus={semanticStatus}
+              previewNavigator={previewController.navigator}
               onToggle={() => setRightCollapsed((value) => !value)}
               onReanalyze={(asset) => void analyzeOne(asset)}
+              classificationRegistry={classificationRegistry}
+              onUpdateClassification={(assetId, field, value) =>
+                void editClassification(assetId, field, value)
+              }
+              onUpdateTagOverride={(assetId, tagId, state) =>
+                void editTagOverride(assetId, tagId, state)
+              }
+              onRestoreAuto={(assetId, field) => void restoreClassification(assetId, field)}
             />
           </>
         )}
       </div>
+      {pendingImportPath ? (
+        <ImportLibraryDialog
+          path={pendingImportPath}
+          includeSubfolders={includeImportSubfolders}
+          onIncludeSubfoldersChange={setIncludeImportSubfolders}
+          onCancel={() => setPendingImportPath(null)}
+          onConfirm={() => void confirmImport()}
+        />
+      ) : null}
+    </div>
+  );
+}
+
+function ImportLibraryDialog({
+  path,
+  includeSubfolders,
+  onIncludeSubfoldersChange,
+  onCancel,
+  onConfirm,
+}: {
+  path: string;
+  includeSubfolders: boolean;
+  onIncludeSubfoldersChange: (value: boolean) => void;
+  onCancel: () => void;
+  onConfirm: () => void;
+}) {
+  return (
+    <div className="modal-backdrop" role="presentation">
+      <section
+        className="import-library-dialog"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="import-library-dialog-title"
+      >
+        <div className="dialog-heading">
+          <div>
+            <small>导入图库</small>
+            <h2 id="import-library-dialog-title">确认导入方式</h2>
+          </div>
+          <button type="button" className="dialog-close" onClick={onCancel} aria-label="关闭">
+            ×
+          </button>
+        </div>
+        <p className="dialog-path" title={path}>
+          {path}
+        </p>
+        <label className="import-option">
+          <input
+            type="checkbox"
+            checked={includeSubfolders}
+            onChange={(event) => onIncludeSubfoldersChange(event.target.checked)}
+          />
+          <span>
+            <strong>导入子文件夹结构</strong>
+            <small>
+              每个直接包含图片的子文件夹建立独立图库，并按磁盘嵌套关系初始化层级；空文件夹不建立图库。
+            </small>
+          </span>
+        </label>
+        <p className="dialog-hint">
+          不勾选时仍会递归扫描所有图片，但只建立一个图库，子文件夹不会显示在图库树中。
+        </p>
+        <div className="dialog-actions">
+          <button type="button" className="tool-button" onClick={onCancel}>
+            取消
+          </button>
+          <button type="button" className="primary-action" onClick={onConfirm}>
+            开始导入
+          </button>
+        </div>
+      </section>
     </div>
   );
 }
@@ -860,6 +1290,7 @@ function GridWorkspace({
   active,
   selectedAssetIds,
   grouped,
+  onStartAssetDrag,
   onSelect,
   onToggleSelection,
   onOpen,
@@ -869,8 +1300,9 @@ function GridWorkspace({
   active: AssetListItem | null;
   selectedAssetIds: number[];
   grouped: boolean;
+  onStartAssetDrag: (asset: AssetListItem, event: React.PointerEvent<HTMLButtonElement>) => void;
   onSelect: (asset: AssetListItem, modifiers?: SelectionModifiers) => void;
-  onToggleSelection: (asset: AssetListItem) => void;
+  onToggleSelection: (asset: AssetListItem, modifiers?: SelectionModifiers) => void;
   onOpen: (asset: AssetListItem) => void;
   onClearSelection: () => void;
 }) {
@@ -889,6 +1321,7 @@ function GridWorkspace({
             asset={asset}
             active={active?.id === asset.id}
             selected={selectedAssetIds.includes(asset.id)}
+            onStartDrag={onStartAssetDrag}
             onSelect={onSelect}
             onToggleSelection={onToggleSelection}
             onOpen={onOpen}
@@ -927,6 +1360,7 @@ function GridWorkspace({
                   asset={asset}
                   active={active?.id === asset.id}
                   selected={selectedAssetIds.includes(asset.id)}
+                  onStartDrag={onStartAssetDrag}
                   onSelect={onSelect}
                   onToggleSelection={onToggleSelection}
                   onOpen={onOpen}
@@ -943,20 +1377,32 @@ function GridWorkspace({
 function SinglePreview({
   assets,
   selected,
+  controller,
   onSelect,
 }: {
   assets: AssetListItem[];
   selected: AssetListItem | null;
+  controller: PreviewController;
   onSelect: (asset: AssetListItem) => void;
 }) {
   return (
     <section className="single-workspace">
       {selected ? (
-        <ZoomablePreview key={selected.id} asset={selected} />
+        <ZoomablePreview key={selected.id} asset={selected} controller={controller} />
       ) : (
         <div className="single-empty">没有可预览的图片</div>
       )}
-      <div className="filmstrip" aria-label="胶片栏">
+      <div
+        className="filmstrip"
+        aria-label="胶片栏"
+        onWheel={(event) => {
+          const delta =
+            Math.abs(event.deltaY) >= Math.abs(event.deltaX) ? event.deltaY : event.deltaX;
+          if (delta === 0) return;
+          event.preventDefault();
+          event.currentTarget.scrollLeft += delta;
+        }}
+      >
         {assets.map((asset) => (
           <button
             type="button"
@@ -982,184 +1428,43 @@ function SinglePreview({
   );
 }
 
-function ZoomablePreview({ asset }: { asset: AssetListItem }) {
-  const stageRef = useRef<HTMLDivElement | null>(null);
-  const [screenSource, setScreenSource] = useState<string | null>(null);
-  const [originalSource, setOriginalSource] = useState<string | null>(null);
-  const [loadState, setLoadState] = useState<"loading" | "loaded" | "error">("loading");
-  const [originalState, setOriginalState] = useState<"idle" | "loading" | "loaded" | "error">(
-    "idle",
-  );
-  const [naturalSize, setNaturalSize] = useState({
-    width: asset.width ?? 1,
-    height: asset.height ?? 1,
-  });
-  const [fitScale, setFitScale] = useState(1);
-  const [zoom, setZoom] = useState<number | "fit">("fit");
-  const [offset, setOffset] = useState({ x: 0, y: 0 });
-  const [dragging, setDragging] = useState(false);
-  const [dragStart, setDragStart] = useState({ x: 0, y: 0 });
-  const generation = useRef(0);
-
-  useEffect(() => {
-    const requestGeneration = ++generation.current;
-    void fetchPreview(asset.id, "screen")
-      .then((value) => {
-        if (generation.current !== requestGeneration) return;
-        setScreenSource(value);
-        setLoadState("loaded");
-      })
-      .catch(() => {
-        if (generation.current === requestGeneration) setLoadState("error");
-      });
-    return () => {
-      generation.current += 1;
-    };
-  }, [asset.id, asset.height, asset.width]);
-
-  useEffect(() => {
-    const stage = stageRef.current;
-    if (!stage) return undefined;
-    const updateFit = () => {
-      const rect = stage.getBoundingClientRect();
-      setFitScale(
-        Math.max(
-          0.05,
-          Math.min(
-            1,
-            (rect.width - 32) / naturalSize.width,
-            (rect.height - 32) / naturalSize.height,
-          ),
-        ),
-      );
-      if (zoom === "fit") setOffset({ x: 0, y: 0 });
-    };
-    updateFit();
-    if (typeof ResizeObserver === "undefined") return undefined;
-    const observer = new ResizeObserver(updateFit);
-    observer.observe(stage);
-    return () => observer.disconnect();
-  }, [naturalSize.height, naturalSize.width, zoom]);
-
-  function currentScale() {
-    return zoom === "fit" ? fitScale : zoom;
-  }
-
-  function clamp(nextOffset: { x: number; y: number }, scale = currentScale()) {
-    const rect = stageRef.current?.getBoundingClientRect();
-    if (!rect) return nextOffset;
-    const maxX = Math.max(0, (naturalSize.width * scale - rect.width) / 2);
-    const maxY = Math.max(0, (naturalSize.height * scale - rect.height) / 2);
-    return {
-      x: Math.max(-maxX, Math.min(maxX, nextOffset.x)),
-      y: Math.max(-maxY, Math.min(maxY, nextOffset.y)),
-    };
-  }
-
-  function loadOriginalIfNeeded() {
-    if (originalSource || originalState === "loading" || originalState === "loaded") return;
-    const requestGeneration = generation.current;
-    setOriginalState("loading");
-    void fetchPreview(asset.id, "original")
-      .then((value) => {
-        if (generation.current !== requestGeneration) return;
-        setOriginalSource(value);
-        setOriginalState("loaded");
-      })
-      .catch(() => {
-        if (generation.current === requestGeneration) setOriginalState("error");
-      });
-  }
-
-  function setZoomLevel(next: number | "fit") {
-    setZoom(next);
-    setOffset({ x: 0, y: 0 });
-    if (next !== "fit" && next >= 1) loadOriginalIfNeeded();
-  }
-
-  const displayScale = currentScale();
-  const displaySource =
-    zoom !== "fit" && zoom >= 1 && originalSource ? originalSource : screenSource;
-  const zoomLabel =
-    zoom === "fit" ? `${Math.round(fitScale * 100)}% · 适应窗口` : `${Math.round(zoom * 100)}%`;
+function ZoomablePreview({
+  asset,
+  controller,
+}: {
+  asset: AssetListItem;
+  controller: PreviewController;
+}) {
+  const {
+    stageRef,
+    screenSource,
+    displaySource,
+    loadState,
+    originalState,
+    naturalSize,
+    displayScale,
+    dragging,
+    onWheel,
+    onPointerDown,
+    onPointerMove,
+    onPointerUp,
+    onPointerCancel,
+    onDoubleClick,
+    onImageLoad,
+  } = controller;
 
   return (
     <div className="single-canvas">
-      <div className="preview-toolbar" aria-label="预览缩放工具">
-        <button
-          type="button"
-          onClick={() => setZoomLevel(Math.max(0.25, (zoom === "fit" ? fitScale : zoom) - 0.25))}
-        >
-          −
-        </button>
-        <button type="button" onClick={() => setZoomLevel("fit")}>
-          适应窗口
-        </button>
-        <button type="button" onClick={() => setZoomLevel(1)}>
-          100%
-        </button>
-        <button type="button" onClick={() => setZoomLevel(0.25)}>
-          25%
-        </button>
-        <button type="button" onClick={() => setZoomLevel(0.5)}>
-          50%
-        </button>
-        <button type="button" onClick={() => setZoomLevel(2)}>
-          200%
-        </button>
-        <button type="button" onClick={() => setZoomLevel(4)}>
-          400%
-        </button>
-        <button
-          type="button"
-          onClick={() => setZoomLevel(Math.min(4, (zoom === "fit" ? fitScale : zoom) + 0.25))}
-        >
-          ＋
-        </button>
-        <span>{zoomLabel}</span>
-      </div>
       <div
         ref={stageRef}
         className={`zoom-stage${dragging ? " is-dragging" : ""}`}
-        onWheel={(event) => {
-          event.preventDefault();
-          const oldScale = currentScale();
-          const nextScale = Math.max(
-            0.25,
-            Math.min(4, oldScale + (event.deltaY < 0 ? 0.25 : -0.25)),
-          );
-          const rect = event.currentTarget.getBoundingClientRect();
-          const pointer = {
-            x: event.clientX - (rect.left + rect.width / 2) - offset.x,
-            y: event.clientY - (rect.top + rect.height / 2) - offset.y,
-          };
-          const ratio = nextScale / oldScale;
-          setZoomLevel(nextScale);
-          setOffset(
-            clamp(
-              { x: offset.x - pointer.x * (ratio - 1), y: offset.y - pointer.y * (ratio - 1) },
-              nextScale,
-            ),
-          );
-        }}
-        onPointerDown={(event) => {
-          if (displayScale <= fitScale) return;
-          event.currentTarget.setPointerCapture(event.pointerId);
-          setDragging(true);
-          setDragStart({ x: event.clientX - offset.x, y: event.clientY - offset.y });
-        }}
-        onPointerMove={(event) => {
-          if (dragging)
-            setOffset(clamp({ x: event.clientX - dragStart.x, y: event.clientY - dragStart.y }));
-        }}
-        onPointerUp={(event) => {
-          if (event.currentTarget.hasPointerCapture(event.pointerId))
-            event.currentTarget.releasePointerCapture(event.pointerId);
-          setDragging(false);
-        }}
-        onDoubleClick={() =>
-          setZoomLevel(zoom === "fit" || (typeof zoom === "number" && zoom < 1) ? 1 : "fit")
-        }
+        onWheel={onWheel}
+        onPointerDown={onPointerDown}
+        onPointerMove={onPointerMove}
+        onPointerUp={onPointerUp}
+        onPointerCancel={onPointerCancel}
+        onLostPointerCapture={onPointerCancel}
+        onDoubleClick={onDoubleClick}
       >
         {screenSource ? (
           <img
@@ -1170,10 +1475,12 @@ function ZoomablePreview({ asset }: { asset: AssetListItem }) {
             style={{
               width: `${naturalSize.width}px`,
               height: `${naturalSize.height}px`,
-              transform: `translate3d(${offset.x}px, ${offset.y}px, 0) scale(${displayScale})`,
+              left: "50%",
+              top: "50%",
+              transform: `translate3d(calc(-50% + ${controller.offset.x}px), calc(-50% + ${controller.offset.y}px), 0) scale(${displayScale})`,
             }}
             onLoad={(event) =>
-              setNaturalSize({
+              onImageLoad({
                 width: event.currentTarget.naturalWidth,
                 height: event.currentTarget.naturalHeight,
               })
@@ -1182,9 +1489,7 @@ function ZoomablePreview({ asset }: { asset: AssetListItem }) {
         ) : (
           <Thumbnail asset={asset} />
         )}
-        {loadState === "loading" ? (
-          <span className="preview-loading">正在加载高清预览…</span>
-        ) : null}
+        {loadState === "loading" ? <span className="preview-loading">正在加载原图…</span> : null}
         {loadState === "error" ? (
           <span className="preview-error">无法加载高清预览，请重试</span>
         ) : null}
@@ -1260,13 +1565,15 @@ function GridLoading() {
 function countActiveFilters(filter: AssetFilter) {
   return (
     Number(Boolean(filter.search)) +
-    filter.semanticLabels.length +
+    filter.primaryCategories.length +
+    filter.auxiliaryTags.length +
     filter.toneLabels.length +
     filter.colorCategories.length +
+    filter.saturationLevels.length +
     Number(filter.brightnessMin !== null || filter.brightnessMax !== null) +
     Number(filter.saturationMin !== null || filter.saturationMax !== null) +
     Number(Boolean(filter.capturedFrom || filter.capturedTo)) +
-    Number(Boolean(filter.semanticState))
+    Number(Boolean(filter.analysisStatus))
   );
 }
 

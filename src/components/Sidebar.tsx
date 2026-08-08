@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import type {
   AssetFilter,
@@ -24,6 +24,8 @@ interface SidebarProps {
   onOpenLibrary: (library: LibrarySummary) => void;
   onShowLibraryInfo: (library: LibrarySummary) => void;
   onRemoveLibrary: (library: LibrarySummary) => void;
+  onChangeLibraryParent: (library: LibrarySummary, parentLibraryId: number | null) => void;
+  assetDropTargetLibraryId: number | null;
   onFilterChange: (filter: AssetFilter) => void;
 }
 
@@ -44,6 +46,12 @@ const colors = [
   ["neutral", "中性"],
 ] as const;
 
+const saturationLevels = [
+  ["low", "低饱和"],
+  ["medium", "中饱和"],
+  ["high", "高饱和"],
+] as const;
+
 export function Sidebar(props: SidebarProps) {
   const {
     collapsed,
@@ -60,11 +68,147 @@ export function Sidebar(props: SidebarProps) {
     onOpenLibrary,
     onShowLibraryInfo,
     onRemoveLibrary,
+    onChangeLibraryParent,
+    assetDropTargetLibraryId,
     onFilterChange,
   } = props;
   const [collapsedLibraryIds, setCollapsedLibraryIds] = useState<Set<number>>(new Set());
   const [openLibraryMenuId, setOpenLibraryMenuId] = useState<number | null>(null);
+  const [draggingLibraryId, setDraggingLibraryId] = useState<number | null>(null);
+  const [dropTargetId, setDropTargetId] = useState<number | "root" | null>(null);
+  const pointerDragRef = useRef<PointerDragState | null>(null);
+  const suppressLibraryClickRef = useRef(false);
+  const librariesRef = useRef(libraries);
+  const onChangeLibraryParentRef = useRef(onChangeLibraryParent);
   const libraryTree = buildLibraryTree(libraries);
+
+  useEffect(() => {
+    librariesRef.current = libraries;
+    onChangeLibraryParentRef.current = onChangeLibraryParent;
+  }, [libraries, onChangeLibraryParent]);
+
+  useEffect(() => {
+    const findDropTarget = (event: PointerEvent): number | "root" | null => {
+      const pointElement =
+        typeof document.elementFromPoint === "function"
+          ? document.elementFromPoint(event.clientX, event.clientY)
+          : null;
+      const element = pointElement ?? event.target;
+      if (!(element instanceof Element)) return null;
+      const row = element.closest<HTMLElement>("[data-library-drop-id]");
+      if (row) {
+        const libraryId = Number(row.dataset.libraryDropId);
+        return Number.isInteger(libraryId) ? libraryId : null;
+      }
+      return element.closest("[data-library-root-drop]") ? "root" : null;
+    };
+
+    const isValidDropTarget = (sourceId: number, target: number | "root" | null) => {
+      if (target === "root") {
+        return librariesRef.current.some(
+          (library) => library.id === sourceId && library.parentLibraryId !== null,
+        );
+      }
+      return target !== null && canDropLibrary(sourceId, target, librariesRef.current);
+    };
+
+    const handlePointerMove = (event: PointerEvent) => {
+      const drag = pointerDragRef.current;
+      const pointerId = event.pointerId || 1;
+      if (!drag || drag.pointerId !== pointerId) return;
+
+      const distance = Math.hypot(event.clientX - drag.startX, event.clientY - drag.startY);
+      if (!drag.active && distance < 6) return;
+
+      if (!drag.active) {
+        drag.active = true;
+        suppressLibraryClickRef.current = true;
+        setDraggingLibraryId(drag.libraryId);
+      }
+
+      event.preventDefault();
+      const target = findDropTarget(event);
+      setDropTargetId(isValidDropTarget(drag.libraryId, target) ? target : null);
+    };
+
+    const finishPointerDrag = (event: PointerEvent, cancelled: boolean) => {
+      const drag = pointerDragRef.current;
+      const pointerId = event.pointerId || 1;
+      if (!drag || drag.pointerId !== pointerId) return;
+
+      const target = drag.active && !cancelled ? findDropTarget(event) : null;
+      const source = librariesRef.current.find((library) => library.id === drag.libraryId);
+      if (source && isValidDropTarget(drag.libraryId, target)) {
+        onChangeLibraryParentRef.current(source, target === "root" ? null : target);
+      }
+      if (drag.active) {
+        suppressLibraryClickRef.current = true;
+        window.setTimeout(() => {
+          suppressLibraryClickRef.current = false;
+        }, 0);
+      }
+      pointerDragRef.current = null;
+      setDraggingLibraryId(null);
+      setDropTargetId(null);
+    };
+
+    const handlePointerCancel = (event: PointerEvent) => finishPointerDrag(event, true);
+    const handlePointerUp = (event: PointerEvent) => finishPointerDrag(event, false);
+
+    document.addEventListener("pointermove", handlePointerMove, { passive: false });
+    document.addEventListener("pointerup", handlePointerUp);
+    document.addEventListener("pointercancel", handlePointerCancel);
+    return () => {
+      document.removeEventListener("pointermove", handlePointerMove);
+      document.removeEventListener("pointerup", handlePointerUp);
+      document.removeEventListener("pointercancel", handlePointerCancel);
+    };
+  }, []);
+
+  const beginLibraryPointerDrag = (
+    libraryId: number,
+    event: React.PointerEvent<HTMLDivElement>,
+  ) => {
+    if (event.button !== undefined && event.button !== 0 && event.button !== -1) return;
+    const target = event.target;
+    if (
+      target instanceof Element &&
+      target.closest(".library-menu-trigger, .library-tree-expander")
+    ) {
+      return;
+    }
+    pointerDragRef.current = {
+      libraryId,
+      pointerId: event.pointerId || 1,
+      startX: event.clientX,
+      startY: event.clientY,
+      active: false,
+    };
+  };
+
+  const selectLibraryFromRow = (libraryId: number) => {
+    if (suppressLibraryClickRef.current) {
+      suppressLibraryClickRef.current = false;
+      return;
+    }
+    onSelectLibrary(libraryId);
+  };
+
+  useEffect(() => {
+    if (openLibraryMenuId === null) return undefined;
+
+    const closeMenuOnOutsidePointer = (event: PointerEvent) => {
+      const target = event.target;
+      if (!(target instanceof Element)) return;
+      if (target.closest(".library-context-menu") || target.closest(".library-menu-trigger")) {
+        return;
+      }
+      setOpenLibraryMenuId(null);
+    };
+
+    document.addEventListener("pointerdown", closeMenuOnOutsidePointer);
+    return () => document.removeEventListener("pointerdown", closeMenuOnOutsidePointer);
+  }, [openLibraryMenuId]);
 
   if (collapsed) {
     return (
@@ -92,6 +236,9 @@ export function Sidebar(props: SidebarProps) {
             <LibraryTreeNode
               key={node.library.id}
               node={node}
+              draggingLibraryId={draggingLibraryId}
+              dropTargetId={dropTargetId}
+              assetDropTargetLibraryId={assetDropTargetLibraryId}
               depth={0}
               expanded={!collapsedLibraryIds.has(node.library.id)}
               collapsedLibraryIds={collapsedLibraryIds}
@@ -106,14 +253,26 @@ export function Sidebar(props: SidebarProps) {
                 })
               }
               onOpenMenu={setOpenLibraryMenuId}
-              onSelectLibrary={onSelectLibrary}
+              onSelectLibrary={selectLibraryFromRow}
               onRescanLibrary={onRescanLibrary}
               onOpenLibrary={onOpenLibrary}
               onShowLibraryInfo={onShowLibraryInfo}
               onRemoveLibrary={onRemoveLibrary}
+              onChangeLibraryParent={onChangeLibraryParent}
+              onPointerDown={beginLibraryPointerDrag}
             />
           ))}
           {libraryTree.length === 0 ? <span className="empty-nav-state">尚未导入图库</span> : null}
+          <div
+            className={
+              draggingLibraryId === null || dropTargetId !== "root"
+                ? "library-root-drop-target"
+                : "library-root-drop-target is-active is-drag-over"
+            }
+            data-library-root-drop="true"
+          >
+            拖到这里移出当前父图库
+          </div>
           <button className="nav-row import-library-row" type="button" onClick={onImportLibrary}>
             <LibraryIcon width="15" height="15" />
             <span>＋ 导入图库</span>
@@ -124,22 +283,22 @@ export function Sidebar(props: SidebarProps) {
       <PanelSection title="更多筛选">
         <div className="nav-list compact">
           <FilterRow
-            active={filter.semanticState === "not_analyzed"}
+            active={filter.analysisStatus === "not_analyzed"}
             label="尚未语义分析"
             onClick={() =>
               onFilterChange({
                 ...filter,
-                semanticState: filter.semanticState === "not_analyzed" ? null : "not_analyzed",
+                analysisStatus: filter.analysisStatus === "not_analyzed" ? null : "not_analyzed",
               })
             }
           />
           <FilterRow
-            active={filter.semanticState === "failed"}
+            active={filter.analysisStatus === "failed"}
             label="分析失败"
             onClick={() =>
               onFilterChange({
                 ...filter,
-                semanticState: filter.semanticState === "failed" ? null : "failed",
+                analysisStatus: filter.analysisStatus === "failed" ? null : "failed",
               })
             }
           />
@@ -148,33 +307,44 @@ export function Sidebar(props: SidebarProps) {
 
       <PanelSection
         title="内容标签"
-        trailing={filter.semanticLabels.length ? `${filter.semanticLabels.length}` : undefined}
+        trailing={
+          filter.primaryCategories.length || filter.auxiliaryTags.length
+            ? `${filter.primaryCategories.length + filter.auxiliaryTags.length}`
+            : undefined
+        }
       >
         <div className="chip-grid">
-          {catalog
-            .filter((label) => label.isPrimaryCategory)
-            .map((label) => {
-              const active = filter.semanticLabels.includes(label.id);
-              const count = groups.find((group) => group.labelId === label.id)?.assetCount;
-              return (
-                <button
-                  type="button"
-                  className={active ? "filter-chip is-active" : "filter-chip"}
-                  key={label.id}
-                  onClick={() =>
-                    onFilterChange({
-                      ...filter,
-                      semanticLabels: toggleValue(filter.semanticLabels, label.id),
-                    })
-                  }
-                >
-                  {label.displayName}
-                  {count ? <small>{count}</small> : null}
-                </button>
-              );
-            })}
+          {catalog.map((label) => {
+            const selected = label.isPrimaryCategory
+              ? filter.primaryCategories
+              : filter.auxiliaryTags;
+            const active = selected.includes(label.id);
+            const count = groups.find((group) => group.labelId === label.id)?.assetCount;
+            return (
+              <button
+                type="button"
+                className={active ? "filter-chip is-active" : "filter-chip"}
+                key={label.id}
+                onClick={() =>
+                  onFilterChange({
+                    ...filter,
+                    ...(label.isPrimaryCategory
+                      ? {
+                          primaryCategories: toggleValue(filter.primaryCategories, label.id),
+                        }
+                      : {
+                          auxiliaryTags: toggleValue(filter.auxiliaryTags, label.id),
+                        }),
+                  })
+                }
+              >
+                {label.displayName}
+                {count ? <small>{count}</small> : null}
+              </button>
+            );
+          })}
         </div>
-        {filter.semanticLabels.length > 1 ? (
+        {filter.auxiliaryTags.length > 1 ? (
           <div className="match-mode" aria-label="语义标签匹配方式">
             <button
               type="button"
@@ -203,6 +373,28 @@ export function Sidebar(props: SidebarProps) {
               key={id}
               onClick={() =>
                 onFilterChange({ ...filter, toneLabels: toggleValue(filter.toneLabels, id) })
+              }
+            >
+              {label}
+            </button>
+          ))}
+        </div>
+      </PanelSection>
+
+      <PanelSection title="饱和度级别">
+        <div className="chip-grid three">
+          {saturationLevels.map(([id, label]) => (
+            <button
+              type="button"
+              className={
+                filter.saturationLevels.includes(id) ? "filter-chip is-active" : "filter-chip"
+              }
+              key={id}
+              onClick={() =>
+                onFilterChange({
+                  ...filter,
+                  saturationLevels: toggleValue(filter.saturationLevels, id),
+                })
               }
             >
               {label}
@@ -318,8 +510,34 @@ function buildLibraryTree(libraries: LibrarySummary[]): LibraryTreeNodeData[] {
   return roots;
 }
 
+interface PointerDragState {
+  libraryId: number;
+  pointerId: number;
+  startX: number;
+  startY: number;
+  active: boolean;
+}
+
+function canDropLibrary(
+  sourceLibraryId: number,
+  targetLibraryId: number,
+  libraries: LibrarySummary[],
+): boolean {
+  if (sourceLibraryId === targetLibraryId) return false;
+  const byId = new Map(libraries.map((library) => [library.id, library]));
+  let current: number | null = targetLibraryId;
+  while (current !== null) {
+    if (current === sourceLibraryId) return false;
+    current = byId.get(current)?.parentLibraryId ?? null;
+  }
+  return byId.has(sourceLibraryId) && byId.has(targetLibraryId);
+}
+
 function LibraryTreeNode({
   node,
+  draggingLibraryId,
+  dropTargetId,
+  assetDropTargetLibraryId,
   depth,
   expanded,
   collapsedLibraryIds,
@@ -332,8 +550,13 @@ function LibraryTreeNode({
   onOpenLibrary,
   onShowLibraryInfo,
   onRemoveLibrary,
+  onChangeLibraryParent,
+  onPointerDown,
 }: {
   node: LibraryTreeNodeData;
+  draggingLibraryId: number | null;
+  dropTargetId: number | "root" | null;
+  assetDropTargetLibraryId: number | null;
   depth: number;
   expanded: boolean;
   collapsedLibraryIds: Set<number>;
@@ -346,15 +569,27 @@ function LibraryTreeNode({
   onOpenLibrary: (library: LibrarySummary) => void;
   onShowLibraryInfo: (library: LibrarySummary) => void;
   onRemoveLibrary: (library: LibrarySummary) => void;
+  onChangeLibraryParent: (library: LibrarySummary, parentLibraryId: number | null) => void;
+  onPointerDown: (libraryId: number, event: React.PointerEvent<HTMLDivElement>) => void;
 }) {
   const { library } = node;
   const menuOpen = openLibraryMenuId === library.id;
   const label = library.name || library.sourcePath;
+  const rowClassName = [
+    "library-tree-row",
+    library.id === dropTargetId ? "is-drag-over" : "",
+    library.id === assetDropTargetLibraryId ? "is-asset-drag-over" : "",
+    library.id === draggingLibraryId ? "is-dragging" : "",
+  ]
+    .filter(Boolean)
+    .join(" ");
   return (
     <>
       <div
-        className="library-tree-row"
+        className={rowClassName}
         style={{ paddingLeft: `${8 + depth * 14}px` }}
+        data-library-drop-id={library.id}
+        onPointerDown={(event) => onPointerDown(library.id, event)}
         onContextMenu={(event) => {
           event.preventDefault();
           onOpenMenu(library.id);
@@ -421,6 +656,16 @@ function LibraryTreeNode({
             </button>
             <button
               type="button"
+              disabled={library.parentLibraryId === null}
+              onClick={() => {
+                onOpenMenu(null);
+                onChangeLibraryParent(library, null);
+              }}
+            >
+              移出当前父图库
+            </button>
+            <button
+              type="button"
               className="danger-action"
               onClick={() => {
                 onOpenMenu(null);
@@ -437,6 +682,9 @@ function LibraryTreeNode({
             <LibraryTreeNode
               key={child.library.id}
               node={child}
+              draggingLibraryId={draggingLibraryId}
+              dropTargetId={dropTargetId}
+              assetDropTargetLibraryId={assetDropTargetLibraryId}
               depth={depth + 1}
               expanded={!collapsedLibraryIds.has(child.library.id)}
               collapsedLibraryIds={collapsedLibraryIds}
@@ -449,6 +697,8 @@ function LibraryTreeNode({
               onOpenLibrary={onOpenLibrary}
               onShowLibraryInfo={onShowLibraryInfo}
               onRemoveLibrary={onRemoveLibrary}
+              onChangeLibraryParent={onChangeLibraryParent}
+              onPointerDown={onPointerDown}
             />
           ))
         : null}

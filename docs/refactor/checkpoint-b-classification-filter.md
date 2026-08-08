@@ -1,6 +1,8 @@
 # Checkpoint B — Manual Classification + Effective Filter
 
-状态：NOT_STARTED
+状态：IMPLEMENTED_PENDING_MANUAL
+
+实现说明：B1-B12 的代码、数据库、Effective 查询和自动化测试已完成；当前只等待桌面端 Manual Verification，完成后再将状态更新为 COMPLETED。已应用 migration 0009，未实现 Checkpoint C-F。
 
 本阶段建立封闭的 Derived Classification Registry、Manual Override、Effective Classification Resolver 和基于 Effective 的筛选。完成后必须提交并停止，不能自动进入 Checkpoint C。
 
@@ -46,7 +48,7 @@
 1. Primary Category。
 2. Auxiliary Tags。
 3. Tone。
-4. Dominant Color Category。
+4. Dominant Color Category / Palette（多值分类）。
 5. Saturation Level。
 
 每个 Registry 字段都必须支持：
@@ -57,6 +59,12 @@
     Restore Auto
 
 如果支持筛选，筛选必须使用 Effective。
+
+Dominant Color Category 是多值分类：
+
+- Auto 和 Effective 可以包含多个有序颜色类别；默认筛选语义为匹配任一 Effective 类别。
+- 颜色的 RGB、面积占比、显著性占比和空间连续性属于 Imaging Auto detail，不属于 Derived Classification Registry。
+- Manual Override 替换整个颜色类别列表；Restore Auto 删除该字段的 override。
 
 以下不属于 Registry：
 
@@ -73,42 +81,23 @@
 
 ### Manual Data
 
-- 单值字段使用 nullable override。
+- 单值字段使用 nullable override；Dominant Color Category 使用有序列表 override。
 - Auxiliary Tags 使用 ADD / REMOVE。
 - 重置字段删除对应 override。
 - semantic_labels 中旧的 is_manual 和 is_excluded 不再作为业务判断。
 
 ## 5. Current Implementation
 
-- [src/types.ts](E:/Code/Codex/photo-organizer/src/types.ts)
-  - AssetListItem 同时承载原始 features、toneLabel、saturationLabel、dominantColorCategory 和 semanticLabels。
-  - SemanticLabelResult 仍包含 isManual。
-  - AssetFilter 包含 semanticLabels、toneLabels、colorCategories、numeric filters、folderPrefix 和 semanticState。
-- [src/App.tsx](E:/Code/Codex/photo-organizer/src/App.tsx)
-  - fetchAssets 直接加载完整 AssetListItem。
-  - analyzeOne 调用 reanalyzeAsset。
-  - active filter count 仍按旧字段计算。
-- [src/components/DetailPanel.tsx](E:/Code/Codex/photo-organizer/src/components/DetailPanel.tsx)
-  - 当前主要显示 metadata、EXIF、tone、color、semantic 结果。
-  - 当前没有人工分类编辑器。
-- [src/components/AssetCard.tsx](E:/Code/Codex/photo-organizer/src/components/AssetCard.tsx)
-  - 当前直接展示自动字段，没有 Effective provenance 或 manual marker。
-- [src/components/Sidebar.tsx](E:/Code/Codex/photo-organizer/src/components/Sidebar.tsx)
-  - 当前 tone、color、semantic group 过滤直接写入 AssetFilter。
-  - analysis shortcuts 仍位于旧快捷入口。
-- [src-tauri/src/models.rs](E:/Code/Codex/photo-organizer/src-tauri/src/models.rs)
-  - 没有 ManualClassificationOverride 或 ManualTagOverride 类型。
-  - AssetListItem 仍是宽 DTO。
-- [src-tauri/src/db.rs](E:/Code/Codex/photo-organizer/src-tauri/src/db.rs)
-  - asset_filter_sql 直接过滤 tone_features、color_features 和 semantic_labels。
-  - semantic_labels_for_asset 读取当前模型版本，并读取旧 is_manual。
-  - 尚无统一 Effective resolver。
-- [src-tauri/src/semantic_tasks.rs](E:/Code/Codex/photo-organizer/src-tauri/src/semantic_tasks.rs)
-  - Semantic task 保存自动结果，但没有 Manual Override 层。
-- [src-tauri/src/semantic.rs](E:/Code/Codex/photo-organizer/src-tauri/src/semantic.rs)
-  - select_predictions 目前负责阈值、top score window 和 unknown fallback。
-- [src-tauri/src/imaging.rs](E:/Code/Codex/photo-organizer/src-tauri/src/imaging.rs)
-  - BasicImageFeatures 提供 tone_label、dominant_color_category 和 saturation_label。
+Checkpoint B 已将上述目标落到当前代码：
+
+- [src-tauri/src/classification.rs](E:/Code/Codex/photo-organizer/src-tauri/src/classification.rs) 提供封闭 Registry、Auto/Manual/Effective 类型、Auxiliary Tag ADD/REMOVE 和唯一 Effective Resolver。
+- [src-tauri/migrations/0009_manual_classification_overrides.sql](E:/Code/Codex/photo-organizer/src-tauri/migrations/0009_manual_classification_overrides.sql) 创建单值 override、tag override 和 `classification_revision`。
+- [src-tauri/src/models.rs](E:/Code/Codex/photo-organizer/src-tauri/src/models.rs) 拆分 `AssetGridItem`、`AssetDetail` 与组织用途的完整资产模型；Grid DTO 不暴露源文件路径。
+- [src-tauri/src/db.rs](E:/Code/Codex/photo-organizer/src-tauri/src/db.rs) 在 list/count/group/filter 中解析 Effective；`folderPrefix` 不再进入 `AssetFilter`，但 `relative_path` 仍保留给源文件和 Organization。
+- [src-tauri/src/semantic.rs](E:/Code/Codex/photo-organizer/src-tauri/src/semantic.rs) 保持 UNKNOWN 与 FAILED 分离：低置信度成功返回 UNKNOWN，执行失败清除当前 Auto 结果并返回 FAILED。
+- [src-tauri/src/ipc.rs](E:/Code/Codex/photo-organizer/src-tauri/src/ipc.rs)、[src/api.ts](E:/Code/Codex/photo-organizer/src/api.ts) 提供 Registry、Detail、单字段编辑、tag 编辑、Restore Auto 和批量编辑 API。
+- [src/components/DetailPanel.tsx](E:/Code/Codex/photo-organizer/src/components/DetailPanel.tsx) 显示 Auto/Manual/Effective/provenance 并支持五类 Registry 字段修正；[src/App.tsx](E:/Code/Codex/photo-organizer/src/App.tsx) 提供批量修正入口。
+- [src/components/AssetCard.tsx](E:/Code/Codex/photo-organizer/src/components/AssetCard.tsx)、[src/components/Sidebar.tsx](E:/Code/Codex/photo-organizer/src/components/Sidebar.tsx) 使用 Effective 分类和 analysis status 筛选。
 
 ## 6. Target State
 
@@ -186,7 +175,7 @@ Goal：将当前五个 categorical derived fields 登记为封闭 Registry。
 
 Goal：建立单值和标签人工修正的持久化模型。
 
-- Files to change：[src-tauri/src/db.rs](E:/Code/Codex/photo-organizer/src-tauri/src/db.rs)、[src-tauri/src/models.rs](E:/Code/Codex/photo-organizer/src-tauri/src/models.rs)；未来新增 0007 migration。
+- Files to change：[src-tauri/src/db.rs](E:/Code/Codex/photo-organizer/src-tauri/src/db.rs)、[src-tauri/src/models.rs](E:/Code/Codex/photo-organizer/src-tauri/src/models.rs)；已应用 0009 migration（A 已使用 0007、0008）。
 - DB/schema impact：manual_classification_overrides 以 asset_id 为主键；manual_tag_overrides 使用 asset_id + tag_id 唯一键，并约束 ADD / REMOVE。
 - API impact：增加读写 override 的 IPC 契约，错误时返回字段级错误。
 - React state impact：DetailPanel 可以加载 pending override；失败提交不覆盖当前已确认值。
@@ -327,9 +316,9 @@ Goal：确认自动重分析不会破坏 Manual Override。
 
 ## 8. Migration Strategy
 
-本阶段规划未来 schema，不在当前 Runbook 生成 migration 文件。
+本阶段已应用 schema migration；迁移编号与 Checkpoint A 的 0007、0008 顺延，当前使用 0009。
 
-### Planned 0007 — Manual Overrides
+### Applied 0009 — Manual Overrides
 
 - 迁移前备份 SQLite。
 - 创建 manual_classification_overrides。
@@ -340,6 +329,8 @@ Goal：确认自动重分析不会破坏 Manual Override。
 - 能安全映射的旧人工标签转换为 Manual Override。
 - 不能确定语义的旧数据保留审计信息，不静默猜测。
 - 旧字段在兼容期只读，不再参与业务查询。
+
+本次实现已创建 `manual_classification_overrides`、`manual_tag_overrides`，并在所有手动写入、自动完成、源文件 fingerprint 变化时维护 `classification_revision`。旧 `semantic_labels.is_manual/is_excluded` 不被当作新的 Manual Override 业务状态。
 
 ### Taxonomy compatibility
 
@@ -458,7 +449,7 @@ Goal：确认自动重分析不会破坏 Manual Override。
 - [src-tauri/src/ipc.rs](E:/Code/Codex/photo-organizer/src-tauri/src/ipc.rs)
 - [src-tauri/src/semantic_tasks.rs](E:/Code/Codex/photo-organizer/src-tauri/src/semantic_tasks.rs)
 - 新增 classification registry / effective resolver module。
-- 未来新增 0007 manual override migration；本次不创建。
+- 已新增 0009 manual override migration；Checkpoint B 代码已应用该迁移。
 
 ## 13. Risks
 

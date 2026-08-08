@@ -1,5 +1,7 @@
 use serde::{Deserialize, Serialize};
 
+use crate::classification::EffectiveClassification;
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct LibrarySummary {
@@ -60,6 +62,89 @@ pub struct AssetListItem {
     pub semantic_error: Option<String>,
     pub semantic_analyzed_at: Option<String>,
     pub semantic_labels: Vec<SemanticLabelResult>,
+    pub classification: EffectiveClassification,
+}
+
+/// The grid contract intentionally excludes source paths and EXIF-heavy fields.
+/// Detail views use `AssetDetail`; organization code keeps using `AssetListItem`
+/// because it needs the source snapshot and relative path.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct AssetGridItem {
+    pub id: i64,
+    pub library_id: i64,
+    pub file_name: String,
+    pub extension: String,
+    pub file_size: i64,
+    pub modified_at: i64,
+    pub width: Option<u32>,
+    pub height: Option<u32>,
+    pub orientation: Option<u32>,
+    pub capture_time: Option<String>,
+    pub file_status: String,
+    pub scan_status: String,
+    pub analysis_status: String,
+    pub error_message: Option<String>,
+    pub thumbnail_available: bool,
+    pub brightness: Option<f64>,
+    pub contrast: Option<f64>,
+    pub tone_label: Option<String>,
+    pub saturation: Option<f64>,
+    pub chroma: Option<f64>,
+    pub saturation_label: Option<String>,
+    pub dominant_color: Option<String>,
+    pub dominant_color_category: Option<String>,
+    pub neutral_ratio: Option<f64>,
+    pub dominant_color_coverage: Option<f64>,
+    pub semantic_status: String,
+    pub semantic_error: Option<String>,
+    pub semantic_analyzed_at: Option<String>,
+    pub semantic_labels: Vec<SemanticLabelResult>,
+    pub classification: EffectiveClassification,
+}
+
+impl From<&AssetListItem> for AssetGridItem {
+    fn from(asset: &AssetListItem) -> Self {
+        Self {
+            id: asset.id,
+            library_id: asset.library_id,
+            file_name: asset.file_name.clone(),
+            extension: asset.extension.clone(),
+            file_size: asset.file_size,
+            modified_at: asset.modified_at,
+            width: asset.width,
+            height: asset.height,
+            orientation: asset.orientation,
+            capture_time: asset.capture_time.clone(),
+            file_status: asset.file_status.clone(),
+            scan_status: asset.scan_status.clone(),
+            analysis_status: asset.analysis_status.clone(),
+            error_message: asset.error_message.clone(),
+            thumbnail_available: asset.thumbnail_available,
+            brightness: asset.brightness,
+            contrast: asset.contrast,
+            tone_label: asset.tone_label.clone(),
+            saturation: asset.saturation,
+            chroma: asset.chroma,
+            saturation_label: asset.saturation_label.clone(),
+            dominant_color: asset.dominant_color.clone(),
+            dominant_color_category: asset.dominant_color_category.clone(),
+            neutral_ratio: asset.neutral_ratio,
+            dominant_color_coverage: asset.dominant_color_coverage,
+            semantic_status: asset.semantic_status.clone(),
+            semantic_error: asset.semantic_error.clone(),
+            semantic_analyzed_at: asset.semantic_analyzed_at.clone(),
+            semantic_labels: asset.semantic_labels.clone(),
+            classification: asset.classification.clone(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct AssetDetail {
+    #[serde(flatten)]
+    pub asset: AssetListItem,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -80,7 +165,7 @@ pub struct SemanticLabelResult {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct AssetPage {
-    pub items: Vec<AssetListItem>,
+    pub items: Vec<AssetGridItem>,
     pub total: i64,
     pub page: u32,
     pub page_size: u32,
@@ -100,13 +185,17 @@ pub struct AssetFilter {
     #[serde(default)]
     pub search: Option<String>,
     #[serde(default)]
-    pub semantic_labels: Vec<String>,
+    pub primary_categories: Vec<String>,
+    #[serde(default)]
+    pub auxiliary_tags: Vec<String>,
     #[serde(default)]
     pub semantic_match: SemanticMatchMode,
     #[serde(default)]
     pub tone_labels: Vec<String>,
     #[serde(default)]
     pub color_categories: Vec<String>,
+    #[serde(default)]
+    pub saturation_levels: Vec<String>,
     #[serde(default)]
     pub brightness_min: Option<f64>,
     #[serde(default)]
@@ -120,9 +209,7 @@ pub struct AssetFilter {
     #[serde(default)]
     pub captured_to: Option<String>,
     #[serde(default)]
-    pub folder_prefix: Option<String>,
-    #[serde(default)]
-    pub semantic_state: Option<String>,
+    pub analysis_status: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -250,6 +337,25 @@ pub struct SemanticProgress {
     pub error: Option<String>,
 }
 
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ScanPerformance {
+    pub discovery_us: u64,
+    pub ownership_lookup_us: u64,
+    pub metadata_lookup_us: u64,
+    pub fingerprint_us: u64,
+    pub image_processing_us: u64,
+    pub exif_us: u64,
+    pub decode_us: u64,
+    pub resize_us: u64,
+    pub feature_analysis_us: u64,
+    pub thumbnail_write_us: u64,
+    pub database_write_us: u64,
+    pub processed_files: u64,
+    pub skipped_files: u64,
+    pub failed_files: u64,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct ScanProgress {
@@ -265,6 +371,7 @@ pub struct ScanProgress {
     pub missing: u64,
     pub current_path: Option<String>,
     pub error: Option<String>,
+    pub performance: ScanPerformance,
 }
 
 impl ScanProgress {
@@ -282,6 +389,7 @@ impl ScanProgress {
             missing: 0,
             current_path: None,
             error: None,
+            performance: ScanPerformance::default(),
         }
     }
 }
@@ -298,6 +406,7 @@ pub struct ScanSummary {
     pub failed: u64,
     pub skipped: u64,
     pub missing: u64,
+    pub performance: ScanPerformance,
 }
 
 #[derive(Debug, Clone)]
@@ -371,6 +480,16 @@ pub struct ProcessedImage {
     pub exif: ExifMetadata,
     pub thumbnail_path: String,
     pub features: BasicImageFeatures,
+    pub timings: ImageProcessingTimings,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct ImageProcessingTimings {
+    pub exif_us: u64,
+    pub decode_us: u64,
+    pub resize_us: u64,
+    pub feature_analysis_us: u64,
+    pub thumbnail_write_us: u64,
 }
 
 /// The source set used to generate a read-only organization preview.

@@ -6,18 +6,23 @@ use chrono::{SecondsFormat, Utc};
 use rusqlite::types::Value;
 use rusqlite::{Connection, OptionalExtension, Transaction, params, params_from_iter};
 
+use crate::classification::{
+    AutoClassification, EffectiveClassification, FIELD_AUXILIARY_TAGS,
+    FIELD_DOMINANT_COLOR_CATEGORY, FIELD_PRIMARY_CATEGORY, FIELD_SATURATION_LEVEL, FIELD_TONE,
+    ManualClassification, normalize_override_value, normalize_tag_id, resolve_classification,
+};
 use crate::error::{AppError, AppResult};
 use crate::models::{
-    AssetFilter, AssetListItem, AssetPage, AssetSortField, ExistingAssetSnapshot, FileSnapshot,
-    FolderSummary, LibrarySummary, OrganizationIssue, OrganizationIssueSeverity, OrganizationPlan,
-    OrganizationPlanRecord, ProcessedImage, SemanticGroupSummary, SemanticLabelResult,
-    SemanticMatchMode, SemanticProgress, SortDirection,
+    AssetDetail, AssetFilter, AssetGridItem, AssetListItem, AssetPage, AssetSortField,
+    ExistingAssetSnapshot, FileSnapshot, FolderSummary, LibrarySummary, OrganizationIssue,
+    OrganizationIssueSeverity, OrganizationPlan, OrganizationPlanRecord, ProcessedImage,
+    SemanticGroupSummary, SemanticLabelResult, SemanticMatchMode, SemanticProgress, SortDirection,
 };
 use crate::semantic::{
     ANALYSIS_VERSION as SEMANTIC_ANALYSIS_VERSION, MODEL_NAME, MODEL_VERSION,
     SemanticAnalysisOutput,
 };
-use crate::source_identity::{identity_key, is_same_or_descendant};
+use crate::source_identity::{SourceIdentity, identity_key, is_same_or_descendant};
 
 const INITIAL_MIGRATION: &str = include_str!("../migrations/0001_initial.sql");
 const SEMANTIC_MIGRATION: &str = include_str!("../migrations/0002_semantic_workspace.sql");
@@ -26,6 +31,12 @@ const LIBRARY_UX_MIGRATION: &str = include_str!("../migrations/0004_library_ux_r
 const LIBRARY_SOURCE_MIGRATION: &str =
     include_str!("../migrations/0005_library_source_hierarchy.sql");
 const ASSET_IDENTITY_MIGRATION: &str = include_str!("../migrations/0006_asset_global_identity.sql");
+const MANUAL_LIBRARY_HIERARCHY_MIGRATION: &str =
+    include_str!("../migrations/0007_manual_library_hierarchy.sql");
+const ASSET_LIBRARY_ASSIGNMENT_MIGRATION: &str =
+    include_str!("../migrations/0008_asset_library_assignments.sql");
+const MANUAL_CLASSIFICATION_MIGRATION: &str =
+    include_str!("../migrations/0009_manual_classification_overrides.sql");
 
 #[derive(Debug, Clone)]
 pub struct Repository {
@@ -50,6 +61,13 @@ pub struct LibrarySourceRoot {
 pub struct LibraryRemovalResult {
     pub removed: bool,
     pub removed_cache_entries: Vec<(i64, String, Option<PathBuf>)>,
+}
+
+struct FullAssetPage {
+    items: Vec<AssetListItem>,
+    total: i64,
+    page: u32,
+    page_size: u32,
 }
 
 impl Repository {
@@ -86,6 +104,9 @@ impl Repository {
             (4_i64, LIBRARY_UX_MIGRATION),
             (5_i64, LIBRARY_SOURCE_MIGRATION),
             (6_i64, ASSET_IDENTITY_MIGRATION),
+            (7_i64, MANUAL_LIBRARY_HIERARCHY_MIGRATION),
+            (8_i64, ASSET_LIBRARY_ASSIGNMENT_MIGRATION),
+            (9_i64, MANUAL_CLASSIFICATION_MIGRATION),
         ] {
             if current < version {
                 let transaction = connection.transaction()?;
@@ -328,6 +349,192 @@ impl Repository {
         Ok((library_id, generation))
     }
 
+    /// Register a set of explicitly imported source roots without starting a scan.
+    ///
+    /// The source roots are independent Library records. Their initial parent
+    /// relationship is derived from the source paths only for records that do
+    /// not already have a manual relationship. Existing manual relationships
+    /// are deliberately preserved.
+    pub fn ensure_library_source_roots(
+        &self,
+        roots: &[SourceIdentity],
+    ) -> AppResult<Vec<LibrarySourceRoot>> {
+        if roots.is_empty() {
+            return Err(AppError::InvalidArgument(
+                "at least one source root is required".into(),
+            ));
+        }
+
+        let mut connection = self.open()?;
+        let transaction = connection.transaction()?;
+        for root in roots {
+            let source_path = root.source_path.to_string_lossy().into_owned();
+            let name = library_name(&root.source_path, &source_path);
+            transaction.execute(
+                "INSERT OR IGNORE INTO libraries(
+                    root_path, name, source_path, source_identity_key, created_at, status
+                 ) VALUES(?1, ?2, ?1, ?3, ?4, 'ready')",
+                params![source_path, name, root.identity_key, now()],
+            )?;
+            transaction.execute(
+                "UPDATE libraries
+                 SET root_path=?2, source_path=?2, name=?3
+                 WHERE source_identity_key=?1",
+                params![root.identity_key, source_path, name],
+            )?;
+        }
+        rebuild_library_hierarchy(&transaction)?;
+
+        let mut registered = Vec::with_capacity(roots.len());
+        for root in roots {
+            let source_root = transaction.query_row(
+                "SELECT id, source_path, source_identity_key
+                 FROM libraries WHERE source_identity_key=?1",
+                [&root.identity_key],
+                |row| {
+                    Ok(LibrarySourceRoot {
+                        library_id: row.get(0)?,
+                        source_path: PathBuf::from(row.get::<_, String>(1)?),
+                        identity_key: row.get(2)?,
+                    })
+                },
+            )?;
+            registered.push(source_root);
+        }
+        transaction.commit()?;
+        Ok(registered)
+    }
+
+    pub fn begin_existing_library_scan(&self, library_id: i64) -> AppResult<i64> {
+        let connection = self.open()?;
+        let changed = connection.execute(
+            "UPDATE libraries
+             SET status='scanning', last_error=NULL, scan_generation=scan_generation + 1
+             WHERE id=?1",
+            [library_id],
+        )?;
+        if changed == 0 {
+            return Err(AppError::NotFound(format!("library {library_id}")));
+        }
+        connection
+            .query_row(
+                "SELECT scan_generation FROM libraries WHERE id=?1",
+                [library_id],
+                |row| row.get(0),
+            )
+            .map_err(AppError::from)
+    }
+
+    pub fn set_library_parent(
+        &self,
+        library_id: i64,
+        parent_library_id: Option<i64>,
+    ) -> AppResult<bool> {
+        let mut connection = self.open()?;
+        let transaction = connection.transaction()?;
+        let child_exists: bool = transaction.query_row(
+            "SELECT EXISTS(SELECT 1 FROM libraries WHERE id=?1)",
+            [library_id],
+            |row| row.get(0),
+        )?;
+        if !child_exists {
+            transaction.commit()?;
+            return Ok(false);
+        }
+
+        if let Some(parent_id) = parent_library_id {
+            if parent_id == library_id {
+                return Err(AppError::InvalidArgument(
+                    "a library cannot be its own parent".into(),
+                ));
+            }
+            let parent_exists: bool = transaction.query_row(
+                "SELECT EXISTS(SELECT 1 FROM libraries WHERE id=?1)",
+                [parent_id],
+                |row| row.get(0),
+            )?;
+            if !parent_exists {
+                return Err(AppError::NotFound(format!("parent library {parent_id}")));
+            }
+            let parent_is_descendant: bool = transaction.query_row(
+                "WITH RECURSIVE descendants(id) AS (
+                     SELECT id FROM libraries WHERE parent_library_id=?1
+                     UNION
+                     SELECT child.id
+                     FROM libraries child
+                     JOIN descendants parent ON child.parent_library_id=parent.id
+                 )
+                 SELECT EXISTS(SELECT 1 FROM descendants WHERE id=?2)",
+                params![library_id, parent_id],
+                |row| row.get(0),
+            )?;
+            if parent_is_descendant {
+                return Err(AppError::InvalidArgument(
+                    "a library cannot be moved below one of its descendants".into(),
+                ));
+            }
+        }
+
+        transaction.execute(
+            "UPDATE libraries
+             SET parent_library_id=?2, parent_relation='manual'
+             WHERE id=?1",
+            params![library_id, parent_library_id],
+        )?;
+        transaction.commit()?;
+        Ok(true)
+    }
+
+    /// Assign an asset to a Library for browsing without changing its actual
+    /// SourceRoot owner or any source-relative path data. Assigning it back to
+    /// that owner removes the manual override and restores automatic browsing.
+    pub fn assign_asset_to_library(
+        &self,
+        asset_id: i64,
+        target_library_id: i64,
+    ) -> AppResult<bool> {
+        let mut connection = self.open()?;
+        let transaction = connection.transaction()?;
+        let Some(owner_library_id) = transaction
+            .query_row(
+                "SELECT library_id FROM assets WHERE id=?1",
+                [asset_id],
+                |row| row.get::<_, i64>(0),
+            )
+            .optional()?
+        else {
+            transaction.commit()?;
+            return Ok(false);
+        };
+        let target_exists: bool = transaction.query_row(
+            "SELECT EXISTS(SELECT 1 FROM libraries WHERE id=?1)",
+            [target_library_id],
+            |row| row.get(0),
+        )?;
+        if !target_exists {
+            transaction.commit()?;
+            return Ok(false);
+        }
+
+        if owner_library_id == target_library_id {
+            transaction.execute(
+                "DELETE FROM asset_library_assignments WHERE asset_id=?1",
+                [asset_id],
+            )?;
+        } else {
+            transaction.execute(
+                "INSERT INTO asset_library_assignments(asset_id, library_id, assigned_at)
+                 VALUES(?1, ?2, ?3)
+                 ON CONFLICT(asset_id) DO UPDATE SET
+                    library_id=excluded.library_id,
+                    assigned_at=excluded.assigned_at",
+                params![asset_id, target_library_id, now()],
+            )?;
+        }
+        transaction.commit()?;
+        Ok(true)
+    }
+
     pub fn update_job_progress(&self, task_id: &str, processed: u64, total: u64) -> AppResult<()> {
         let connection = self.open()?;
         connection.execute(
@@ -411,6 +618,24 @@ impl Repository {
         rows.collect::<Result<Vec<_>, _>>().map_err(AppError::from)
     }
 
+    /// Return every explicitly imported SourceRoot physically nested below a
+    /// library's source path. This is intentionally independent of the
+    /// PhotoOrganizer parent relation: ownership pruning must remain safe even
+    /// after a user manually moves a Library to another branch.
+    pub fn nested_source_roots(&self, library_id: i64) -> AppResult<Vec<LibrarySourceRoot>> {
+        let Some(parent) = self.library_source_root(library_id)? else {
+            return Ok(Vec::new());
+        };
+        Ok(self
+            .library_source_roots()?
+            .into_iter()
+            .filter(|root| {
+                root.library_id != library_id
+                    && is_same_or_descendant(&parent.identity_key, &root.identity_key)
+            })
+            .collect())
+    }
+
     pub fn complete_scan(&self, task_id: &str, library_id: i64, generation: i64) -> AppResult<u64> {
         let mut connection = self.open()?;
         let transaction = connection.transaction()?;
@@ -438,6 +663,25 @@ impl Repository {
         Ok(missing)
     }
 
+    pub fn complete_library_scope(&self, library_id: i64, generation: i64) -> AppResult<u64> {
+        let mut connection = self.open()?;
+        let transaction = connection.transaction()?;
+        let missing = transaction.execute(
+            "UPDATE assets
+             SET file_status = 'missing', scan_status = 'missing'
+             WHERE library_id = ?1 AND last_seen_scan <> ?2 AND file_status <> 'missing'",
+            params![library_id, generation],
+        )? as u64;
+        transaction.execute(
+            "UPDATE libraries
+             SET status='ready', last_scan_at=?2, last_error=NULL
+             WHERE id=?1",
+            params![library_id, now()],
+        )?;
+        transaction.commit()?;
+        Ok(missing)
+    }
+
     pub fn cancel_scan(&self, task_id: &str, library_id: i64) -> AppResult<()> {
         let mut connection = self.open()?;
         let transaction = connection.transaction()?;
@@ -451,6 +695,15 @@ impl Repository {
             params![task_id, timestamp],
         )?;
         transaction.commit()?;
+        Ok(())
+    }
+
+    pub fn cancel_library_scope(&self, library_id: i64) -> AppResult<()> {
+        let connection = self.open()?;
+        connection.execute(
+            "UPDATE libraries SET status='ready' WHERE id=?1",
+            [library_id],
+        )?;
         Ok(())
     }
 
@@ -583,6 +836,11 @@ impl Repository {
                 semantic_analyzed_at = CASE
                     WHEN assets.fingerprint <> excluded.fingerprint THEN NULL
                     ELSE assets.semantic_analyzed_at
+                END,
+                classification_revision = CASE
+                    WHEN assets.fingerprint <> excluded.fingerprint
+                    THEN assets.classification_revision + 1
+                    ELSE assets.classification_revision
                 END,
                 last_seen_at = excluded.last_seen_at,
                 last_seen_scan = excluded.last_seen_scan",
@@ -817,7 +1075,13 @@ impl Repository {
                                       THEN 1 ELSE 0 END), 0)
              FROM libraries l
              LEFT JOIN library_scope scope ON scope.root_id = l.id
-             LEFT JOIN assets a ON a.library_id = scope.library_id
+             LEFT JOIN assets a
+               ON COALESCE(
+                    (SELECT assignment.library_id
+                     FROM asset_library_assignments assignment
+                     WHERE assignment.asset_id=a.id),
+                    a.library_id
+                  ) = scope.library_id
              GROUP BY l.id
              ORDER BY l.display_order ASC,
                       COALESCE(l.last_scan_at, l.created_at) DESC, l.id DESC",
@@ -1001,6 +1265,24 @@ impl Repository {
         page_size: u32,
         filter: &AssetFilter,
     ) -> AppResult<AssetPage> {
+        let full = self.list_assets_full(library_id, sort, direction, page, page_size, filter)?;
+        Ok(AssetPage {
+            items: full.items.iter().map(AssetGridItem::from).collect(),
+            total: full.total,
+            page: full.page,
+            page_size: full.page_size,
+        })
+    }
+
+    fn list_assets_full(
+        &self,
+        library_id: i64,
+        sort: AssetSortField,
+        direction: SortDirection,
+        page: u32,
+        page_size: u32,
+        filter: &AssetFilter,
+    ) -> AppResult<FullAssetPage> {
         let connection = self.open()?;
         let page_size = page_size.clamp(1, 500);
         let offset = i64::from(page.saturating_sub(1)) * i64::from(page_size);
@@ -1085,13 +1367,16 @@ impl Repository {
                 semantic_error: row.get(35)?,
                 semantic_analyzed_at: row.get(36)?,
                 semantic_labels: Vec::new(),
+                classification: EffectiveClassification::default(),
             })
         })?;
         let mut items = rows.collect::<Result<Vec<_>, _>>()?;
         for item in &mut items {
             item.semantic_labels = semantic_labels_for_asset(&connection, item.id)?;
+            item.classification = effective_classification_for_asset(&connection, item)?;
+            apply_effective_fields(item);
         }
-        Ok(AssetPage {
+        Ok(FullAssetPage {
             items,
             total,
             page: page.max(1),
@@ -1113,7 +1398,7 @@ impl Repository {
         let mut page = 1;
         let mut items = Vec::new();
         loop {
-            let result = self.list_assets(
+            let result = self.list_assets_full(
                 library_id,
                 AssetSortField::FileName,
                 SortDirection::Asc,
@@ -1289,8 +1574,21 @@ impl Repository {
     pub fn list_library_folders(&self, library_id: i64) -> AppResult<Vec<FolderSummary>> {
         let connection = self.open()?;
         let mut statement = connection.prepare(
-            "SELECT relative_path FROM assets
-             WHERE library_id=?1 AND file_status='present'
+            "WITH RECURSIVE library_scope(library_id) AS (
+                 SELECT id FROM libraries WHERE id=?1
+                 UNION
+                 SELECT child.id
+                 FROM libraries child
+                 JOIN library_scope scope ON child.parent_library_id = scope.library_id
+             )
+             SELECT a.relative_path FROM assets a
+             WHERE COALESCE(
+                     (SELECT assignment.library_id
+                      FROM asset_library_assignments assignment
+                      WHERE assignment.asset_id=a.id),
+                     a.library_id
+                   ) IN (SELECT library_id FROM library_scope)
+               AND a.file_status='present'
              ORDER BY relative_path COLLATE NOCASE",
         )?;
         let paths = statement
@@ -1334,32 +1632,55 @@ impl Repository {
                  FROM libraries child
                  JOIN library_scope scope ON child.parent_library_id = scope.library_id
              )
-             SELECT sl.label, sl.display_name, COUNT(*)
-             FROM semantic_labels sl
-             JOIN assets a ON a.id=sl.asset_id
-             WHERE a.library_id IN (SELECT library_id FROM library_scope)
+             SELECT a.id
+             FROM assets a
+             WHERE COALESCE(
+                     (SELECT assignment.library_id
+                      FROM asset_library_assignments assignment
+                      WHERE assignment.asset_id=a.id),
+                     a.library_id
+                   ) IN (SELECT library_id FROM library_scope)
                AND a.file_status='present'
-               AND sl.is_primary=1 AND sl.source_fingerprint=a.fingerprint
-               AND sl.model_name=?2 AND sl.model_version=?3 AND sl.analysis_version=?4
-             GROUP BY sl.label, sl.display_name
-             ORDER BY COUNT(*) DESC, sl.label ASC",
+             ORDER BY a.id ASC",
         )?;
-        let rows = statement.query_map(
-            params![
-                library_id,
-                MODEL_NAME,
-                MODEL_VERSION,
-                SEMANTIC_ANALYSIS_VERSION
-            ],
-            |row| {
-                Ok(SemanticGroupSummary {
-                    label_id: row.get(0)?,
-                    display_name: row.get(1)?,
-                    asset_count: row.get(2)?,
-                })
-            },
-        )?;
-        rows.collect::<Result<Vec<_>, _>>().map_err(AppError::from)
+        let asset_ids = statement
+            .query_map([library_id], |row| row.get::<_, i64>(0))?
+            .collect::<Result<Vec<_>, _>>()?;
+        drop(statement);
+        let mut groups = HashMap::<String, (String, i64)>::new();
+        for asset_id in asset_ids {
+            let mut asset = load_asset_by_id(&connection, asset_id)?;
+            asset.semantic_labels = semantic_labels_for_asset(&connection, asset_id)?;
+            asset.classification = effective_classification_for_asset(&connection, &asset)?;
+            let Some(label_id) = asset.classification.primary_category.effective else {
+                continue;
+            };
+            let display_name = asset
+                .semantic_labels
+                .iter()
+                .find(|label| label.label_id == label_id)
+                .map(|label| label.display_name.clone())
+                .unwrap_or_else(|| label_id.clone());
+            let entry = groups.entry(label_id).or_insert((display_name, 0));
+            entry.1 += 1;
+        }
+        let mut result = groups
+            .into_iter()
+            .map(
+                |(label_id, (display_name, asset_count))| SemanticGroupSummary {
+                    label_id,
+                    display_name,
+                    asset_count,
+                },
+            )
+            .collect::<Vec<_>>();
+        result.sort_by(|left, right| {
+            right
+                .asset_count
+                .cmp(&left.asset_count)
+                .then_with(|| left.label_id.cmp(&right.label_id))
+        });
+        Ok(result)
     }
 
     pub fn register_semantic_model(
@@ -1452,7 +1773,12 @@ impl Repository {
         let mut sql = String::from(
             "SELECT a.id, a.absolute_path, a.fingerprint
              FROM assets a
-             WHERE a.library_id IN (
+             WHERE COALESCE(
+                     (SELECT assignment.library_id
+                      FROM asset_library_assignments assignment
+                      WHERE assignment.asset_id=a.id),
+                     a.library_id
+                   ) IN (
                  WITH RECURSIVE library_scope(library_id) AS (
                      SELECT id FROM libraries WHERE id=?1
                      UNION
@@ -1642,7 +1968,9 @@ impl Repository {
         )?;
         transaction.execute(
             "UPDATE assets SET semantic_status='completed', semantic_error=NULL,
-                               semantic_analyzed_at=?2 WHERE id=?1",
+                               semantic_analyzed_at=?2,
+                               classification_revision=classification_revision+1
+             WHERE id=?1",
             params![candidate.id, timestamp],
         )?;
         transaction.execute(
@@ -1664,7 +1992,19 @@ impl Repository {
             params![job_id, asset_id, error, timestamp],
         )?;
         transaction.execute(
-            "UPDATE assets SET semantic_status='failed', semantic_error=?2 WHERE id=?1",
+            "DELETE FROM semantic_labels
+             WHERE asset_id=?1 AND model_name=?2 AND model_version=?3 AND analysis_version=?4",
+            params![
+                asset_id,
+                MODEL_NAME,
+                MODEL_VERSION,
+                SEMANTIC_ANALYSIS_VERSION
+            ],
+        )?;
+        transaction.execute(
+            "UPDATE assets SET semantic_status='failed', semantic_error=?2,
+                               classification_revision=classification_revision+1
+             WHERE id=?1",
             params![asset_id, error],
         )?;
         transaction.commit()?;
@@ -1801,6 +2141,169 @@ impl Repository {
         Ok(())
     }
 
+    pub fn get_asset_detail(&self, asset_id: i64) -> AppResult<AssetDetail> {
+        let connection = self.open()?;
+        let mut asset = load_asset_by_id(&connection, asset_id)?;
+        asset.semantic_labels = semantic_labels_for_asset(&connection, asset.id)?;
+        asset.classification = effective_classification_for_asset(&connection, &asset)?;
+        apply_effective_fields(&mut asset);
+        Ok(AssetDetail { asset })
+    }
+
+    pub fn update_classification_override(
+        &self,
+        asset_id: i64,
+        field: &str,
+        value: Option<serde_json::Value>,
+    ) -> AppResult<AssetDetail> {
+        if field == FIELD_AUXILIARY_TAGS || !crate::classification::is_registry_field(field) {
+            return Err(AppError::InvalidArgument(format!(
+                "field {field} is not a scalar classification override"
+            )));
+        }
+        let normalized = value
+            .map(|value| normalize_override_value(field, value))
+            .transpose()?;
+        let mut connection = self.open()?;
+        let transaction = connection.transaction()?;
+        ensure_asset_exists(&transaction, asset_id)?;
+        match normalized {
+            Some(value) => {
+                transaction.execute(
+                    "INSERT OR REPLACE INTO manual_classification_overrides(
+                        asset_id, field, value_json, updated_at
+                     ) VALUES(?1, ?2, ?3, ?4)",
+                    params![asset_id, field, serde_json::to_string(&value)?, now()],
+                )?;
+            }
+            None => {
+                transaction.execute(
+                    "DELETE FROM manual_classification_overrides
+                     WHERE asset_id=?1 AND field=?2",
+                    params![asset_id, field],
+                )?;
+            }
+        }
+        bump_classification_revision(&transaction, asset_id)?;
+        transaction.commit()?;
+        self.get_asset_detail(asset_id)
+    }
+
+    pub fn update_tag_override(
+        &self,
+        asset_id: i64,
+        tag_id: &str,
+        state: Option<&str>,
+    ) -> AppResult<AssetDetail> {
+        let tag_id = normalize_tag_id(tag_id)?;
+        if let Some(state) = state
+            && !matches!(state, "add" | "remove")
+        {
+            return Err(AppError::InvalidArgument(
+                "tag override state must be add or remove".to_owned(),
+            ));
+        }
+        let mut connection = self.open()?;
+        let transaction = connection.transaction()?;
+        ensure_asset_exists(&transaction, asset_id)?;
+        match state {
+            Some(state) => {
+                transaction.execute(
+                    "INSERT OR REPLACE INTO manual_tag_overrides(
+                        asset_id, tag_id, state, updated_at
+                     ) VALUES(?1, ?2, ?3, ?4)",
+                    params![asset_id, tag_id, state, now()],
+                )?;
+            }
+            None => {
+                transaction.execute(
+                    "DELETE FROM manual_tag_overrides
+                     WHERE asset_id=?1 AND tag_id=?2",
+                    params![asset_id, tag_id],
+                )?;
+            }
+        }
+        bump_classification_revision(&transaction, asset_id)?;
+        transaction.commit()?;
+        self.get_asset_detail(asset_id)
+    }
+
+    pub fn restore_auto_classification(
+        &self,
+        asset_id: i64,
+        field: Option<&str>,
+    ) -> AppResult<AssetDetail> {
+        if let Some(field) = field
+            && !crate::classification::is_registry_field(field)
+        {
+            return Err(AppError::InvalidArgument(format!(
+                "unknown classification field {field}"
+            )));
+        }
+        let mut connection = self.open()?;
+        let transaction = connection.transaction()?;
+        ensure_asset_exists(&transaction, asset_id)?;
+        let changed = if field == Some(FIELD_AUXILIARY_TAGS) {
+            transaction.execute(
+                "DELETE FROM manual_tag_overrides WHERE asset_id=?1",
+                [asset_id],
+            )?
+        } else if let Some(field) = field {
+            transaction.execute(
+                "DELETE FROM manual_classification_overrides
+                 WHERE asset_id=?1 AND field=?2",
+                params![asset_id, field],
+            )?
+        } else {
+            let mut changed = transaction.execute(
+                "DELETE FROM manual_classification_overrides WHERE asset_id=?1",
+                [asset_id],
+            )?;
+            changed += transaction.execute(
+                "DELETE FROM manual_tag_overrides WHERE asset_id=?1",
+                [asset_id],
+            )?;
+            changed
+        };
+        if changed > 0 {
+            bump_classification_revision(&transaction, asset_id)?;
+        }
+        transaction.commit()?;
+        self.get_asset_detail(asset_id)
+    }
+
+    pub fn batch_update_classification(
+        &self,
+        asset_ids: &[i64],
+        field: &str,
+        value: serde_json::Value,
+    ) -> AppResult<u64> {
+        if asset_ids.is_empty() {
+            return Ok(0);
+        }
+        if field == FIELD_AUXILIARY_TAGS || !crate::classification::is_registry_field(field) {
+            return Err(AppError::InvalidArgument(format!(
+                "field {field} is not supported by batch classification update"
+            )));
+        }
+        let value = normalize_override_value(field, value)?;
+        let value_json = serde_json::to_string(&value)?;
+        let mut connection = self.open()?;
+        let transaction = connection.transaction()?;
+        for asset_id in asset_ids {
+            ensure_asset_exists(&transaction, *asset_id)?;
+            transaction.execute(
+                "INSERT OR REPLACE INTO manual_classification_overrides(
+                    asset_id, field, value_json, updated_at
+                 ) VALUES(?1, ?2, ?3, ?4)",
+                params![asset_id, field, value_json, now()],
+            )?;
+            bump_classification_revision(&transaction, *asset_id)?;
+        }
+        transaction.commit()?;
+        Ok(asset_ids.len() as u64)
+    }
+
     pub fn thumbnail_path(&self, asset_id: i64) -> AppResult<PathBuf> {
         let connection = self.open()?;
         let path: Option<String> = connection
@@ -1826,9 +2329,106 @@ impl Repository {
     }
 }
 
+fn ensure_asset_exists(connection: &Connection, asset_id: i64) -> AppResult<()> {
+    let exists: bool = connection.query_row(
+        "SELECT EXISTS(SELECT 1 FROM assets WHERE id=?1)",
+        [asset_id],
+        |row| row.get(0),
+    )?;
+    if exists {
+        Ok(())
+    } else {
+        Err(AppError::NotFound(format!("asset {asset_id}")))
+    }
+}
+
+fn bump_classification_revision(connection: &Connection, asset_id: i64) -> AppResult<()> {
+    connection.execute(
+        "UPDATE assets SET classification_revision=classification_revision+1 WHERE id=?1",
+        [asset_id],
+    )?;
+    Ok(())
+}
+
+fn load_asset_by_id(connection: &Connection, asset_id: i64) -> AppResult<AssetListItem> {
+    connection
+        .query_row(
+            "SELECT a.id, a.library_id, a.absolute_path, a.relative_path, a.file_name,
+                    a.extension, a.file_size, a.modified_at, a.width, a.height,
+                    a.orientation, a.capture_time, a.camera_make, a.camera_model,
+                    a.lens_model, a.exposure_time, a.aperture, a.iso, a.focal_length,
+                    a.file_status, a.scan_status, a.analysis_status, a.error_message, t.status,
+                    tf.brightness_mean, tf.contrast, tf.tone_label,
+                    cf.saturation_mean, cf.chroma_mean, cf.saturation_label, cf.dominant_color_rgb,
+                    cf.dominant_color_category, cf.neutral_ratio, cf.dominant_color_coverage,
+                    a.semantic_status, a.semantic_error,
+                    a.semantic_analyzed_at
+             FROM assets a
+             LEFT JOIN thumbnails t ON t.asset_id=a.id AND t.spec=?1
+             LEFT JOIN tone_features tf ON tf.asset_id=a.id
+             LEFT JOIN color_features cf ON cf.asset_id=a.id
+             WHERE a.id=?2",
+            params![crate::imaging::THUMBNAIL_SPEC, asset_id],
+            |row| {
+                let width: Option<i64> = row.get(8)?;
+                let height: Option<i64> = row.get(9)?;
+                let orientation: Option<i64> = row.get(10)?;
+                let thumbnail_status: Option<String> = row.get(23)?;
+                Ok(AssetListItem {
+                    id: row.get(0)?,
+                    library_id: row.get(1)?,
+                    absolute_path: row.get(2)?,
+                    relative_path: row.get(3)?,
+                    file_name: row.get(4)?,
+                    extension: row.get(5)?,
+                    file_size: row.get(6)?,
+                    modified_at: row.get(7)?,
+                    width: width.map(|value| value as u32),
+                    height: height.map(|value| value as u32),
+                    orientation: orientation.map(|value| value as u32),
+                    capture_time: row.get(11)?,
+                    camera_make: row.get(12)?,
+                    camera_model: row.get(13)?,
+                    lens_model: row.get(14)?,
+                    exposure_time: row.get(15)?,
+                    aperture: row.get(16)?,
+                    iso: row.get(17)?,
+                    focal_length: row.get(18)?,
+                    file_status: row.get(19)?,
+                    scan_status: row.get(20)?,
+                    analysis_status: row.get(21)?,
+                    error_message: row.get(22)?,
+                    thumbnail_available: thumbnail_status.as_deref() == Some("ready"),
+                    brightness: row.get(24)?,
+                    contrast: row.get(25)?,
+                    tone_label: row.get(26)?,
+                    saturation: row.get(27)?,
+                    chroma: row.get(28)?,
+                    saturation_label: row.get(29)?,
+                    dominant_color: row.get(30)?,
+                    dominant_color_category: row.get(31)?,
+                    neutral_ratio: row.get(32)?,
+                    dominant_color_coverage: row.get(33)?,
+                    semantic_status: row.get(34)?,
+                    semantic_error: row.get(35)?,
+                    semantic_analyzed_at: row.get(36)?,
+                    semantic_labels: Vec::new(),
+                    classification: EffectiveClassification::default(),
+                })
+            },
+        )
+        .optional()?
+        .ok_or_else(|| AppError::NotFound(format!("asset {asset_id}")))
+}
+
 fn asset_filter_sql(library_id: i64, filter: &AssetFilter) -> (String, Vec<Value>) {
     let mut clauses = vec![
-        "a.library_id IN (
+        "COALESCE(
+            (SELECT assignment.library_id
+             FROM asset_library_assignments assignment
+             WHERE assignment.asset_id=a.id),
+            a.library_id
+        ) IN (
             WITH RECURSIVE library_scope(library_id) AS (
                 SELECT id FROM libraries WHERE id=?
                 UNION
@@ -1853,41 +2453,72 @@ fn asset_filter_sql(library_id: i64, filter: &AssetFilter) -> (String, Vec<Value
         values.push(Value::Text(value.clone()));
         values.push(Value::Text(value));
     }
-    if !filter.semantic_labels.is_empty() {
-        let placeholders = placeholders(filter.semantic_labels.len());
-        match filter.semantic_match {
-            SemanticMatchMode::Any => clauses.push(format!(
-                "EXISTS(SELECT 1 FROM semantic_labels sl
-                 WHERE sl.asset_id=a.id AND sl.source_fingerprint=a.fingerprint
-                   AND sl.model_name=? AND sl.model_version=? AND sl.analysis_version=?
-                   AND sl.label IN ({placeholders}))"
-            )),
-            SemanticMatchMode::All => clauses.push(format!(
-                "(SELECT COUNT(DISTINCT sl.label) FROM semantic_labels sl
+    if !filter.primary_categories.is_empty() {
+        let expression = effective_scalar_expression(
+            FIELD_PRIMARY_CATEGORY,
+            &format!(
+                "(SELECT sl.label FROM semantic_labels sl
                   WHERE sl.asset_id=a.id AND sl.source_fingerprint=a.fingerprint
-                    AND sl.model_name=? AND sl.model_version=? AND sl.analysis_version=?
-                    AND sl.label IN ({placeholders})) = ?"
-            )),
-        }
-        values.push(Value::Text(MODEL_NAME.into()));
-        values.push(Value::Text(MODEL_VERSION.into()));
-        values.push(Value::Text(SEMANTIC_ANALYSIS_VERSION.into()));
-        values.extend(filter.semantic_labels.iter().cloned().map(Value::Text));
-        if filter.semantic_match == SemanticMatchMode::All {
-            values.push(Value::Integer(filter.semantic_labels.len() as i64));
+                    AND sl.is_manual=0 AND sl.is_primary=1
+                    AND sl.model_name={model_name} AND sl.model_version={model_version}
+                    AND sl.analysis_version={analysis_version}
+                  ORDER BY sl.similarity DESC, sl.label ASC LIMIT 1)",
+                model_name = sql_literal(MODEL_NAME),
+                model_version = sql_literal(MODEL_VERSION),
+                analysis_version = sql_literal(SEMANTIC_ANALYSIS_VERSION),
+            ),
+        );
+        clauses.push(format!(
+            "{expression} IN ({})",
+            placeholders(filter.primary_categories.len())
+        ));
+        values.extend(filter.primary_categories.iter().cloned().map(Value::Text));
+    }
+    if !filter.auxiliary_tags.is_empty() {
+        let predicates = filter
+            .auxiliary_tags
+            .iter()
+            .map(|_| {
+                format!(
+                    "(EXISTS(SELECT 1 FROM manual_tag_overrides add_tag
+                            WHERE add_tag.asset_id=a.id AND add_tag.tag_id=? AND add_tag.state='add')
+                     OR (EXISTS(SELECT 1 FROM semantic_labels sl
+                                 WHERE sl.asset_id=a.id AND sl.source_fingerprint=a.fingerprint
+                                   AND sl.is_manual=0 AND sl.is_primary=0
+                                   AND sl.model_name={model_name} AND sl.model_version={model_version}
+                                   AND sl.analysis_version={analysis_version} AND sl.label=?)
+                         AND NOT EXISTS(SELECT 1 FROM manual_tag_overrides remove_tag
+                                        WHERE remove_tag.asset_id=a.id AND remove_tag.tag_id=?
+                                          AND remove_tag.state='remove')))" ,
+                    model_name = sql_literal(MODEL_NAME),
+                    model_version = sql_literal(MODEL_VERSION),
+                    analysis_version = sql_literal(SEMANTIC_ANALYSIS_VERSION),
+                )
+            })
+            .collect::<Vec<_>>();
+        let joiner = match filter.semantic_match {
+            SemanticMatchMode::Any => " OR ",
+            SemanticMatchMode::All => " AND ",
+        };
+        clauses.push(format!("({})", predicates.join(joiner)));
+        for tag in &filter.auxiliary_tags {
+            values.push(Value::Text(tag.clone()));
+            values.push(Value::Text(tag.clone()));
+            values.push(Value::Text(tag.clone()));
         }
     }
     add_string_in_filter(
         &mut clauses,
         &mut values,
-        "tf.tone_label",
+        &effective_scalar_expression(FIELD_TONE, "tf.tone_label"),
         &filter.tone_labels,
     );
+    add_palette_filter(&mut clauses, &mut values, &filter.color_categories);
     add_string_in_filter(
         &mut clauses,
         &mut values,
-        "cf.dominant_color_category",
-        &filter.color_categories,
+        &effective_scalar_expression(FIELD_SATURATION_LEVEL, "cf.saturation_label"),
+        &filter.saturation_levels,
     );
     add_number_bound(
         &mut clauses,
@@ -1937,28 +2568,48 @@ fn asset_filter_sql(library_id: i64, filter: &AssetFilter) -> (String, Vec<Value
             value.into()
         }));
     }
-    if let Some(prefix) = filter
-        .folder_prefix
-        .as_deref()
-        .filter(|value| !value.is_empty())
-    {
-        clauses.push(
-            "(a.relative_path=? OR a.relative_path LIKE ? ESCAPE '\\' OR a.relative_path LIKE ? ESCAPE '\\')"
-                .into(),
-        );
-        let escaped = escape_like(prefix);
-        values.push(Value::Text(prefix.into()));
-        values.push(Value::Text(format!("{}\\\\%", escaped)));
-        values.push(Value::Text(format!("{}/%", escaped)));
-    }
-    match filter.semantic_state.as_deref() {
+    match filter.analysis_status.as_deref() {
         Some("not_analyzed") => {
             clauses.push("a.semantic_status IN ('not_analyzed', 'queued', 'running')".into())
         }
         Some("failed") => clauses.push("a.semantic_status='failed'".into()),
+        Some("completed") => clauses.push("a.semantic_status='completed'".into()),
         _ => {}
     }
     (clauses.join(" AND "), values)
+}
+
+fn effective_scalar_expression(field: &str, auto_expression: &str) -> String {
+    format!(
+        "COALESCE((SELECT json_extract(mco.value_json, '$')
+                   FROM manual_classification_overrides mco
+                   WHERE mco.asset_id=a.id AND mco.field={}), {})",
+        sql_literal(field),
+        auto_expression,
+    )
+}
+
+fn add_palette_filter(clauses: &mut Vec<String>, values: &mut Vec<Value>, selected: &[String]) {
+    if selected.is_empty() {
+        return;
+    }
+    let expression = format!(
+        "EXISTS(SELECT 1 FROM json_each(
+            COALESCE(
+                (SELECT mco.value_json FROM manual_classification_overrides mco
+                 WHERE mco.asset_id=a.id AND mco.field='{}'),
+                json_array(cf.dominant_color_category)
+            )
+        ) palette WHERE palette.value IN ({}))",
+        FIELD_DOMINANT_COLOR_CATEGORY,
+        placeholders(selected.len()),
+    );
+    clauses.push(expression);
+    values.extend(selected.iter().cloned().map(Value::Text));
+}
+
+fn sql_literal(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "''"))
 }
 
 fn add_string_in_filter(
@@ -2008,7 +2659,7 @@ fn semantic_labels_for_asset(
                 sl.model_version, sl.analysis_version, sl.generated_at, sl.is_manual, sl.is_primary
          FROM semantic_labels sl
          JOIN assets a ON a.id=sl.asset_id
-         WHERE sl.asset_id=?1 AND sl.source_fingerprint=a.fingerprint
+         WHERE sl.asset_id=?1 AND sl.source_fingerprint=a.fingerprint AND sl.is_manual=0
            AND sl.model_name=?2 AND sl.model_version=?3 AND sl.analysis_version=?4
          ORDER BY sl.is_primary DESC, sl.similarity DESC, sl.label ASC",
     )?;
@@ -2035,6 +2686,108 @@ fn semantic_labels_for_asset(
         },
     )?;
     rows.collect::<Result<Vec<_>, _>>().map_err(AppError::from)
+}
+
+fn effective_classification_for_asset(
+    connection: &Connection,
+    asset: &AssetListItem,
+) -> AppResult<EffectiveClassification> {
+    let revision: i64 = connection.query_row(
+        "SELECT classification_revision FROM assets WHERE id=?1",
+        [asset.id],
+        |row| row.get(0),
+    )?;
+    let mut auto = AutoClassification {
+        primary_category: asset
+            .semantic_labels
+            .iter()
+            .find(|label| label.is_primary)
+            .map(|label| label.label_id.clone()),
+        auxiliary_tags: asset
+            .semantic_labels
+            .iter()
+            .filter(|label| !label.is_primary)
+            .map(|label| label.label_id.clone())
+            .collect(),
+        tone: asset.tone_label.clone(),
+        dominant_color_categories: asset.dominant_color_category.clone().into_iter().collect(),
+        saturation_level: asset.saturation_label.clone(),
+    };
+    if auto.primary_category.is_none() && auto.auxiliary_tags.is_empty() {
+        auto.auxiliary_tags = Vec::new();
+    }
+    let manual = manual_classification_for_asset(connection, asset.id)?;
+    Ok(resolve_classification(revision, auto, manual))
+}
+
+fn manual_classification_for_asset(
+    connection: &Connection,
+    asset_id: i64,
+) -> AppResult<ManualClassification> {
+    let mut manual = ManualClassification::default();
+    let mut statement = connection.prepare(
+        "SELECT field, value_json
+         FROM manual_classification_overrides
+         WHERE asset_id=?1
+         ORDER BY field",
+    )?;
+    let rows = statement.query_map([asset_id], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+    })?;
+    for row in rows {
+        let (field, value_json) = row?;
+        let value: serde_json::Value = serde_json::from_str(&value_json)?;
+        match field.as_str() {
+            FIELD_PRIMARY_CATEGORY => manual.primary_category = value.as_str().map(str::to_owned),
+            FIELD_TONE => manual.tone = value.as_str().map(str::to_owned),
+            FIELD_SATURATION_LEVEL => manual.saturation_level = value.as_str().map(str::to_owned),
+            FIELD_DOMINANT_COLOR_CATEGORY => {
+                manual.dominant_color_categories = Some(
+                    value
+                        .as_array()
+                        .ok_or_else(|| {
+                            AppError::InvalidArgument(
+                                "stored dominant color override is not an array".to_owned(),
+                            )
+                        })?
+                        .iter()
+                        .filter_map(|value| value.as_str().map(str::to_owned))
+                        .collect(),
+                )
+            }
+            _ => {}
+        }
+    }
+
+    let mut statement = connection.prepare(
+        "SELECT tag_id, state
+         FROM manual_tag_overrides
+         WHERE asset_id=?1
+         ORDER BY tag_id",
+    )?;
+    let rows = statement.query_map([asset_id], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+    })?;
+    for row in rows {
+        let (tag_id, state) = row?;
+        match state.as_str() {
+            "add" => manual.auxiliary_tag_additions.push(tag_id),
+            "remove" => manual.auxiliary_tag_removals.push(tag_id),
+            _ => {}
+        }
+    }
+    Ok(manual)
+}
+
+fn apply_effective_fields(asset: &mut AssetListItem) {
+    asset.tone_label = asset.classification.tone.effective.clone();
+    asset.saturation_label = asset.classification.saturation_level.effective.clone();
+    asset.dominant_color_category = asset
+        .classification
+        .dominant_color_categories
+        .effective
+        .as_ref()
+        .and_then(|values| values.first().cloned());
 }
 
 fn semantic_progress_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<SemanticProgress> {
@@ -2275,11 +3028,28 @@ fn rebuild_library_hierarchy(transaction: &Transaction<'_>) -> AppResult<()> {
             .collect::<Result<Vec<_>, _>>()?
     };
 
-    for (library_id, source_identity_key) in &libraries {
+    let source_library_ids = {
+        let mut statement = transaction.prepare(
+            "SELECT id FROM libraries
+             WHERE source_identity_key <> '' AND parent_relation='source'
+             ORDER BY id",
+        )?;
+        statement
+            .query_map([], |row| row.get::<_, i64>(0))?
+            .collect::<Result<Vec<_>, _>>()?
+    };
+
+    for library_id in source_library_ids {
+        let Some((_, source_identity_key)) = libraries
+            .iter()
+            .find(|(candidate_id, _)| *candidate_id == library_id)
+        else {
+            continue;
+        };
         let parent_library_id = libraries
             .iter()
             .filter(|(candidate_id, candidate_key)| {
-                candidate_id != library_id
+                *candidate_id != library_id
                     && is_same_or_descendant(candidate_key, source_identity_key)
             })
             .max_by_key(|(_, candidate_key)| path_depth(candidate_key))
@@ -2302,12 +3072,15 @@ mod tests {
         let repository = Repository::new(temp.path().join("database.sqlite3"));
         repository.initialize().expect("first initialization");
         repository.initialize().expect("second initialization");
-        assert_eq!(repository.migration_version().expect("version"), 6);
+        assert_eq!(repository.migration_version().expect("version"), 9);
         let connection = repository.open().expect("connection");
         for table in [
             "organization_plans",
             "organization_plan_items",
             "organization_plan_issues",
+            "asset_library_assignments",
+            "manual_classification_overrides",
+            "manual_tag_overrides",
         ] {
             let exists: i64 = connection
                 .query_row(
@@ -2318,6 +3091,266 @@ mod tests {
                 .expect("table lookup");
             assert_eq!(exists, 1, "missing table {table}");
         }
+    }
+
+    fn seed_classifiable_asset(repository: &Repository, suffix: &str) -> (i64, i64) {
+        let (library_id, _) = repository
+            .begin_scan(
+                &format!("C:\\fixtures\\classification-{suffix}"),
+                &format!("seed-{suffix}"),
+            )
+            .expect("begin seed scan");
+        let connection = repository.open().expect("open seed database");
+        let timestamp = now();
+        let absolute_path = format!("C:\\fixtures\\classification-{suffix}\\photo.jpg");
+        let fingerprint = format!("fingerprint-{suffix}");
+        connection
+            .execute(
+                "INSERT INTO assets(
+                    library_id, asset_identity_key, absolute_path, relative_path, file_name,
+                    extension, file_size, modified_at, fingerprint, width, height, orientation,
+                    file_status, scan_status, analysis_status, first_seen_at, last_seen_at,
+                    last_seen_scan
+                 ) VALUES(?1, ?2, ?3, 'photo.jpg', 'photo.jpg', 'jpg', 100, 1, ?4,
+                          1000, 800, 1, 'present', 'indexed', 'completed', ?5, ?5, 1)",
+                params![
+                    library_id,
+                    identity_key(Path::new(&absolute_path)),
+                    absolute_path,
+                    fingerprint,
+                    timestamp
+                ],
+            )
+            .expect("insert seed asset");
+        let asset_id: i64 = connection
+            .query_row(
+                "SELECT id FROM assets WHERE asset_identity_key=?1",
+                [identity_key(Path::new(&absolute_path))],
+                |row| row.get(0),
+            )
+            .expect("seed asset id");
+        connection
+            .execute(
+                "INSERT INTO tone_features(
+                    asset_id, brightness_mean, contrast, tone_label, algorithm_version, analyzed_at
+                 ) VALUES(?1, 0.5, 0.4, 'mid_tone', 'test', ?2)",
+                params![asset_id, timestamp],
+            )
+            .expect("seed tone");
+        connection
+            .execute(
+                "INSERT INTO color_features(
+                    asset_id, saturation_mean, chroma_mean, dominant_color_category,
+                    dominant_colors_json, saturation_label, algorithm_version, analyzed_at
+                 ) VALUES(?1, 0.6, 0.5, 'blue', '[\"blue\"]', 'high', 'test', ?2)",
+                params![asset_id, timestamp],
+            )
+            .expect("seed color");
+        connection
+            .execute(
+                "INSERT INTO semantic_labels(
+                    asset_id, label, display_name, similarity, threshold, model_name,
+                    model_version, analysis_version, generated_at, source_fingerprint,
+                    is_primary, is_manual
+                 ) VALUES(?1, 'landscape', 'Landscape', 0.9, 0.2, ?2, ?3, ?4, ?5, ?6, 1, 0)",
+                params![
+                    asset_id,
+                    MODEL_NAME,
+                    MODEL_VERSION,
+                    SEMANTIC_ANALYSIS_VERSION,
+                    timestamp,
+                    fingerprint
+                ],
+            )
+            .expect("seed primary label");
+        connection
+            .execute(
+                "INSERT INTO semantic_labels(
+                    asset_id, label, display_name, similarity, threshold, model_name,
+                    model_version, analysis_version, generated_at, source_fingerprint,
+                    is_primary, is_manual
+                 ) VALUES(?1, 'outdoor', 'Outdoor', 0.8, 0.2, ?2, ?3, ?4, ?5, ?6, 0, 0)",
+                params![
+                    asset_id,
+                    MODEL_NAME,
+                    MODEL_VERSION,
+                    SEMANTIC_ANALYSIS_VERSION,
+                    timestamp,
+                    fingerprint
+                ],
+            )
+            .expect("seed auxiliary label");
+        connection
+            .execute(
+                "UPDATE libraries SET status='ready' WHERE id=?1",
+                [library_id],
+            )
+            .expect("finish seed library");
+        (library_id, asset_id)
+    }
+
+    #[test]
+    fn manual_overrides_resolve_filter_restore_and_survive_auto_failure() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let repository = Repository::new(temp.path().join("database.sqlite3"));
+        repository.initialize().expect("initialize");
+        let (library_id, asset_id) = seed_classifiable_asset(&repository, "one");
+        let (_, second_asset_id) = seed_classifiable_asset(&repository, "two");
+
+        let detail = repository
+            .get_asset_detail(asset_id)
+            .expect("initial detail");
+        assert_eq!(
+            detail.asset.classification.primary_category.auto.as_deref(),
+            Some("landscape")
+        );
+        assert_eq!(
+            detail
+                .asset
+                .classification
+                .primary_category
+                .effective
+                .as_deref(),
+            Some("landscape")
+        );
+        assert_eq!(
+            detail.asset.classification.auxiliary_tags.effective,
+            vec!["outdoor"]
+        );
+
+        let detail = repository
+            .update_classification_override(
+                asset_id,
+                FIELD_PRIMARY_CATEGORY,
+                Some(serde_json::json!("architecture")),
+            )
+            .expect("primary override");
+        assert_eq!(
+            detail
+                .asset
+                .classification
+                .primary_category
+                .manual
+                .as_deref(),
+            Some("architecture")
+        );
+        assert_eq!(
+            detail
+                .asset
+                .classification
+                .primary_category
+                .effective
+                .as_deref(),
+            Some("architecture")
+        );
+
+        let _detail = repository
+            .update_tag_override(asset_id, "favorite", Some("add"))
+            .expect("tag add");
+        let detail = repository
+            .update_tag_override(asset_id, "outdoor", Some("remove"))
+            .expect("tag remove");
+        assert_eq!(
+            detail.asset.classification.auxiliary_tags.effective,
+            vec!["favorite"]
+        );
+
+        let detail = repository
+            .update_classification_override(
+                asset_id,
+                FIELD_DOMINANT_COLOR_CATEGORY,
+                Some(serde_json::json!(["orange", "blue"])),
+            )
+            .expect("palette override");
+        assert_eq!(
+            detail
+                .asset
+                .classification
+                .dominant_color_categories
+                .effective,
+            Some(vec!["orange".to_owned(), "blue".to_owned()])
+        );
+
+        let filtered = repository
+            .list_assets(
+                library_id,
+                AssetSortField::FileName,
+                SortDirection::Asc,
+                1,
+                100,
+                &AssetFilter {
+                    primary_categories: vec!["architecture".into()],
+                    auxiliary_tags: vec!["favorite".into()],
+                    color_categories: vec!["orange".into()],
+                    ..AssetFilter::default()
+                },
+            )
+            .expect("effective filter");
+        assert_eq!(filtered.total, 1);
+        assert_eq!(filtered.items[0].tone_label.as_deref(), Some("mid_tone"));
+        assert_eq!(
+            filtered.items[0].dominant_color_category.as_deref(),
+            Some("orange")
+        );
+
+        let connection = repository.open().expect("open database");
+        connection
+            .execute(
+                "UPDATE assets SET fingerprint='changed', semantic_status='failed' WHERE id=?1",
+                [asset_id],
+            )
+            .expect("fail auto analysis");
+        let failed_detail = repository
+            .get_asset_detail(asset_id)
+            .expect("failed detail");
+        assert_eq!(failed_detail.asset.semantic_status, "failed");
+        assert_eq!(
+            failed_detail
+                .asset
+                .classification
+                .primary_category
+                .effective
+                .as_deref(),
+            Some("architecture")
+        );
+
+        let restored = repository
+            .restore_auto_classification(asset_id, None)
+            .expect("restore all");
+        assert_eq!(
+            restored.asset.classification.primary_category.effective,
+            None
+        );
+        assert!(
+            restored
+                .asset
+                .classification
+                .auxiliary_tags
+                .effective
+                .is_empty()
+        );
+
+        assert_eq!(
+            repository
+                .batch_update_classification(
+                    &[asset_id, second_asset_id],
+                    FIELD_PRIMARY_CATEGORY,
+                    serde_json::json!("product"),
+                )
+                .expect("batch primary override"),
+            2
+        );
+        assert_eq!(
+            repository
+                .get_asset_detail(second_asset_id)
+                .expect("second detail")
+                .asset
+                .classification
+                .primary_category
+                .effective
+                .as_deref(),
+            Some("product")
+        );
     }
 
     #[test]
@@ -2347,6 +3380,178 @@ mod tests {
         let libraries = reopened.list_libraries().expect("libraries");
         assert_eq!(libraries.len(), 1);
         assert_eq!(libraries[0].root_path, "C:\\synthetic 图库");
+    }
+
+    #[test]
+    fn manual_library_parent_is_persistent_and_cycles_are_rejected() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let database = temp.path().join("database.sqlite3");
+        let repository = Repository::new(&database);
+        repository.initialize().expect("initialize");
+
+        let (a, _) = repository
+            .begin_scan("C:\\photos\\A", "manual-a")
+            .expect("library a");
+        repository.cancel_scan("manual-a", a).expect("cancel a");
+        let (b, _) = repository
+            .begin_scan("D:\\exports\\B", "manual-b")
+            .expect("library b");
+        repository.cancel_scan("manual-b", b).expect("cancel b");
+        let (c, _) = repository
+            .begin_scan("E:\\selected\\C", "manual-c")
+            .expect("library c");
+        repository.cancel_scan("manual-c", c).expect("cancel c");
+
+        assert!(
+            repository
+                .set_library_parent(b, Some(a))
+                .expect("b under a")
+        );
+        assert!(
+            repository
+                .set_library_parent(c, Some(b))
+                .expect("c under b")
+        );
+        assert!(matches!(
+            repository.set_library_parent(a, Some(c)),
+            Err(AppError::InvalidArgument(_))
+        ));
+        assert!(matches!(
+            repository.set_library_parent(a, Some(a)),
+            Err(AppError::InvalidArgument(_))
+        ));
+
+        let reopened = Repository::new(database);
+        reopened.initialize().expect("reopen");
+        let libraries = reopened.list_libraries().expect("libraries");
+        assert_eq!(
+            libraries
+                .iter()
+                .find(|library| library.id == b)
+                .and_then(|library| library.parent_library_id),
+            Some(a)
+        );
+        assert_eq!(
+            libraries
+                .iter()
+                .find(|library| library.id == c)
+                .and_then(|library| library.parent_library_id),
+            Some(b)
+        );
+
+        reopened
+            .set_library_parent(c, None)
+            .expect("move c to root");
+        let root_libraries = reopened.list_libraries().expect("root libraries");
+        assert_eq!(
+            root_libraries
+                .iter()
+                .find(|library| library.id == c)
+                .and_then(|library| library.parent_library_id),
+            None
+        );
+    }
+
+    #[test]
+    fn asset_library_assignment_is_virtual_and_survives_restore() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let database = temp.path().join("database.sqlite3");
+        let repository = Repository::new(&database);
+        repository.initialize().expect("initialize");
+
+        let (source_library, source_generation) = repository
+            .begin_scan("C:\\photos\\source", "asset-source-task")
+            .expect("source library");
+        repository
+            .cancel_scan("asset-source-task", source_library)
+            .expect("cancel source");
+        let (target_library, _) = repository
+            .begin_scan("D:\\photos\\target", "asset-target-task")
+            .expect("target library");
+        repository
+            .cancel_scan("asset-target-task", target_library)
+            .expect("cancel target");
+
+        let snapshot = FileSnapshot {
+            absolute_path: "C:\\photos\\source\\photo.jpg".into(),
+            relative_path: "photo.jpg".into(),
+            file_name: "photo.jpg".into(),
+            extension: "jpg".into(),
+            file_size: 42,
+            modified_at: 100,
+        };
+        let asset_id = repository
+            .upsert_failed_asset(
+                source_library,
+                source_generation,
+                &snapshot,
+                "fingerprint-source",
+                "fixture failure",
+            )
+            .expect("asset");
+        let before_source = repository.asset_source(asset_id).expect("source before");
+
+        let source_assets = repository
+            .list_assets(
+                source_library,
+                AssetSortField::FileName,
+                SortDirection::Asc,
+                1,
+                20,
+                &AssetFilter::default(),
+            )
+            .expect("source assets");
+        assert_eq!(source_assets.total, 1);
+
+        assert!(
+            repository
+                .assign_asset_to_library(asset_id, target_library)
+                .expect("assign asset")
+        );
+        let target_assets = repository
+            .list_assets(
+                target_library,
+                AssetSortField::FileName,
+                SortDirection::Asc,
+                1,
+                20,
+                &AssetFilter::default(),
+            )
+            .expect("target assets");
+        assert_eq!(target_assets.total, 1);
+        assert_eq!(target_assets.items[0].library_id, source_library);
+        assert_eq!(
+            repository.asset_source(asset_id).expect("source after"),
+            before_source
+        );
+
+        assert!(
+            repository
+                .assign_asset_to_library(asset_id, source_library)
+                .expect("restore automatic assignment")
+        );
+        let restored_target_assets = repository
+            .list_assets(
+                target_library,
+                AssetSortField::FileName,
+                SortDirection::Asc,
+                1,
+                20,
+                &AssetFilter::default(),
+            )
+            .expect("restored target assets");
+        assert_eq!(restored_target_assets.total, 0);
+        let restored_source_assets = repository
+            .list_assets(
+                source_library,
+                AssetSortField::FileName,
+                SortDirection::Asc,
+                1,
+                20,
+                &AssetFilter::default(),
+            )
+            .expect("restored source assets");
+        assert_eq!(restored_source_assets.total, 1);
     }
 
     #[test]

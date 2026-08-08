@@ -5,15 +5,19 @@ import type { AssetListItem } from "../types";
 import { CheckIcon } from "./Icons";
 import { Thumbnail } from "./Thumbnail";
 
+type SelectionModifiers = {
+  ctrlKey?: boolean;
+  metaKey?: boolean;
+  shiftKey?: boolean;
+};
+
 interface AssetCardProps {
   asset: AssetListItem;
   active: boolean;
   selected: boolean;
-  onSelect: (
-    asset: AssetListItem,
-    modifiers?: { ctrlKey?: boolean; metaKey?: boolean; shiftKey?: boolean },
-  ) => void;
-  onToggleSelection: (asset: AssetListItem) => void;
+  onSelect: (asset: AssetListItem, modifiers?: SelectionModifiers) => void;
+  onToggleSelection: (asset: AssetListItem, modifiers?: SelectionModifiers) => void;
+  onStartDrag?: (asset: AssetListItem, event: React.PointerEvent<HTMLButtonElement>) => void;
   onOpen?: (asset: AssetListItem) => void;
 }
 
@@ -23,6 +27,7 @@ export function AssetCard({
   selected,
   onSelect,
   onToggleSelection,
+  onStartDrag,
   onOpen,
 }: AssetCardProps) {
   const clickTimer = useRef<number | null>(null);
@@ -40,7 +45,11 @@ export function AssetCard({
         className={`asset-check${selected ? " is-selected" : ""}`}
         onClick={(event) => {
           event.stopPropagation();
-          onToggleSelection(asset);
+          onToggleSelection(asset, {
+            ctrlKey: event.ctrlKey,
+            metaKey: event.metaKey,
+            shiftKey: event.shiftKey,
+          });
         }}
         aria-label={selected ? `取消选择 ${asset.fileName}` : `选择 ${asset.fileName}`}
         aria-pressed={selected}
@@ -62,6 +71,7 @@ export function AssetCard({
             clickTimer.current = null;
           }, 180);
         }}
+        onPointerDown={(event) => onStartDrag?.(asset, event)}
         onDoubleClick={(event) => {
           event.preventDefault();
           event.stopPropagation();
@@ -76,7 +86,7 @@ export function AssetCard({
         <div className="asset-image-wrap">
           <Thumbnail asset={asset} />
           {asset.fileStatus === "missing" ? <span className="asset-alert">源文件缺失</span> : null}
-          {asset.analysisStatus === "failed" ? <span className="asset-alert">分析失败</span> : null}
+          {asset.semanticStatus === "failed" ? <span className="asset-alert">分析失败</span> : null}
         </div>
         <div className="asset-card-body">
           <div className="asset-title-row">
@@ -95,15 +105,17 @@ export function AssetCard({
             <span>亮度 {formatPercent(asset.brightness)}</span>
             <span>饱和度 {formatPercent(asset.saturation)}</span>
           </div>
-          {asset.semanticLabels.length > 0 ? (
+          {asset.classification.primaryCategory.effective ||
+          asset.classification.auxiliaryTags.effective.length > 0 ? (
             <div className="asset-labels">
               {[
-                ...asset.semanticLabels.filter((label) => label.isPrimary),
-                ...asset.semanticLabels.filter((label) => !label.isPrimary),
+                asset.classification.primaryCategory.effective,
+                ...asset.classification.auxiliaryTags.effective,
               ]
+                .filter((label): label is string => Boolean(label))
                 .slice(0, 2)
                 .map((label) => (
-                  <span key={label.labelId}>{label.displayName}</span>
+                  <span key={label}>{label}</span>
                 ))}
             </div>
           ) : null}

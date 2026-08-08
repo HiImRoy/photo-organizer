@@ -1,3 +1,4 @@
+import { emptyEffectiveClassification } from "../types";
 import type {
   AssetListItem,
   AssetFilter,
@@ -109,6 +110,10 @@ const palettes = [
 const assets: AssetListItem[] = names.map((fileName, index) => {
   const palette = palettes[index % palettes.length];
   const extension = fileName.split(".").at(-1) ?? "jpg";
+  const labels = semanticLabelsFor(index);
+  const toneLabel = index % 3 === 0 ? "low_key" : index % 3 === 1 ? "balanced" : "high_key";
+  const saturationLabel = index % 3 === 0 ? "low" : index % 3 === 1 ? "medium" : "high";
+  const dominantColorCategory = ["blue", "gray", "cyan", "orange"][index % 4];
   return {
     id: 9200 + index,
     libraryId: library.id,
@@ -138,18 +143,24 @@ const assets: AssetListItem[] = names.map((fileName, index) => {
     thumbnailAvailable: true,
     brightness: 0.28 + ((index * 7) % 58) / 100,
     contrast: 0.31 + ((index * 5) % 43) / 100,
-    toneLabel: index % 3 === 0 ? "low_key" : index % 3 === 1 ? "balanced" : "high_key",
+    toneLabel,
     saturation: 0.22 + ((index * 9) % 54) / 100,
     chroma: 0.18 + ((index * 11) % 58) / 100,
-    saturationLabel: index % 3 === 0 ? "low" : index % 3 === 1 ? "medium" : "high",
+    saturationLabel,
     dominantColor: palette[index % palette.length],
-    dominantColorCategory: ["blue", "gray", "cyan", "orange"][index % 4],
+    dominantColorCategory,
     neutralRatio: 0.18,
     dominantColorCoverage: 0.52,
     semanticStatus: "completed",
     semanticError: null,
     semanticAnalyzedAt: "2026-08-07T03:12:00Z",
-    semanticLabels: semanticLabelsFor(index),
+    semanticLabels: labels,
+    classification: fixtureClassification(
+      labels,
+      toneLabel,
+      dominantColorCategory,
+      saturationLabel,
+    ),
   };
 });
 
@@ -280,14 +291,58 @@ function semanticLabelsFor(index: number) {
     }));
 }
 
+function fixtureClassification(
+  labels: ReturnType<typeof semanticLabelsFor>,
+  tone: string,
+  color: string,
+  saturation: string,
+) {
+  const result = emptyEffectiveClassification();
+  const primary = labels.find((label) => label.isPrimary)?.labelId ?? null;
+  const auxiliary = labels.filter((label) => !label.isPrimary).map((label) => label.labelId);
+  result.primaryCategory = {
+    auto: primary,
+    manual: null,
+    effective: primary,
+    source: primary ? "auto" : "none",
+  };
+  result.auxiliaryTags = {
+    auto: auxiliary,
+    manualAdditions: [],
+    manualRemovals: [],
+    effective: auxiliary,
+    source: auxiliary.length ? "auto" : "none",
+  };
+  result.tone = { auto: tone, manual: null, effective: tone, source: "auto" };
+  result.dominantColorCategories = {
+    auto: [color],
+    manual: null,
+    effective: [color],
+    source: "auto",
+  };
+  result.saturationLevel = {
+    auto: saturation,
+    manual: null,
+    effective: saturation,
+    source: "auto",
+  };
+  return result;
+}
+
 function matchesFilter(asset: AssetListItem, filter: AssetFilter) {
   if (filter.search) {
     const search = filter.search.toLocaleLowerCase();
     if (!asset.fileName.toLocaleLowerCase().includes(search)) return false;
   }
-  if (filter.semanticLabels.length > 0) {
-    const actual = new Set(asset.semanticLabels.map((label) => label.labelId));
-    const matches = filter.semanticLabels.map((label) => actual.has(label));
+  if (filter.analysisStatus && asset.semanticStatus !== filter.analysisStatus) return false;
+  if (filter.primaryCategories.length > 0) {
+    if (!filter.primaryCategories.includes(asset.classification.primaryCategory.effective ?? "")) {
+      return false;
+    }
+  }
+  if (filter.auxiliaryTags.length > 0) {
+    const actual = new Set(asset.classification.auxiliaryTags.effective);
+    const matches = filter.auxiliaryTags.map((label) => actual.has(label));
     if (filter.semanticMatch === "all" ? !matches.every(Boolean) : !matches.some(Boolean)) {
       return false;
     }
@@ -297,7 +352,15 @@ function matchesFilter(asset: AssetListItem, filter: AssetFilter) {
   }
   if (
     filter.colorCategories.length > 0 &&
-    !filter.colorCategories.includes(asset.dominantColorCategory ?? "")
+    !(asset.classification.dominantColorCategories.effective ?? []).some((value) =>
+      filter.colorCategories.includes(value),
+    )
+  ) {
+    return false;
+  }
+  if (
+    filter.saturationLevels.length > 0 &&
+    !filter.saturationLevels.includes(asset.classification.saturationLevel.effective ?? "")
   ) {
     return false;
   }

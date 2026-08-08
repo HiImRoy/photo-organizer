@@ -8,17 +8,20 @@ use image::imageops::FilterType;
 use parking_lot::RwLock;
 use tauri::{Emitter, State};
 
-use crate::db::Repository;
+use crate::classification::registry_descriptors;
+use crate::db::{LibrarySourceRoot, Repository};
 use crate::error::{AppError, AppResult};
 use crate::models::{
-    AssetFilter, AssetPage, AssetSortField, CancelScanResponse, FolderSummary, LibrarySummary,
-    OrganizationIssue, OrganizationPlan, OrganizationPlanRecord, OrganizationPlanRequest,
-    ScanProgress, SemanticGroupSummary, SemanticProgress, SemanticTaskResponse, SortDirection,
-    StartScanResponse, StartSemanticResponse,
+    AssetDetail, AssetFilter, AssetPage, AssetSortField, CancelScanResponse, FolderSummary,
+    LibrarySummary, OrganizationIssue, OrganizationPlan, OrganizationPlanRecord,
+    OrganizationPlanRequest, ScanProgress, SemanticGroupSummary, SemanticProgress,
+    SemanticTaskResponse, SortDirection, StartScanResponse, StartSemanticResponse,
 };
 use crate::organization;
 use crate::paths::AppPaths;
-use crate::scanner::{scan_library, validate_scan_root_with_app_data};
+use crate::scanner::{
+    discover_import_source_roots, scan_library, scan_library_tree, validate_scan_root_with_app_data,
+};
 use crate::semantic::{
     SemanticClassifier, SemanticLabelDescriptor, SemanticRuntimeStatus, TinyClipClassifier,
     semantic_catalog,
@@ -87,8 +90,97 @@ pub fn list_assets(
 }
 
 #[tauri::command]
+pub fn get_classification_registry() -> Vec<crate::classification::ClassificationFieldDescriptor> {
+    registry_descriptors()
+}
+
+#[tauri::command]
+pub fn get_asset_detail(asset_id: i64, state: State<'_, AppState>) -> Result<AssetDetail, String> {
+    state
+        .repository
+        .get_asset_detail(asset_id)
+        .map_err(ipc_error)
+}
+
+#[tauri::command]
+pub fn update_classification_override(
+    asset_id: i64,
+    field: String,
+    value: Option<serde_json::Value>,
+    state: State<'_, AppState>,
+) -> Result<AssetDetail, String> {
+    state
+        .repository
+        .update_classification_override(asset_id, &field, value)
+        .map_err(ipc_error)
+}
+
+#[tauri::command]
+pub fn update_tag_override(
+    asset_id: i64,
+    tag_id: String,
+    state: Option<String>,
+    app_state: State<'_, AppState>,
+) -> Result<AssetDetail, String> {
+    app_state
+        .repository
+        .update_tag_override(asset_id, &tag_id, state.as_deref())
+        .map_err(ipc_error)
+}
+
+#[tauri::command]
+pub fn restore_auto_classification(
+    asset_id: i64,
+    field: Option<String>,
+    state: State<'_, AppState>,
+) -> Result<AssetDetail, String> {
+    state
+        .repository
+        .restore_auto_classification(asset_id, field.as_deref())
+        .map_err(ipc_error)
+}
+
+#[tauri::command]
+pub fn batch_update_classification(
+    asset_ids: Vec<i64>,
+    field: String,
+    value: serde_json::Value,
+    state: State<'_, AppState>,
+) -> Result<u64, String> {
+    state
+        .repository
+        .batch_update_classification(&asset_ids, &field, value)
+        .map_err(ipc_error)
+}
+
+#[tauri::command]
+pub fn set_library_parent(
+    library_id: i64,
+    parent_library_id: Option<i64>,
+    state: State<'_, AppState>,
+) -> Result<bool, String> {
+    state
+        .repository
+        .set_library_parent(library_id, parent_library_id)
+        .map_err(ipc_error)
+}
+
+#[tauri::command]
+pub fn assign_asset_to_library(
+    asset_id: i64,
+    target_library_id: i64,
+    state: State<'_, AppState>,
+) -> Result<bool, String> {
+    state
+        .repository
+        .assign_asset_to_library(asset_id, target_library_id)
+        .map_err(ipc_error)
+}
+
+#[tauri::command]
 pub fn start_scan(
     root_path: String,
+    include_subfolders: Option<bool>,
     app: tauri::AppHandle,
     state: State<'_, AppState>,
 ) -> Result<StartScanResponse, String> {
@@ -99,6 +191,24 @@ pub fn start_scan(
         .source_scans
         .try_acquire(&source_identity.identity_key)
         .ok_or_else(|| "该图库或其嵌套图库正在扫描，请稍后重试".to_owned())?;
+    let structured_roots = if include_subfolders.unwrap_or(false) {
+        let discovered =
+            discover_import_source_roots(&source_identity.source_path).map_err(ipc_error)?;
+        Some(
+            state
+                .repository
+                .ensure_library_source_roots(&discovered)
+                .map_err(ipc_error)?,
+        )
+    } else {
+        None
+    };
+    let library_id_hint = structured_roots.as_ref().and_then(|roots| {
+        roots
+            .iter()
+            .find(|root| root.identity_key == source_identity.identity_key)
+            .map(|root| root.library_id)
+    });
     let (task_id, cancellation) = state.tasks.create();
     let response = StartScanResponse {
         task_id: task_id.clone(),
@@ -112,7 +222,8 @@ pub fn start_scan(
         cancellation,
         root: source_identity.source_path,
         scan_guard,
-        library_id_hint: None,
+        library_id_hint,
+        structured_roots,
     })
     .map_err(ipc_error)
     .inspect_err(|_| {
@@ -154,6 +265,7 @@ pub fn rescan_library(
         root: source_identity.source_path,
         scan_guard,
         library_id_hint: Some(library_id),
+        structured_roots: None,
     })
     .map_err(ipc_error)
     .inspect_err(|_| {
@@ -172,6 +284,7 @@ struct ScanTask {
     root: PathBuf,
     scan_guard: SourceScanGuard,
     library_id_hint: Option<i64>,
+    structured_roots: Option<Vec<LibrarySourceRoot>>,
 }
 
 fn spawn_scan_task(task: ScanTask) -> AppResult<()> {
@@ -185,23 +298,36 @@ fn spawn_scan_task(task: ScanTask) -> AppResult<()> {
         root,
         scan_guard,
         library_id_hint,
+        structured_roots,
     } = task;
     let thread_task_id = task_id.clone();
     std::thread::Builder::new()
         .name(format!("scan-{thread_task_id}"))
         .spawn(move || {
-            let result = scan_library(
-                &repository,
-                &paths.thumbnail_dir,
-                &root,
-                &thread_task_id,
-                &cancellation,
-                |progress| {
-                    if let Err(error) = app.emit("scan-progress", progress) {
-                        log::warn!("could not emit scan progress: {error}");
-                    }
-                },
-            );
+            let emit = |progress| {
+                if let Err(error) = app.emit("scan-progress", progress) {
+                    log::warn!("could not emit scan progress: {error}");
+                }
+            };
+            let result = match structured_roots {
+                Some(targets) => scan_library_tree(
+                    &repository,
+                    &paths.thumbnail_dir,
+                    &root,
+                    &thread_task_id,
+                    &cancellation,
+                    targets,
+                    emit,
+                ),
+                None => scan_library(
+                    &repository,
+                    &paths.thumbnail_dir,
+                    &root,
+                    &thread_task_id,
+                    &cancellation,
+                    emit,
+                ),
+            };
             if let Err(error) = result {
                 let root_string = root.to_string_lossy().into_owned();
                 let library_id = library_id_hint.or_else(|| {
@@ -248,21 +374,23 @@ pub fn get_thumbnail_data_url(asset_id: i64, state: State<'_, AppState>) -> Resu
 }
 
 #[tauri::command]
-pub fn get_preview_data_url(
+pub async fn get_preview_data_url(
     asset_id: i64,
     tier: Option<String>,
     max_width: Option<u32>,
     max_height: Option<u32>,
     state: State<'_, AppState>,
 ) -> Result<String, String> {
-    load_preview_data_url(
-        &state.repository,
-        &state.paths,
-        asset_id,
-        tier.as_deref().unwrap_or("screen"),
-        max_width.unwrap_or(2560).clamp(640, 4096),
-        max_height.unwrap_or(1600).clamp(480, 4096),
-    )
+    let repository = state.repository.clone();
+    let paths = state.paths.clone();
+    let tier = tier.unwrap_or_else(|| "screen".into());
+    let max_width = max_width.unwrap_or(2560).clamp(640, 4096);
+    let max_height = max_height.unwrap_or(1600).clamp(480, 4096);
+    tauri::async_runtime::spawn_blocking(move || {
+        load_preview_data_url(&repository, &paths, asset_id, &tier, max_width, max_height)
+    })
+    .await
+    .map_err(|error| format!("preview task failed: {error}"))?
     .map_err(ipc_error)
 }
 

@@ -682,6 +682,21 @@ fn cosine_similarity(left: &[f32], right: &[f32]) -> f32 {
 
 fn select_predictions(scores: &[f32]) -> Vec<SemanticPrediction> {
     let unknown_index = LABELS.len() - 1;
+    let mut concrete_primaries = scores
+        .iter()
+        .enumerate()
+        .filter(|(index, _)| {
+            is_primary_category(LABELS[*index].id) && LABELS[*index].id != "unknown"
+        })
+        .map(|(index, score)| (index, *score))
+        .collect::<Vec<_>>();
+    concrete_primaries.sort_by(|left, right| right.1.total_cmp(&left.1));
+    let confident_primary = concrete_primaries.first().is_some_and(|(index, score)| {
+        *score >= LABELS[*index].threshold
+            && concrete_primaries
+                .get(1)
+                .is_none_or(|(_, second_score)| *score - *second_score >= TOP_SCORE_WINDOW)
+    });
     let best_primary = scores
         .iter()
         .enumerate()
@@ -724,6 +739,14 @@ fn select_predictions(scores: &[f32]) -> Vec<SemanticPrediction> {
         accepted.sort_by(|left, right| right.1.total_cmp(&left.1).then(left.0.cmp(&right.0)));
     }
     if accepted.is_empty() {
+        accepted.push((
+            unknown_index,
+            scores.get(unknown_index).copied().unwrap_or(0.0),
+        ));
+    }
+
+    if !confident_primary {
+        accepted.retain(|(index, _)| !is_primary_category(LABELS[*index].id));
         accepted.push((
             unknown_index,
             scores.get(unknown_index).copied().unwrap_or(0.0),
@@ -1015,6 +1038,23 @@ mod tests {
             predictions
                 .iter()
                 .any(|label| label.label_id == "portrait" && label.is_primary)
+        );
+    }
+
+    #[test]
+    fn low_confidence_success_is_explicit_unknown_not_a_forced_category() {
+        let scores = vec![0.01; LABELS.len()];
+        let predictions = select_predictions(&scores);
+        assert_eq!(
+            predictions
+                .iter()
+                .find(|label| label.is_primary)
+                .map(|label| label.label_id.as_str()),
+            Some("unknown")
+        );
+        assert_eq!(
+            predictions.iter().filter(|label| label.is_primary).count(),
+            1
         );
     }
 

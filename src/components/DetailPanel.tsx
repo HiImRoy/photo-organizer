@@ -1,14 +1,22 @@
+import { useState } from "react";
+
 import { formatBytes, formatDate, formatPercent } from "../format";
-import type { AssetListItem, SemanticRuntimeStatus } from "../types";
+import type { AssetListItem, ClassificationFieldDescriptor, SemanticRuntimeStatus } from "../types";
 import { PanelIcon, PlayIcon } from "./Icons";
+import { PreviewNavigator, type PreviewNavigatorProps } from "./PreviewNavigator";
 import { Thumbnail } from "./Thumbnail";
 
 interface DetailPanelProps {
   asset: AssetListItem | null;
   collapsed: boolean;
   semanticStatus: SemanticRuntimeStatus | null;
+  previewNavigator: PreviewNavigatorProps | null;
   onToggle: () => void;
   onReanalyze: (asset: AssetListItem) => void;
+  classificationRegistry?: ClassificationFieldDescriptor[];
+  onUpdateClassification?: (assetId: number, field: string, value: string | string[]) => void;
+  onUpdateTagOverride?: (assetId: number, tagId: string, state: "add" | "remove") => void;
+  onRestoreAuto?: (assetId: number, field?: string) => void;
 }
 
 const toneLabels: Record<string, string> = {
@@ -21,8 +29,13 @@ export function DetailPanel({
   asset,
   collapsed,
   semanticStatus,
+  previewNavigator,
   onToggle,
   onReanalyze,
+  classificationRegistry,
+  onUpdateClassification,
+  onUpdateTagOverride,
+  onRestoreAuto,
 }: DetailPanelProps) {
   if (collapsed) {
     return (
@@ -55,9 +68,13 @@ export function DetailPanel({
         </div>
       ) : (
         <div className="details-scroll">
-          <div className="detail-preview">
-            <Thumbnail asset={asset} />
-          </div>
+          {previewNavigator ? (
+            <PreviewNavigator {...previewNavigator} placement="panel" />
+          ) : (
+            <div className="detail-preview">
+              <Thumbnail asset={asset} />
+            </div>
+          )}
           <h2 title={asset.fileName}>{asset.fileName}</h2>
           <div className="detail-path" title={asset.relativePath}>
             {asset.relativePath}
@@ -113,6 +130,15 @@ export function DetailPanel({
             </div>
           </DetailSection>
 
+          <ClassificationEditor
+            key={`${asset.id}:${asset.classification.revision}`}
+            asset={asset}
+            classificationRegistry={classificationRegistry}
+            onUpdateClassification={onUpdateClassification}
+            onUpdateTagOverride={onUpdateTagOverride}
+            onRestoreAuto={onRestoreAuto}
+          />
+
           <DetailSection title="语义标签" trailing={semanticStateLabel(asset.semanticStatus)}>
             {asset.semanticLabels.length ? (
               <div className="semantic-detail-list">
@@ -164,6 +190,210 @@ export function DetailPanel({
         </div>
       )}
     </aside>
+  );
+}
+
+function ClassificationEditor({
+  asset,
+  classificationRegistry,
+  onUpdateClassification,
+  onUpdateTagOverride,
+  onRestoreAuto,
+}: {
+  asset: AssetListItem;
+  classificationRegistry?: ClassificationFieldDescriptor[];
+  onUpdateClassification?: (assetId: number, field: string, value: string | string[]) => void;
+  onUpdateTagOverride?: (assetId: number, tagId: string, state: "add" | "remove") => void;
+  onRestoreAuto?: (assetId: number, field?: string) => void;
+}) {
+  const classification = asset.classification;
+  const registryIds = new Set(
+    classificationRegistry?.length
+      ? classificationRegistry.map((field) => field.id)
+      : [
+          "primary_category",
+          "auxiliary_tags",
+          "tone",
+          "dominant_color_category",
+          "saturation_level",
+        ],
+  );
+  const [primary, setPrimary] = useState(classification.primaryCategory.effective ?? "");
+  const [tone, setTone] = useState(classification.tone.effective ?? "");
+  const [colors, setColors] = useState(
+    (classification.dominantColorCategories.effective ?? []).join(", "),
+  );
+  const [saturation, setSaturation] = useState(classification.saturationLevel.effective ?? "");
+  const [tag, setTag] = useState("");
+
+  const save = (field: string, value: string | string[]) => {
+    if (!value || (Array.isArray(value) && value.length === 0)) return;
+    onUpdateClassification?.(asset.id, field, value);
+  };
+  const addTag = () => {
+    const value = tag.trim();
+    if (!value) return;
+    onUpdateTagOverride?.(asset.id, value, "add");
+    setTag("");
+  };
+
+  return (
+    <DetailSection title="分类修正" trailing={`rev ${classification.revision}`}>
+      <div className="classification-editor">
+        {registryIds.has("primary_category") ? (
+          <ClassificationRow
+            label="Primary"
+            auto={classification.primaryCategory.auto ?? "—"}
+            manual={classification.primaryCategory.manual ?? "—"}
+            effective={classification.primaryCategory.effective ?? "—"}
+            source={classification.primaryCategory.source}
+            control={<input value={primary} onChange={(event) => setPrimary(event.target.value)} />}
+            onSave={() => save("primary_category", primary)}
+            onRestore={() => onRestoreAuto?.(asset.id, "primary_category")}
+          />
+        ) : null}
+        {registryIds.has("tone") ? (
+          <ClassificationRow
+            label="Tone"
+            auto={classification.tone.auto ?? "—"}
+            manual={classification.tone.manual ?? "—"}
+            effective={classification.tone.effective ?? "—"}
+            source={classification.tone.source}
+            control={
+              <select value={tone} onChange={(event) => setTone(event.target.value)}>
+                <option value="">未设置</option>
+                <option value="low_key">低调</option>
+                <option value="mid_tone">中调</option>
+                <option value="balanced">均衡</option>
+                <option value="high_key">高调</option>
+              </select>
+            }
+            onSave={() => save("tone", tone)}
+            onRestore={() => onRestoreAuto?.(asset.id, "tone")}
+          />
+        ) : null}
+        {registryIds.has("dominant_color_category") ? (
+          <ClassificationRow
+            label="Color palette"
+            auto={(classification.dominantColorCategories.auto ?? []).join(", ") || "—"}
+            manual={(classification.dominantColorCategories.manual ?? []).join(", ") || "—"}
+            effective={(classification.dominantColorCategories.effective ?? []).join(", ") || "—"}
+            source={classification.dominantColorCategories.source}
+            control={<input value={colors} onChange={(event) => setColors(event.target.value)} />}
+            onSave={() =>
+              save(
+                "dominant_color_category",
+                colors
+                  .split(",")
+                  .map((value) => value.trim())
+                  .filter(Boolean),
+              )
+            }
+            onRestore={() => onRestoreAuto?.(asset.id, "dominant_color_category")}
+          />
+        ) : null}
+        {registryIds.has("saturation_level") ? (
+          <ClassificationRow
+            label="Saturation"
+            auto={classification.saturationLevel.auto ?? "—"}
+            manual={classification.saturationLevel.manual ?? "—"}
+            effective={classification.saturationLevel.effective ?? "—"}
+            source={classification.saturationLevel.source}
+            control={
+              <select value={saturation} onChange={(event) => setSaturation(event.target.value)}>
+                <option value="">未设置</option>
+                <option value="low">低</option>
+                <option value="medium">中</option>
+                <option value="high">高</option>
+              </select>
+            }
+            onSave={() => save("saturation_level", saturation)}
+            onRestore={() => onRestoreAuto?.(asset.id, "saturation_level")}
+          />
+        ) : null}
+        {registryIds.has("auxiliary_tags") ? (
+          <div className="classification-tags-editor">
+            <div className="classification-field-label">Auxiliary tags</div>
+            <div className="classification-tag-list">
+              {classification.auxiliaryTags.effective.map((value) => (
+                <button
+                  type="button"
+                  className="filter-chip is-active"
+                  key={value}
+                  title="REMOVE manual override"
+                  onClick={() => onUpdateTagOverride?.(asset.id, value, "remove")}
+                >
+                  {value} ×
+                </button>
+              ))}
+            </div>
+            <div className="classification-tag-add">
+              <input
+                value={tag}
+                placeholder="添加标签 ID"
+                onChange={(event) => setTag(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter") addTag();
+                }}
+              />
+              <button type="button" className="secondary-action" onClick={addTag}>
+                ADD
+              </button>
+              <button
+                type="button"
+                className="secondary-action"
+                onClick={() => onRestoreAuto?.(asset.id, "auxiliary_tags")}
+              >
+                恢复自动
+              </button>
+            </div>
+          </div>
+        ) : null}
+      </div>
+    </DetailSection>
+  );
+}
+
+function ClassificationRow({
+  label,
+  auto,
+  manual,
+  effective,
+  source,
+  control,
+  onSave,
+  onRestore,
+}: {
+  label: string;
+  auto: string;
+  manual: string;
+  effective: string;
+  source: string;
+  control: React.ReactNode;
+  onSave: () => void;
+  onRestore: () => void;
+}) {
+  return (
+    <div className="classification-field">
+      <div className="classification-field-heading">
+        <strong>{label}</strong>
+        <small>{source}</small>
+      </div>
+      <div className="classification-provenance">
+        <span>Auto: {auto}</span>
+        <span>Manual: {manual}</span>
+        <span>Effective: {effective}</span>
+      </div>
+      <div className="classification-control">
+        {control}
+        <button type="button" className="secondary-action" onClick={onSave}>
+          保存
+        </button>
+        <button type="button" className="secondary-action" onClick={onRestore}>
+          恢复自动
+        </button>
+      </div>
+    </div>
   );
 }
 
