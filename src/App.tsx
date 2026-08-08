@@ -936,7 +936,7 @@ export default function App() {
             disabled={!selectedLibrary || semanticRunning}
           >
             <PlayIcon width="14" height="14" />
-            {semanticStatus?.status === "ready" ? "分析未完成" : "准备模型"}
+            {semanticStatus?.status === "ready" ? "分析" : "准备模型"}
           </button>
           {selectedAssetIds.length > 0 ? (
             <>

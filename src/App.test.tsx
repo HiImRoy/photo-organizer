@@ -230,6 +230,21 @@ describe("PhotoOrganizer application shell", () => {
 
   it("restores a library, renders the grid, and opens details", async () => {
     const user = userEvent.setup();
+    api.fetchSemanticStatus.mockResolvedValue({
+      status: "ready",
+      message: "ready",
+      model: {
+        name: "TinyCLIP",
+        version: "test",
+        analysisVersion: "test",
+        license: "MIT",
+        installed: true,
+        modelSizeBytes: 24_281_512,
+        modelSha256: "test",
+        supportedBackends: ["cpu"],
+      },
+      selectedBackend: "cpu",
+    });
     api.fetchLibraries.mockResolvedValue([library]);
     api.fetchAssets.mockResolvedValue({ items: [asset], total: 1, page: 1, pageSize: 200 });
     render(<App />);
@@ -240,6 +255,7 @@ describe("PhotoOrganizer application shell", () => {
     await user.click(assetButton);
 
     expect(screen.getByRole("complementary", { name: "图片详情" })).toBeInTheDocument();
+    expect(await screen.findByRole("button", { name: "分析" })).toBeInTheDocument();
     await waitFor(() => expect(assetButton).toHaveAttribute("aria-pressed", "true"));
     expect(screen.getByText("1200 × 800")).toBeInTheDocument();
     expect(screen.getByText("#D76A52")).toBeInTheDocument();
