@@ -96,7 +96,7 @@ Checkpoint B 已将上述目标落到当前代码：
 - [src-tauri/src/db.rs](E:/Code/Codex/photo-organizer/src-tauri/src/db.rs) 在 list/count/group/filter 中解析 Effective；`folderPrefix` 不再进入 `AssetFilter`，但 `relative_path` 仍保留给源文件和 Organization。
 - [src-tauri/src/semantic.rs](E:/Code/Codex/photo-organizer/src-tauri/src/semantic.rs) 保持 UNKNOWN 与 FAILED 分离：低置信度成功返回 UNKNOWN，执行失败清除当前 Auto 结果并返回 FAILED。
 - [src-tauri/src/ipc.rs](E:/Code/Codex/photo-organizer/src-tauri/src/ipc.rs)、[src/api.ts](E:/Code/Codex/photo-organizer/src/api.ts) 提供 Registry、Detail、单字段编辑、tag 编辑、Restore Auto 和批量编辑 API。
-- [src/components/DetailPanel.tsx](E:/Code/Codex/photo-organizer/src/components/DetailPanel.tsx) 显示 Auto/Manual/Effective/provenance 并支持五类 Registry 字段修正；[src/App.tsx](E:/Code/Codex/photo-organizer/src/App.tsx) 提供批量修正入口。
+- [src/components/DetailPanel.tsx](E:/Code/Codex/photo-organizer/src/components/DetailPanel.tsx) 显示 Auto/Manual/Effective/provenance 并支持五类 Registry 字段修正；分类修正区域默认折叠，展开后使用中文下拉/多选控件，不接受原始分类 ID 文本输入；[src/App.tsx](E:/Code/Codex/photo-organizer/src/App.tsx) 提供同样使用选项控件的批量修正入口。
 - [src/components/AssetCard.tsx](E:/Code/Codex/photo-organizer/src/components/AssetCard.tsx)、[src/components/Sidebar.tsx](E:/Code/Codex/photo-organizer/src/components/Sidebar.tsx) 使用 Effective 分类和 analysis status 筛选。
 
 ## 6. Target State

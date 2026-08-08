@@ -65,7 +65,7 @@ Automated tests:
 - Passed: `npm run format:check`
 - Passed: `npm run lint`
 - Passed: `npm run typecheck -- --pretty false`
-- Passed: `npm test -- --run` (17 tests)
+- Passed: `npm test -- --run` (19 tests)
 - Passed: `npm run build`
 
 Manual verification:
@@ -75,6 +75,7 @@ Pending: DetailPanel single-asset editor, Auxiliary Tag ADD/REMOVE, Restore Auto
 Known issues:
 
 - B cannot be marked `COMPLETED` until the manual checklist in `checkpoint-b-classification-filter.md` is run in the desktop app.
+- The classification editor is collapsed by default, uses Chinese labels and select-only controls, and no longer accepts raw classification IDs as text input.
 - Checkpoint A remains `BLOCKED_FOR_REVIEW`; this implementation does not silently change A's status.
 - Objective Numeric Feature remains read-only and outside the Derived Classification Registry.
 

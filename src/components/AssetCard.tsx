@@ -1,5 +1,6 @@
 import { useEffect, useRef } from "react";
 
+import { classificationValueLabel } from "../classificationLabels";
 import { formatPercent } from "../format";
 import type { AssetListItem } from "../types";
 import { CheckIcon } from "./Icons";
@@ -109,8 +110,15 @@ export function AssetCard({
           asset.classification.auxiliaryTags.effective.length > 0 ? (
             <div className="asset-labels">
               {[
-                asset.classification.primaryCategory.effective,
-                ...asset.classification.auxiliaryTags.effective,
+                asset.classification.primaryCategory.effective
+                  ? classificationValueLabel(
+                      asset.classification.primaryCategory.effective,
+                      "primary",
+                    )
+                  : null,
+                ...asset.classification.auxiliaryTags.effective.map((value) =>
+                  classificationValueLabel(value, "tag"),
+                ),
               ]
                 .filter((label): label is string => Boolean(label))
                 .slice(0, 2)

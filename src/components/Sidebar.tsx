@@ -474,7 +474,7 @@ export function Sidebar(props: SidebarProps) {
           <strong>原图只读</strong> · 索引与模型数据保存在应用目录
         </span>
         <small className={semanticStatus?.status === "ready" ? "status-ready" : ""}>
-          {semanticStatus?.status === "ready" ? "TinyCLIP · CPU" : "语义模型未就绪"}
+          {semanticStatus?.status === "ready" ? "本地语义模型 · 本地计算" : "语义模型未就绪"}
         </small>
       </div>
     </aside>

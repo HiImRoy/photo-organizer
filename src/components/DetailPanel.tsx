@@ -1,7 +1,22 @@
 import { useState } from "react";
 
+import {
+  auxiliaryTagOptions,
+  classificationSourceLabel,
+  classificationValueLabel,
+  classificationValuesLabel,
+  COLOR_OPTIONS,
+  primaryCategoryOptions,
+  SATURATION_OPTIONS,
+  TONE_OPTIONS,
+} from "../classificationLabels";
 import { formatBytes, formatDate, formatPercent } from "../format";
-import type { AssetListItem, ClassificationFieldDescriptor, SemanticRuntimeStatus } from "../types";
+import type {
+  AssetListItem,
+  ClassificationFieldDescriptor,
+  SemanticLabelDescriptor,
+  SemanticRuntimeStatus,
+} from "../types";
 import { PanelIcon, PlayIcon } from "./Icons";
 import { PreviewNavigator, type PreviewNavigatorProps } from "./PreviewNavigator";
 import { Thumbnail } from "./Thumbnail";
@@ -14,16 +29,11 @@ interface DetailPanelProps {
   onToggle: () => void;
   onReanalyze: (asset: AssetListItem) => void;
   classificationRegistry?: ClassificationFieldDescriptor[];
+  catalog?: SemanticLabelDescriptor[];
   onUpdateClassification?: (assetId: number, field: string, value: string | string[]) => void;
   onUpdateTagOverride?: (assetId: number, tagId: string, state: "add" | "remove") => void;
   onRestoreAuto?: (assetId: number, field?: string) => void;
 }
-
-const toneLabels: Record<string, string> = {
-  low_key: "低调",
-  balanced: "均衡",
-  high_key: "高调",
-};
 
 export function DetailPanel({
   asset,
@@ -33,6 +43,7 @@ export function DetailPanel({
   onToggle,
   onReanalyze,
   classificationRegistry,
+  catalog,
   onUpdateClassification,
   onUpdateTagOverride,
   onRestoreAuto,
@@ -92,7 +103,7 @@ export function DetailPanel({
             </dl>
           </DetailSection>
 
-          <DetailSection title="EXIF">
+          <DetailSection title="拍摄信息">
             <dl className="property-list">
               <Property
                 label="相机"
@@ -101,7 +112,7 @@ export function DetailPanel({
               <Property label="镜头" value={asset.lensModel ?? "—"} />
               <Property label="曝光" value={asset.exposureTime ?? "—"} />
               <Property label="光圈" value={asset.aperture ? `f/${asset.aperture}` : "—"} />
-              <Property label="ISO" value={asset.iso?.toString() ?? "—"} />
+              <Property label="感光度" value={asset.iso?.toString() ?? "—"} />
               <Property label="焦距" value={asset.focalLength ? `${asset.focalLength} mm` : "—"} />
             </dl>
           </DetailSection>
@@ -117,16 +128,13 @@ export function DetailPanel({
               <Metric label="色度" value={formatPercent(asset.chroma)} />
               <Metric label="有彩色占比" value={formatPercent(asset.dominantColorCoverage)} />
               <Metric label="中性色占比" value={formatPercent(asset.neutralRatio)} />
-              <Metric
-                label="影调"
-                value={asset.toneLabel ? (toneLabels[asset.toneLabel] ?? asset.toneLabel) : "—"}
-              />
+              <Metric label="影调" value={classificationValueLabel(asset.toneLabel, "tone")} />
             </div>
             <div className="dominant-row">
               <span>主色</span>
               {asset.dominantColor ? <i style={{ background: asset.dominantColor }} /> : null}
               <strong>{asset.dominantColor ?? "—"}</strong>
-              <small>{asset.dominantColorCategory ?? ""}</small>
+              <small>{classificationValueLabel(asset.dominantColorCategory, "color")}</small>
             </div>
           </DetailSection>
 
@@ -134,6 +142,7 @@ export function DetailPanel({
             key={`${asset.id}:${asset.classification.revision}`}
             asset={asset}
             classificationRegistry={classificationRegistry}
+            catalog={catalog}
             onUpdateClassification={onUpdateClassification}
             onUpdateTagOverride={onUpdateTagOverride}
             onRestoreAuto={onRestoreAuto}
@@ -174,7 +183,7 @@ export function DetailPanel({
               />
               <Property
                 label="后端"
-                value={semanticStatus?.selectedBackend?.toUpperCase() ?? "未启用"}
+                value={semanticStatus?.selectedBackend ? "本地计算" : "未启用"}
               />
             </dl>
             <button
@@ -196,12 +205,14 @@ export function DetailPanel({
 function ClassificationEditor({
   asset,
   classificationRegistry,
+  catalog = [],
   onUpdateClassification,
   onUpdateTagOverride,
   onRestoreAuto,
 }: {
   asset: AssetListItem;
   classificationRegistry?: ClassificationFieldDescriptor[];
+  catalog?: SemanticLabelDescriptor[];
   onUpdateClassification?: (assetId: number, field: string, value: string | string[]) => void;
   onUpdateTagOverride?: (assetId: number, tagId: string, state: "add" | "remove") => void;
   onRestoreAuto?: (assetId: number, field?: string) => void;
@@ -218,138 +229,244 @@ function ClassificationEditor({
           "saturation_level",
         ],
   );
+  const [editing, setEditing] = useState(false);
   const [primary, setPrimary] = useState(classification.primaryCategory.effective ?? "");
   const [tone, setTone] = useState(classification.tone.effective ?? "");
-  const [colors, setColors] = useState(
-    (classification.dominantColorCategories.effective ?? []).join(", "),
+  const [colors, setColors] = useState<string[]>(
+    classification.dominantColorCategories.effective ?? [],
   );
   const [saturation, setSaturation] = useState(classification.saturationLevel.effective ?? "");
-  const [tag, setTag] = useState("");
+  const [tagChoice, setTagChoice] = useState("");
+  const primaryOptions = primaryCategoryOptions(catalog);
+  const tagOptions = auxiliaryTagOptions(catalog, classification.auxiliaryTags.effective);
 
   const save = (field: string, value: string | string[]) => {
     if (!value || (Array.isArray(value) && value.length === 0)) return;
     onUpdateClassification?.(asset.id, field, value);
   };
   const addTag = () => {
-    const value = tag.trim();
-    if (!value) return;
-    onUpdateTagOverride?.(asset.id, value, "add");
-    setTag("");
+    if (!tagChoice) return;
+    onUpdateTagOverride?.(asset.id, tagChoice, "add");
+    setTagChoice("");
   };
 
+  const summary = [
+    `主类别：${classificationValueLabel(classification.primaryCategory.effective, "primary", catalog)}`,
+    `影调：${classificationValueLabel(classification.tone.effective, "tone", catalog)}`,
+    `主色：${classificationValuesLabel(
+      classification.dominantColorCategories.effective,
+      "color",
+      catalog,
+    )}`,
+    `饱和度：${classificationValueLabel(
+      classification.saturationLevel.effective,
+      "saturation",
+      catalog,
+    )}`,
+  ];
+
   return (
-    <DetailSection title="分类修正" trailing={`rev ${classification.revision}`}>
-      <div className="classification-editor">
-        {registryIds.has("primary_category") ? (
-          <ClassificationRow
-            label="Primary"
-            auto={classification.primaryCategory.auto ?? "—"}
-            manual={classification.primaryCategory.manual ?? "—"}
-            effective={classification.primaryCategory.effective ?? "—"}
-            source={classification.primaryCategory.source}
-            control={<input value={primary} onChange={(event) => setPrimary(event.target.value)} />}
-            onSave={() => save("primary_category", primary)}
-            onRestore={() => onRestoreAuto?.(asset.id, "primary_category")}
-          />
-        ) : null}
-        {registryIds.has("tone") ? (
-          <ClassificationRow
-            label="Tone"
-            auto={classification.tone.auto ?? "—"}
-            manual={classification.tone.manual ?? "—"}
-            effective={classification.tone.effective ?? "—"}
-            source={classification.tone.source}
-            control={
-              <select value={tone} onChange={(event) => setTone(event.target.value)}>
-                <option value="">未设置</option>
-                <option value="low_key">低调</option>
-                <option value="mid_tone">中调</option>
-                <option value="balanced">均衡</option>
-                <option value="high_key">高调</option>
-              </select>
-            }
-            onSave={() => save("tone", tone)}
-            onRestore={() => onRestoreAuto?.(asset.id, "tone")}
-          />
-        ) : null}
-        {registryIds.has("dominant_color_category") ? (
-          <ClassificationRow
-            label="Color palette"
-            auto={(classification.dominantColorCategories.auto ?? []).join(", ") || "—"}
-            manual={(classification.dominantColorCategories.manual ?? []).join(", ") || "—"}
-            effective={(classification.dominantColorCategories.effective ?? []).join(", ") || "—"}
-            source={classification.dominantColorCategories.source}
-            control={<input value={colors} onChange={(event) => setColors(event.target.value)} />}
-            onSave={() =>
-              save(
-                "dominant_color_category",
-                colors
-                  .split(",")
-                  .map((value) => value.trim())
-                  .filter(Boolean),
-              )
-            }
-            onRestore={() => onRestoreAuto?.(asset.id, "dominant_color_category")}
-          />
-        ) : null}
-        {registryIds.has("saturation_level") ? (
-          <ClassificationRow
-            label="Saturation"
-            auto={classification.saturationLevel.auto ?? "—"}
-            manual={classification.saturationLevel.manual ?? "—"}
-            effective={classification.saturationLevel.effective ?? "—"}
-            source={classification.saturationLevel.source}
-            control={
-              <select value={saturation} onChange={(event) => setSaturation(event.target.value)}>
-                <option value="">未设置</option>
-                <option value="low">低</option>
-                <option value="medium">中</option>
-                <option value="high">高</option>
-              </select>
-            }
-            onSave={() => save("saturation_level", saturation)}
-            onRestore={() => onRestoreAuto?.(asset.id, "saturation_level")}
-          />
-        ) : null}
-        {registryIds.has("auxiliary_tags") ? (
-          <div className="classification-tags-editor">
-            <div className="classification-field-label">Auxiliary tags</div>
-            <div className="classification-tag-list">
-              {classification.auxiliaryTags.effective.map((value) => (
+    <DetailSection title="分类" trailing={`版本 ${classification.revision}`}>
+      <div className="classification-summary">
+        <div className="classification-summary-values">
+          {summary.map((value) => (
+            <span key={value}>{value}</span>
+          ))}
+        </div>
+        <button
+          type="button"
+          className="secondary-action"
+          aria-expanded={editing}
+          onClick={() => setEditing((value) => !value)}
+        >
+          {editing ? "收起修改" : "手动修改"}
+        </button>
+      </div>
+
+      {editing ? (
+        <div className="classification-editor">
+          {registryIds.has("primary_category") ? (
+            <ClassificationRow
+              label="主类别"
+              auto={classificationValueLabel(
+                classification.primaryCategory.auto,
+                "primary",
+                catalog,
+              )}
+              manual={classificationValueLabel(
+                classification.primaryCategory.manual,
+                "primary",
+                catalog,
+              )}
+              effective={classificationValueLabel(
+                classification.primaryCategory.effective,
+                "primary",
+                catalog,
+              )}
+              source={classification.primaryCategory.source}
+              control={
+                <select value={primary} onChange={(event) => setPrimary(event.target.value)}>
+                  <option value="">请选择主类别</option>
+                  {primaryOptions.map((option) => (
+                    <option value={option.value} key={option.value}>
+                      {option.label}
+                    </option>
+                  ))}
+                </select>
+              }
+              onSave={() => save("primary_category", primary)}
+              onRestore={() => onRestoreAuto?.(asset.id, "primary_category")}
+            />
+          ) : null}
+          {registryIds.has("tone") ? (
+            <ClassificationRow
+              label="影调"
+              auto={classificationValueLabel(classification.tone.auto, "tone", catalog)}
+              manual={classificationValueLabel(classification.tone.manual, "tone", catalog)}
+              effective={classificationValueLabel(classification.tone.effective, "tone", catalog)}
+              source={classification.tone.source}
+              control={
+                <select value={tone} onChange={(event) => setTone(event.target.value)}>
+                  <option value="">请选择影调</option>
+                  {TONE_OPTIONS.map(([value, label]) => (
+                    <option value={value} key={value}>
+                      {label}
+                    </option>
+                  ))}
+                </select>
+              }
+              onSave={() => save("tone", tone)}
+              onRestore={() => onRestoreAuto?.(asset.id, "tone")}
+            />
+          ) : null}
+          {registryIds.has("dominant_color_category") ? (
+            <ClassificationRow
+              label="主色"
+              auto={classificationValuesLabel(
+                classification.dominantColorCategories.auto,
+                "color",
+                catalog,
+              )}
+              manual={classificationValuesLabel(
+                classification.dominantColorCategories.manual,
+                "color",
+                catalog,
+              )}
+              effective={classificationValuesLabel(
+                classification.dominantColorCategories.effective,
+                "color",
+                catalog,
+              )}
+              source={classification.dominantColorCategories.source}
+              control={
+                <select
+                  multiple
+                  size={4}
+                  value={colors}
+                  onChange={(event) =>
+                    setColors(Array.from(event.target.selectedOptions, (option) => option.value))
+                  }
+                >
+                  {COLOR_OPTIONS.map(([value, label]) => (
+                    <option value={value} key={value}>
+                      {label}
+                    </option>
+                  ))}
+                </select>
+              }
+              onSave={() => save("dominant_color_category", colors)}
+              onRestore={() => onRestoreAuto?.(asset.id, "dominant_color_category")}
+            />
+          ) : null}
+          {registryIds.has("saturation_level") ? (
+            <ClassificationRow
+              label="饱和度级别"
+              auto={classificationValueLabel(
+                classification.saturationLevel.auto,
+                "saturation",
+                catalog,
+              )}
+              manual={classificationValueLabel(
+                classification.saturationLevel.manual,
+                "saturation",
+                catalog,
+              )}
+              effective={classificationValueLabel(
+                classification.saturationLevel.effective,
+                "saturation",
+                catalog,
+              )}
+              source={classification.saturationLevel.source}
+              control={
+                <select value={saturation} onChange={(event) => setSaturation(event.target.value)}>
+                  <option value="">请选择饱和度</option>
+                  {SATURATION_OPTIONS.map(([value, label]) => (
+                    <option value={value} key={value}>
+                      {label}
+                    </option>
+                  ))}
+                </select>
+              }
+              onSave={() => save("saturation_level", saturation)}
+              onRestore={() => onRestoreAuto?.(asset.id, "saturation_level")}
+            />
+          ) : null}
+          {registryIds.has("auxiliary_tags") ? (
+            <div className="classification-tags-editor">
+              <div className="classification-field-label">辅助标签</div>
+              <div className="classification-provenance">
+                <span>
+                  当前：
+                  {classificationValuesLabel(
+                    classification.auxiliaryTags.effective,
+                    "tag",
+                    catalog,
+                  )}
+                </span>
+                <span>来源：{classificationSourceLabel(classification.auxiliaryTags.source)}</span>
+              </div>
+              <div className="classification-tag-list">
+                {classification.auxiliaryTags.effective.map((value) => (
+                  <button
+                    type="button"
+                    className="filter-chip is-active"
+                    key={value}
+                    title="点击移除此标签"
+                    onClick={() => onUpdateTagOverride?.(asset.id, value, "remove")}
+                  >
+                    {classificationValueLabel(value, "tag", catalog)} ×
+                  </button>
+                ))}
+              </div>
+              <div className="classification-tag-add">
+                <select value={tagChoice} onChange={(event) => setTagChoice(event.target.value)}>
+                  <option value="">请选择要添加的标签</option>
+                  {tagOptions.map((option) => (
+                    <option value={option.value} key={option.value}>
+                      {option.label}
+                    </option>
+                  ))}
+                </select>
                 <button
                   type="button"
-                  className="filter-chip is-active"
-                  key={value}
-                  title="REMOVE manual override"
-                  onClick={() => onUpdateTagOverride?.(asset.id, value, "remove")}
+                  className="secondary-action"
+                  onClick={addTag}
+                  disabled={!tagChoice}
                 >
-                  {value} ×
+                  添加标签
                 </button>
-              ))}
+                <button
+                  type="button"
+                  className="secondary-action"
+                  onClick={() => onRestoreAuto?.(asset.id, "auxiliary_tags")}
+                >
+                  恢复自动
+                </button>
+              </div>
             </div>
-            <div className="classification-tag-add">
-              <input
-                value={tag}
-                placeholder="添加标签 ID"
-                onChange={(event) => setTag(event.target.value)}
-                onKeyDown={(event) => {
-                  if (event.key === "Enter") addTag();
-                }}
-              />
-              <button type="button" className="secondary-action" onClick={addTag}>
-                ADD
-              </button>
-              <button
-                type="button"
-                className="secondary-action"
-                onClick={() => onRestoreAuto?.(asset.id, "auxiliary_tags")}
-              >
-                恢复自动
-              </button>
-            </div>
-          </div>
-        ) : null}
-      </div>
+          ) : null}
+        </div>
+      ) : null}
     </DetailSection>
   );
 }
@@ -377,12 +494,12 @@ function ClassificationRow({
     <div className="classification-field">
       <div className="classification-field-heading">
         <strong>{label}</strong>
-        <small>{source}</small>
+        <small>{classificationSourceLabel(source)}</small>
       </div>
       <div className="classification-provenance">
-        <span>Auto: {auto}</span>
-        <span>Manual: {manual}</span>
-        <span>Effective: {effective}</span>
+        <span>自动：{auto}</span>
+        <span>手动：{manual}</span>
+        <span>当前结果：{effective}</span>
       </div>
       <div className="classification-control">
         {control}

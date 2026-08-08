@@ -31,6 +31,12 @@ import {
   subscribeScanProgress,
   subscribeSemanticProgress,
 } from "./api";
+import {
+  COLOR_OPTIONS,
+  primaryCategoryOptions,
+  SATURATION_OPTIONS,
+  TONE_OPTIONS,
+} from "./classificationLabels";
 import { AssetCard } from "./components/AssetCard";
 import { DetailPanel } from "./components/DetailPanel";
 import { OrganizationWorkspace } from "./components/OrganizationWorkspace";
@@ -172,7 +178,7 @@ export default function App() {
   const [assetDropTargetLibraryId, setAssetDropTargetLibraryId] = useState<number | null>(null);
   const [batchEditorOpen, setBatchEditorOpen] = useState(false);
   const [batchField, setBatchField] = useState("primary_category");
-  const [batchValue, setBatchValue] = useState("");
+  const [batchValue, setBatchValue] = useState<string[]>([]);
   const refreshTimerRef = useRef<number | null>(null);
   const assetPointerDragRef = useRef<AssetPointerDragState | null>(null);
   const librariesRef = useRef(libraries);
@@ -617,19 +623,15 @@ export default function App() {
   }
 
   async function applyBatchClassification() {
-    const value = batchValue
-      .split(",")
-      .map((item) => item.trim())
-      .filter(Boolean);
-    if (!value.length || !selectedAssetIds.length) return;
+    if (!batchValue.length || !selectedAssetIds.length) return;
     try {
       await batchUpdateClassification(
         selectedAssetIds,
         batchField,
-        batchField === "dominant_color_category" ? value : value[0],
+        batchField === "dominant_color_category" ? batchValue : batchValue[0],
       );
       setBatchEditorOpen(false);
-      setBatchValue("");
+      setBatchValue([]);
       requestDataRefresh(true);
     } catch (reason) {
       setError(messageFrom(reason));
@@ -980,20 +982,74 @@ export default function App() {
       {batchEditorOpen && selectedAssetIds.length > 0 ? (
         <div className="batch-classification-bar">
           <strong>批量修正 {selectedAssetIds.length} 张图片</strong>
-          <select value={batchField} onChange={(event) => setBatchField(event.target.value)}>
-            <option value="primary_category">Primary Category</option>
-            <option value="tone">Tone</option>
-            <option value="dominant_color_category">Color Palette</option>
-            <option value="saturation_level">Saturation Level</option>
-          </select>
-          <input
-            value={batchValue}
-            placeholder={batchField === "dominant_color_category" ? "blue, orange" : "输入值"}
-            onChange={(event) => setBatchValue(event.target.value)}
-            onKeyDown={(event) => {
-              if (event.key === "Enter") void applyBatchClassification();
+          <select
+            value={batchField}
+            onChange={(event) => {
+              setBatchField(event.target.value);
+              setBatchValue([]);
             }}
-          />
+          >
+            <option value="primary_category">主类别</option>
+            <option value="tone">影调</option>
+            <option value="dominant_color_category">主色</option>
+            <option value="saturation_level">饱和度级别</option>
+          </select>
+          {batchField === "primary_category" ? (
+            <select
+              value={batchValue[0] ?? ""}
+              onChange={(event) => setBatchValue(event.target.value ? [event.target.value] : [])}
+            >
+              <option value="">请选择主类别</option>
+              {primaryCategoryOptions(semanticCatalog).map((option) => (
+                <option value={option.value} key={option.value}>
+                  {option.label}
+                </option>
+              ))}
+            </select>
+          ) : null}
+          {batchField === "tone" ? (
+            <select
+              value={batchValue[0] ?? ""}
+              onChange={(event) => setBatchValue(event.target.value ? [event.target.value] : [])}
+            >
+              <option value="">请选择影调</option>
+              {TONE_OPTIONS.map(([value, label]) => (
+                <option value={value} key={value}>
+                  {label}
+                </option>
+              ))}
+            </select>
+          ) : null}
+          {batchField === "dominant_color_category" ? (
+            <select
+              multiple
+              size={3}
+              value={batchValue}
+              onChange={(event) =>
+                setBatchValue(Array.from(event.target.selectedOptions, (option) => option.value))
+              }
+              aria-label="选择主色"
+            >
+              {COLOR_OPTIONS.map(([value, label]) => (
+                <option value={value} key={value}>
+                  {label}
+                </option>
+              ))}
+            </select>
+          ) : null}
+          {batchField === "saturation_level" ? (
+            <select
+              value={batchValue[0] ?? ""}
+              onChange={(event) => setBatchValue(event.target.value ? [event.target.value] : [])}
+            >
+              <option value="">请选择饱和度</option>
+              {SATURATION_OPTIONS.map(([value, label]) => (
+                <option value={value} key={value}>
+                  {label}
+                </option>
+              ))}
+            </select>
+          ) : null}
           <button
             className="primary-action"
             type="button"
@@ -1199,6 +1255,7 @@ export default function App() {
               onToggle={() => setRightCollapsed((value) => !value)}
               onReanalyze={(asset) => void analyzeOne(asset)}
               classificationRegistry={classificationRegistry}
+              catalog={semanticCatalog}
               onUpdateClassification={(assetId, field, value) =>
                 void editClassification(assetId, field, value)
               }
@@ -1527,8 +1584,7 @@ function SemanticTaskBar({
             {progress.status === "paused" ? "语义分析已暂停" : "正在进行真实语义分析"}
           </strong>
           <small>
-            {progress.processed} / {progress.total} ·{" "}
-            {progress.executionBackend?.toUpperCase() ?? "CPU"} · 失败 {progress.failed}
+            {progress.processed} / {progress.total} · 本地计算 · 失败 {progress.failed}
           </small>
         </span>
       </div>
@@ -1594,7 +1650,7 @@ function pendingSemanticProgress(
     currentAssetId: null,
     currentPath: null,
     executionBackend: status?.selectedBackend ?? "cpu",
-    modelName: status?.model.name ?? "TinyCLIP",
+    modelName: status?.model.name ?? "语义模型",
     modelVersion: status?.model.version ?? "",
     error: null,
   };

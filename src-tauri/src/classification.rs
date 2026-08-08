@@ -24,15 +24,11 @@ pub struct ClassificationFieldDescriptor {
 
 pub fn registry_descriptors() -> Vec<ClassificationFieldDescriptor> {
     vec![
-        descriptor(FIELD_PRIMARY_CATEGORY, "Primary Category", "single"),
-        descriptor(FIELD_AUXILIARY_TAGS, "Auxiliary Tags", "multi"),
-        descriptor(FIELD_TONE, "Tone", "single"),
-        descriptor(
-            FIELD_DOMINANT_COLOR_CATEGORY,
-            "Dominant Color Category / Palette",
-            "multi",
-        ),
-        descriptor(FIELD_SATURATION_LEVEL, "Saturation Level", "single"),
+        descriptor(FIELD_PRIMARY_CATEGORY, "主类别", "single"),
+        descriptor(FIELD_AUXILIARY_TAGS, "辅助标签", "multi"),
+        descriptor(FIELD_TONE, "影调", "single"),
+        descriptor(FIELD_DOMINANT_COLOR_CATEGORY, "主色", "multi"),
+        descriptor(FIELD_SATURATION_LEVEL, "饱和度级别", "single"),
     ]
 }
 
