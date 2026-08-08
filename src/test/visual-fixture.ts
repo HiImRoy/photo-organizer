@@ -33,16 +33,18 @@ const rootPath = "C:\\test-data\\专业界面验收图库";
 
 const semanticCatalog: SemanticLabelDescriptor[] = [
   ["portrait", "人像"],
+  ["group", "多人"],
   ["landscape", "风景"],
   ["architecture", "建筑"],
   ["indoor", "室内"],
   ["street", "街道"],
-  ["product", "产品"],
-  ["still_life", "静物"],
+  ["vehicle", "车辆"],
+  ["product", "产品 / 静物"],
+  ["food", "食品"],
+  ["animal", "动物"],
+  ["document", "文档 / 截图"],
   ["night", "夜景"],
-  ["mountain", "山"],
-  ["water", "水体"],
-  ["forest", "森林"],
+  ["flower", "花卉"],
   ["abstract", "抽象"],
   ["unknown", "未知"],
 ].map(([id, displayName]) => ({

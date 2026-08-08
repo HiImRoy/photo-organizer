@@ -305,64 +305,22 @@ export function Sidebar(props: SidebarProps) {
         </div>
       </PanelSection>
 
-      <PanelSection
-        title="内容标签"
-        trailing={
-          filter.primaryCategories.length || filter.auxiliaryTags.length
-            ? `${filter.primaryCategories.length + filter.auxiliaryTags.length}`
-            : undefined
-        }
-      >
-        <div className="chip-grid">
-          {catalog.map((label) => {
-            const selected = label.isPrimaryCategory
-              ? filter.primaryCategories
-              : filter.auxiliaryTags;
-            const active = selected.includes(label.id);
-            const count = groups.find((group) => group.labelId === label.id)?.assetCount;
-            return (
-              <button
-                type="button"
-                className={active ? "filter-chip is-active" : "filter-chip"}
-                key={label.id}
-                onClick={() =>
-                  onFilterChange({
-                    ...filter,
-                    ...(label.isPrimaryCategory
-                      ? {
-                          primaryCategories: toggleValue(filter.primaryCategories, label.id),
-                        }
-                      : {
-                          auxiliaryTags: toggleValue(filter.auxiliaryTags, label.id),
-                        }),
-                  })
-                }
-              >
-                {label.displayName}
-                {count ? <small>{count}</small> : null}
-              </button>
-            );
-          })}
-        </div>
-        {filter.auxiliaryTags.length > 1 ? (
-          <div className="match-mode" aria-label="语义标签匹配方式">
-            <button
-              type="button"
-              className={filter.semanticMatch === "any" ? "is-active" : ""}
-              onClick={() => onFilterChange({ ...filter, semanticMatch: "any" })}
-            >
-              任一标签
-            </button>
-            <button
-              type="button"
-              className={filter.semanticMatch === "all" ? "is-active" : ""}
-              onClick={() => onFilterChange({ ...filter, semanticMatch: "all" })}
-            >
-              同时包含
-            </button>
-          </div>
-        ) : null}
-      </PanelSection>
+      <SemanticFilterSection
+        title="主类别"
+        primary
+        labels={catalog.filter((label) => label.isPrimaryCategory)}
+        filter={filter}
+        groups={groups}
+        onFilterChange={onFilterChange}
+      />
+
+      <SemanticFilterSection
+        title="辅助标签"
+        labels={catalog.filter((label) => !label.isPrimaryCategory)}
+        filter={filter}
+        groups={groups}
+        onFilterChange={onFilterChange}
+      />
 
       <PanelSection title="影调">
         <div className="chip-grid three">
@@ -723,6 +681,76 @@ function PanelSection({
       </div>
       {children}
     </section>
+  );
+}
+
+function SemanticFilterSection({
+  title,
+  labels,
+  primary = false,
+  filter,
+  groups,
+  onFilterChange,
+}: {
+  title: string;
+  labels: SemanticLabelDescriptor[];
+  primary?: boolean;
+  filter: AssetFilter;
+  groups: SemanticGroupSummary[];
+  onFilterChange: (filter: AssetFilter) => void;
+}) {
+  const selectedValues = primary ? filter.primaryCategories : filter.auxiliaryTags;
+
+  return (
+    <PanelSection
+      title={title}
+      trailing={selectedValues.length ? `${selectedValues.length}` : undefined}
+    >
+      <div className="chip-grid">
+        {labels.map((label) => {
+          const active = selectedValues.includes(label.id);
+          const count = primary
+            ? groups.find((group) => group.labelId === label.id)?.assetCount
+            : undefined;
+          return (
+            <button
+              type="button"
+              className={active ? "filter-chip is-active" : "filter-chip"}
+              key={label.id}
+              onClick={() =>
+                onFilterChange({
+                  ...filter,
+                  ...(primary
+                    ? { primaryCategories: toggleValue(filter.primaryCategories, label.id) }
+                    : { auxiliaryTags: toggleValue(filter.auxiliaryTags, label.id) }),
+                })
+              }
+            >
+              {label.displayName}
+              {count ? <small>{count}</small> : null}
+            </button>
+          );
+        })}
+      </div>
+      {!primary && filter.auxiliaryTags.length > 1 ? (
+        <div className="match-mode" aria-label="语义标签匹配方式">
+          <button
+            type="button"
+            className={filter.semanticMatch === "any" ? "is-active" : ""}
+            onClick={() => onFilterChange({ ...filter, semanticMatch: "any" })}
+          >
+            任一标签
+          </button>
+          <button
+            type="button"
+            className={filter.semanticMatch === "all" ? "is-active" : ""}
+            onClick={() => onFilterChange({ ...filter, semanticMatch: "all" })}
+          >
+            同时包含
+          </button>
+        </div>
+      ) : null}
+    </PanelSection>
   );
 }
 

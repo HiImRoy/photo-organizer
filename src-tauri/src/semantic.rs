@@ -132,7 +132,7 @@ const LABELS: [LabelDefinition; 21] = [
     },
     LabelDefinition {
         id: "architecture",
-        display_name: "城市 / 建筑",
+        display_name: "建筑",
         prompt: "an architectural photograph of a building",
         threshold: 0.16,
     },
@@ -156,7 +156,7 @@ const LABELS: [LabelDefinition; 21] = [
     },
     LabelDefinition {
         id: "product",
-        display_name: "静物 / 产品",
+        display_name: "产品 / 静物",
         prompt: "a commercial product photograph",
         threshold: 0.16,
     },
@@ -240,6 +240,24 @@ const LABELS: [LabelDefinition; 21] = [
     },
 ];
 
+const ACTIVE_LABEL_IDS: [&str; 15] = [
+    "portrait",
+    "group",
+    "landscape",
+    "architecture",
+    "indoor",
+    "street",
+    "vehicle",
+    "product",
+    "food",
+    "animal",
+    "document",
+    "night",
+    "flower",
+    "abstract",
+    "unknown",
+];
+
 #[derive(Debug, thiserror::Error)]
 pub enum SemanticError {
     #[error("semantic model is not installed or enabled")]
@@ -265,6 +283,7 @@ pub trait SemanticClassifier: Send + Sync {
 pub fn semantic_catalog() -> Vec<SemanticLabelDescriptor> {
     LABELS
         .iter()
+        .filter(|label| is_active_label(label.id))
         .map(|label| SemanticLabelDescriptor {
             id: label.id.into(),
             display_name: label.display_name.into(),
@@ -286,6 +305,10 @@ const PRIMARY_CATEGORY_IDS: [&str; 7] = [
 
 fn is_primary_category(label_id: &str) -> bool {
     PRIMARY_CATEGORY_IDS.contains(&label_id)
+}
+
+fn is_active_label(label_id: &str) -> bool {
+    ACTIVE_LABEL_IDS.contains(&label_id)
 }
 
 #[derive(Debug, Default)]
@@ -706,7 +729,9 @@ fn select_predictions(scores: &[f32]) -> Vec<SemanticPrediction> {
     let mut accepted = scores
         .iter()
         .enumerate()
-        .filter(|(index, score)| **score >= LABELS[*index].threshold)
+        .filter(|(index, score)| {
+            is_active_label(LABELS[*index].id) && **score >= LABELS[*index].threshold
+        })
         .map(|(index, score)| (index, *score))
         .collect::<Vec<_>>();
     accepted.sort_by(|left, right| right.1.total_cmp(&left.1).then(left.0.cmp(&right.0)));
@@ -774,6 +799,7 @@ fn rank_similarities(scores: &[f32]) -> Vec<SemanticSimilarity> {
     let mut ranked = scores
         .iter()
         .enumerate()
+        .filter(|(index, _)| is_active_label(LABELS[*index].id))
         .map(|(index, similarity)| SemanticSimilarity {
             label_id: LABELS[index].id.into(),
             display_name: LABELS[index].display_name.into(),
@@ -998,7 +1024,7 @@ mod tests {
     #[test]
     fn catalog_has_stable_unique_ids_and_unknown_last() {
         let catalog = semantic_catalog();
-        assert_eq!(catalog.len(), 21);
+        assert_eq!(catalog.len(), 15);
         assert_eq!(
             catalog.last().map(|label| label.id.as_str()),
             Some("unknown")
@@ -1024,6 +1050,34 @@ mod tests {
                 .unwrap()
                 .is_primary_category
         );
+        for inactive_id in [
+            "still_life",
+            "screenshot",
+            "mountain",
+            "water",
+            "forest",
+            "sunset",
+        ] {
+            assert!(!catalog.iter().any(|label| label.id == inactive_id));
+        }
+    }
+
+    #[test]
+    fn inactive_taxonomy_labels_are_not_auto_predictions() {
+        let mut scores = vec![0.05; LABELS.len()];
+        scores[LABELS
+            .iter()
+            .position(|label| label.id == "portrait")
+            .unwrap()] = 0.30;
+        scores[LABELS
+            .iter()
+            .position(|label| label.id == "mountain")
+            .unwrap()] = 0.99;
+
+        let predictions = select_predictions(&scores);
+
+        assert!(predictions.iter().any(|label| label.label_id == "portrait"));
+        assert!(!predictions.iter().any(|label| label.label_id == "mountain"));
     }
 
     #[test]

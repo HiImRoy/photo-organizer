@@ -6,10 +6,21 @@ export const PRIMARY_CATEGORY_OPTIONS = [
   ["portrait", "人像"],
   ["landscape", "风景"],
   ["architecture", "建筑"],
-  ["product", "产品"],
+  ["product", "产品 / 静物"],
   ["animal", "动物"],
-  ["document", "文档"],
+  ["document", "文档 / 截图"],
   ["unknown", "未知"],
+] as const;
+
+export const AUXILIARY_TAG_OPTIONS = [
+  ["group", "多人"],
+  ["indoor", "室内"],
+  ["street", "街道"],
+  ["vehicle", "车辆"],
+  ["food", "食品"],
+  ["night", "夜景"],
+  ["flower", "花卉"],
+  ["abstract", "抽象"],
 ] as const;
 
 export const TONE_OPTIONS = [
@@ -41,19 +52,13 @@ const FALLBACK_LABELS = new Map<string, string>([
   ...TONE_OPTIONS,
   ...COLOR_OPTIONS,
   ...SATURATION_OPTIONS,
-  ["indoor", "室内"],
-  ["street", "街道"],
-  ["vehicle", "车辆"],
+  ...AUXILIARY_TAG_OPTIONS,
   ["still_life", "静物"],
-  ["food", "食品"],
   ["screenshot", "截图"],
-  ["night", "夜景"],
-  ["flower", "花卉"],
   ["mountain", "山"],
   ["water", "水体"],
   ["forest", "森林"],
   ["sunset", "日落"],
-  ["abstract", "抽象"],
 ]);
 
 export function classificationFieldLabel(field: string): string {
@@ -119,13 +124,16 @@ export function auxiliaryTagOptions(
   selectedValues: string[] = [],
 ) {
   return mergeOptions(
-    catalog
-      .filter((item) => !item.isPrimaryCategory)
-      .map((item) => ({ value: item.id, label: item.displayName })),
-    selectedValues.map((value) => ({
-      value,
-      label: classificationValueLabel(value, "tag", catalog),
-    })),
+    AUXILIARY_TAG_OPTIONS.map(([value, label]) => ({ value, label })),
+    [
+      ...catalog
+        .filter((item) => !item.isPrimaryCategory)
+        .map((item) => ({ value: item.id, label: item.displayName })),
+      ...selectedValues.map((value) => ({
+        value,
+        label: classificationValueLabel(value, "tag", catalog),
+      })),
+    ],
   );
 }
 
