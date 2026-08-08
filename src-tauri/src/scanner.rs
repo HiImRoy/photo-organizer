@@ -8,7 +8,9 @@ use crate::db::{LibrarySourceRoot, Repository};
 use crate::error::{AppError, AppResult};
 use crate::imaging::process_image;
 use crate::models::{FileSnapshot, ScanProgress, ScanSummary};
-use crate::source_identity::{existing_identity, identity_key, is_same_or_descendant, SourceIdentity};
+use crate::source_identity::{
+    SourceIdentity, existing_identity, identity_key, is_same_or_descendant,
+};
 
 pub fn validate_scan_root(root: &Path) -> AppResult<PathBuf> {
     Ok(existing_identity(root)?.source_path)
@@ -601,7 +603,7 @@ mod tests {
             .list_libraries()
             .expect("parent library")
             .into_iter()
-            .find(|library| library.source_path == source.to_string_lossy().to_string())
+            .find(|library| library.source_identity_key == identity_key(&source))
             .expect("parent library row");
         let before_child = repository
             .list_assets(
@@ -629,7 +631,7 @@ mod tests {
             .list_libraries()
             .expect("libraries after child import")
             .into_iter()
-            .find(|library| library.source_path == child.to_string_lossy().to_string())
+            .find(|library| library.source_identity_key == identity_key(&child))
             .expect("child library row");
         assert_eq!(child_library.parent_library_id, Some(parent.id));
 
@@ -687,14 +689,25 @@ mod tests {
         assert_eq!(after_child_remove.total, 1);
         assert_eq!(after_child_remove.items[0].id, asset_id);
         assert_eq!(after_child_remove.items[0].library_id, parent.id);
-        assert_eq!(hash_file(&image).expect("source hash after child removal"), before);
+        assert_eq!(
+            hash_file(&image).expect("source hash after child removal"),
+            before
+        );
 
         repository
             .remove_library_with_reconciliation(parent.id)
             .expect("remove parent library");
-        assert!(repository.list_libraries().expect("libraries after parent removal").is_empty());
+        assert!(
+            repository
+                .list_libraries()
+                .expect("libraries after parent removal")
+                .is_empty()
+        );
         assert!(image.is_file());
-        assert_eq!(hash_file(&image).expect("source hash after parent removal"), before);
+        assert_eq!(
+            hash_file(&image).expect("source hash after parent removal"),
+            before
+        );
     }
 
     #[test]

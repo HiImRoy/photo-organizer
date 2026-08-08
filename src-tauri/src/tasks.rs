@@ -200,9 +200,7 @@ mod tests {
     #[test]
     fn overlapping_source_scans_are_serialized() {
         let registry = Arc::new(SourceScanRegistry::default());
-        let parent = registry
-            .try_acquire("c:/photos")
-            .expect("parent lock");
+        let parent = registry.try_acquire("c:/photos").expect("parent lock");
         assert!(registry.try_acquire("c:/photos/child").is_none());
         assert!(registry.try_acquire("c:/photos-other").is_some());
         drop(parent);

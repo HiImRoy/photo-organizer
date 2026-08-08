@@ -23,7 +23,8 @@ const INITIAL_MIGRATION: &str = include_str!("../migrations/0001_initial.sql");
 const SEMANTIC_MIGRATION: &str = include_str!("../migrations/0002_semantic_workspace.sql");
 const ORGANIZATION_MIGRATION: &str = include_str!("../migrations/0003_organization_dry_run.sql");
 const LIBRARY_UX_MIGRATION: &str = include_str!("../migrations/0004_library_ux_refinement.sql");
-const LIBRARY_SOURCE_MIGRATION: &str = include_str!("../migrations/0005_library_source_hierarchy.sql");
+const LIBRARY_SOURCE_MIGRATION: &str =
+    include_str!("../migrations/0005_library_source_hierarchy.sql");
 const ASSET_IDENTITY_MIGRATION: &str = include_str!("../migrations/0006_asset_global_identity.sql");
 
 #[derive(Debug, Clone)]
@@ -126,12 +127,14 @@ impl Repository {
                 let mut statement =
                     transaction.prepare("SELECT id, root_path FROM libraries ORDER BY id")?;
                 statement
-                    .query_map([], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)))?
+                    .query_map([], |row| {
+                        Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+                    })?
                     .collect::<Result<Vec<_>, _>>()?
             };
             for (library_id, root_path) in libraries {
-                let source_path = std::fs::canonicalize(&root_path)
-                    .unwrap_or_else(|_| PathBuf::from(&root_path));
+                let source_path =
+                    std::fs::canonicalize(&root_path).unwrap_or_else(|_| PathBuf::from(&root_path));
                 let source_path_string = source_path.to_string_lossy().into_owned();
                 let source_identity_key = identity_key(&source_path);
                 let name = library_name(&source_path, &root_path);
@@ -149,7 +152,9 @@ impl Repository {
                 let mut statement =
                     transaction.prepare("SELECT id, absolute_path FROM assets ORDER BY id")?;
                 statement
-                    .query_map([], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)))?
+                    .query_map([], |row| {
+                        Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+                    })?
                     .collect::<Result<Vec<_>, _>>()?
             };
             for (asset_id, absolute_path) in assets {
@@ -170,7 +175,9 @@ impl Repository {
                  ORDER BY id",
             )?;
             statement
-                .query_map([], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)))?
+                .query_map([], |row| {
+                    Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+                })?
                 .collect::<Result<Vec<_>, _>>()?
         };
         let mut duplicate_libraries = HashMap::<String, Vec<i64>>::new();
@@ -189,7 +196,9 @@ impl Repository {
                  ORDER BY id",
             )?;
             statement
-                .query_map([], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)))?
+                .query_map([], |row| {
+                    Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+                })?
                 .collect::<Result<Vec<_>, _>>()?
         };
         let mut duplicate_assets = HashMap::<String, Vec<i64>>::new();
@@ -269,12 +278,7 @@ impl Repository {
         let source_path = Path::new(root_path);
         let source_identity_key = identity_key(source_path);
         let name = library_name(source_path, root_path);
-        self.begin_scan_with_identity(
-            root_path,
-            &source_identity_key,
-            &name,
-            task_id,
-        )
+        self.begin_scan_with_identity(root_path, &source_identity_key, &name, task_id)
     }
 
     pub fn begin_scan_with_identity(
@@ -906,18 +910,15 @@ impl Repository {
                  ORDER BY a.id",
             )?;
             statement
-                .query_map(
-                    params![library_id, crate::imaging::THUMBNAIL_SPEC],
-                    |row| {
-                        Ok((
-                            row.get::<_, i64>(0)?,
-                            PathBuf::from(row.get::<_, String>(1)?),
-                            row.get::<_, String>(2)?,
-                            row.get::<_, String>(3)?,
-                            row.get::<_, Option<String>>(4)?.map(PathBuf::from),
-                        ))
-                    },
-                )?
+                .query_map(params![library_id, crate::imaging::THUMBNAIL_SPEC], |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        PathBuf::from(row.get::<_, String>(1)?),
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                        row.get::<_, Option<String>>(4)?.map(PathBuf::from),
+                    ))
+                })?
                 .collect::<Result<Vec<_>, _>>()?
         };
 
@@ -957,9 +958,7 @@ impl Repository {
     }
 
     pub fn remove_library(&self, library_id: i64) -> AppResult<bool> {
-        Ok(self
-            .remove_library_with_reconciliation(library_id)?
-            .removed)
+        Ok(self.remove_library_with_reconciliation(library_id)?.removed)
     }
 
     pub fn active_job_ids_for_library(&self, library_id: i64) -> AppResult<Vec<(String, String)>> {
@@ -2152,7 +2151,9 @@ fn merge_duplicate_assets(
                      WHERE asset_id=?1",
                 )?;
                 statement
-                    .query_map([duplicate], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)))?
+                    .query_map([duplicate], |row| {
+                        Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+                    })?
                     .collect::<Result<Vec<_>, _>>()?
             };
             for (duplicate_item_id, plan_id) in organization_items {
@@ -2234,7 +2235,10 @@ fn library_name(source_path: &Path, fallback: &str) -> String {
 }
 
 fn path_depth(value: &str) -> usize {
-    value.split('/').filter(|component| !component.is_empty()).count()
+    value
+        .split('/')
+        .filter(|component| !component.is_empty())
+        .count()
 }
 
 fn relative_path_for_owner(owner_source_path: &Path, absolute_path: &Path) -> String {
@@ -2265,7 +2269,9 @@ fn rebuild_library_hierarchy(transaction: &Transaction<'_>) -> AppResult<()> {
              ORDER BY id",
         )?;
         statement
-            .query_map([], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)))?
+            .query_map([], |row| {
+                Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+            })?
             .collect::<Result<Vec<_>, _>>()?
     };
 

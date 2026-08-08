@@ -105,7 +105,10 @@ pub fn normalize_path_string(value: &str) -> String {
         .as_bytes()
         .get(1)
         .is_some_and(|character| *character == b':')
-        && value.as_bytes().first().is_some_and(u8::is_ascii_alphabetic);
+        && value
+            .as_bytes()
+            .first()
+            .is_some_and(u8::is_ascii_alphabetic);
 
     let mut components = Vec::new();
     for component in value.split('/') {
@@ -184,10 +187,7 @@ mod tests {
         } else {
             "C:/Photos/Café"
         };
-        assert_eq!(
-            normalize_path_string(r"C:\Photos\.\旅行\..\Café"),
-            expected
-        );
+        assert_eq!(normalize_path_string(r"C:\Photos\.\旅行\..\Café"), expected);
         assert_eq!(normalize_path_string(decomposed), "é");
     }
 
@@ -216,7 +216,10 @@ mod tests {
     #[test]
     fn containment_uses_path_components() {
         assert!(is_same_or_descendant("c:/photos", "c:/photos/child"));
-        assert!(is_same_or_descendant("c:/photos", "c:/photos/child/image.jpg"));
+        assert!(is_same_or_descendant(
+            "c:/photos",
+            "c:/photos/child/image.jpg"
+        ));
         assert!(!is_same_or_descendant("c:/photos", "c:/photos-old"));
         assert!(!is_same_or_descendant("c:/photos", "c:/photography"));
     }
@@ -234,7 +237,10 @@ mod tests {
         let source = temporary.path().join("中文 Photos");
         fs::create_dir_all(&source).expect("source");
         let identity = existing_identity(&source).expect("identity");
-        assert_eq!(identity.source_path, fs::canonicalize(source).expect("canonical"));
+        assert_eq!(
+            identity.source_path,
+            fs::canonicalize(source).expect("canonical")
+        );
         assert!(
             identity
                 .identity_key

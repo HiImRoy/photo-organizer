@@ -6,7 +6,7 @@
 
 Status: BLOCKED_FOR_REVIEW
 
-Commit: checkpoint A implementation snapshot (`wip: implement checkpoint A library safety`; see `git log`)
+Commit: checkpoint A implementation snapshot plus verification fixes (see `git log`)
 
 Migration: 0005 Library Source Identity and Hierarchy; 0006 Global Asset Identity and Ownership
 
@@ -17,14 +17,18 @@ Automated tests:
 - Passed: `npm run typecheck`
 - Passed: `npm test` (10 tests)
 - Passed: `npm run build`
-- Not run: `npm run test:rust` because `cargo` is not installed or available on PATH.
+- Passed: `npm run test:rust` (36 tests; Rust toolchain on PATH for the verification shell)
+- Passed: `npm run clippy` (`-D warnings`)
+- Passed: `cargo fmt --manifest-path src-tauri/Cargo.toml -- --check`
+- Passed: `npm run tauri -- info` (WebView2, MSVC, Rust, Cargo, rustup)
+- Passed: `npm run tauri -- build --debug` (EXE, MSI, and NSIS bundles)
 
-Manual verification: Not completed; desktop/Rust smoke verification requires the Rust toolchain.
+Manual verification: Not completed; the interactive Parent/Child/Grandchild desktop flow has not been run. The repository currently contains no tracked synthetic image fixtures beyond `test-data/README.md`; automated Rust integration tests cover the source-boundary and Parent/Child ownership flow.
 
 Known issues:
 
-- Rust unit/integration tests, `cargo fmt`, `clippy`, and desktop smoke verification are pending until a Rust toolchain is available.
-- A must remain blocked for review and must not be treated as completed until those checks pass.
+- Checkpoint A remains blocked for review until the Manual Verification list in `checkpoint-a-library-safety.md` is completed in the desktop application.
+- The installed Rust toolchain is available at `C:\Users\666\.cargo\bin`; a new terminal should be opened if an existing shell does not yet include it in PATH.
 - Checkpoints B–F remain untouched and `NOT_STARTED`.
 
 ## Checkpoint B — Manual Classification + Effective Filter

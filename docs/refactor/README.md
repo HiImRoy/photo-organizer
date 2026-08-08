@@ -1,6 +1,6 @@
 # PhotoOrganizer Refactor Implementation Runbook
 
-状态：Architecture Plan 已冻结，Checkpoint A-F 尚未开始。
+状态：Architecture Plan 已冻结；Checkpoint A 已实现并完成自动化/桌面构建验证，等待交互式 Manual Verification；Checkpoint B-F 尚未开始。
 
 本目录把最终 Revised Architecture Plan 转换为可以逐阶段执行、测试、人工验证和提交的实施 Runbook。文档本身不代表实现已经完成；所有 Checkpoint 都必须按顺序执行，并在完成后停止等待审核。
 

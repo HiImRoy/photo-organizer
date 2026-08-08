@@ -95,7 +95,7 @@ pub fn start_scan(
     let source_identity =
         validate_scan_root_with_app_data(Path::new(&root_path), &state.paths.data_dir)
             .map_err(ipc_error)?;
-    let _scan_guard = state
+    let scan_guard = state
         .source_scans
         .try_acquire(&source_identity.identity_key)
         .ok_or_else(|| "该图库或其嵌套图库正在扫描，请稍后重试".to_owned())?;
@@ -103,21 +103,20 @@ pub fn start_scan(
     let response = StartScanResponse {
         task_id: task_id.clone(),
     };
-    spawn_scan_task(
+    spawn_scan_task(ScanTask {
         app,
-        state.repository.clone(),
-        state.paths.clone(),
-        state.tasks.clone(),
-        task_id.clone(),
+        repository: state.repository.clone(),
+        paths: state.paths.clone(),
+        tasks: state.tasks.clone(),
+        task_id: task_id.clone(),
         cancellation,
-        source_identity.source_path,
+        root: source_identity.source_path,
         scan_guard,
-        None,
-    )
+        library_id_hint: None,
+    })
     .map_err(ipc_error)
-    .or_else(|error| {
+    .inspect_err(|_| {
         state.tasks.remove(&task_id);
-        Err(error)
     })?;
 
     Ok(response)
@@ -134,8 +133,9 @@ pub fn rescan_library(
         .library_source_root(library_id)
         .map_err(ipc_error)?
         .ok_or_else(|| format!("library {library_id} does not exist"))?;
-    let source_identity = validate_scan_root_with_app_data(&source.source_path, &state.paths.data_dir)
-        .map_err(ipc_error)?;
+    let source_identity =
+        validate_scan_root_with_app_data(&source.source_path, &state.paths.data_dir)
+            .map_err(ipc_error)?;
     let scan_guard = state
         .source_scans
         .try_acquire(&source_identity.identity_key)
@@ -144,26 +144,25 @@ pub fn rescan_library(
     let response = StartScanResponse {
         task_id: task_id.clone(),
     };
-    spawn_scan_task(
+    spawn_scan_task(ScanTask {
         app,
-        state.repository.clone(),
-        state.paths.clone(),
-        state.tasks.clone(),
-        task_id.clone(),
+        repository: state.repository.clone(),
+        paths: state.paths.clone(),
+        tasks: state.tasks.clone(),
+        task_id: task_id.clone(),
         cancellation,
-        source_identity.source_path,
+        root: source_identity.source_path,
         scan_guard,
-        Some(library_id),
-    )
+        library_id_hint: Some(library_id),
+    })
     .map_err(ipc_error)
-    .or_else(|error| {
+    .inspect_err(|_| {
         state.tasks.remove(&task_id);
-        Err(error)
     })?;
     Ok(response)
 }
 
-fn spawn_scan_task(
+struct ScanTask {
     app: tauri::AppHandle,
     repository: Repository,
     paths: AppPaths,
@@ -173,7 +172,20 @@ fn spawn_scan_task(
     root: PathBuf,
     scan_guard: SourceScanGuard,
     library_id_hint: Option<i64>,
-) -> AppResult<()> {
+}
+
+fn spawn_scan_task(task: ScanTask) -> AppResult<()> {
+    let ScanTask {
+        app,
+        repository,
+        paths,
+        tasks,
+        task_id,
+        cancellation,
+        root,
+        scan_guard,
+        library_id_hint,
+    } = task;
     let thread_task_id = task_id.clone();
     std::thread::Builder::new()
         .name(format!("scan-{thread_task_id}"))
@@ -256,7 +268,7 @@ pub fn get_preview_data_url(
 
 #[tauri::command]
 pub fn remove_library(library_id: i64, state: State<'_, AppState>) -> Result<bool, String> {
-    let scan_guard = state
+    let _scan_guard = state
         .repository
         .library_source_root(library_id)
         .map_err(ipc_error)?
