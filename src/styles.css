@@ -4590,3 +4590,166 @@ button:disabled {
     transition: none;
   }
 }
+
+/* Clear grayscale hierarchy
+   The canvas is the deepest layer, panels sit one step above it, and controls
+   are intentionally lighter so the sidebar remains scannable without color. */
+:root {
+  --surface-0: #161616;
+  --surface-1: #242424;
+  --surface-2: #2e2e2e;
+  --surface-3: #393939;
+  --surface-control: #414141;
+  --surface-control-hover: #4b4b4b;
+  --surface-control-pressed: #282828;
+  --line-subtle: rgba(255, 255, 255, 0.11);
+  --line-visible: rgba(255, 255, 255, 0.2);
+  --text-high: #f0f0f0;
+  --text-normal: #c9c9c9;
+  --text-low: #929292;
+}
+
+.photo-app {
+  background:
+    radial-gradient(circle at 0% 0%, rgba(255, 255, 255, 0.04), transparent 28%),
+    linear-gradient(145deg, #2b2b2b 0%, var(--app) 48%, #1c1c1c 100%);
+}
+
+.topbar {
+  background: linear-gradient(145deg, #363636, #292929);
+}
+
+.left-panel,
+.right-panel {
+  background: linear-gradient(160deg, #303030 0%, var(--surface-1) 54%, #202020 100%);
+}
+
+.left-panel.is-collapsed,
+.right-panel.is-collapsed {
+  background: linear-gradient(160deg, #343434, #252525);
+}
+
+.panel-section {
+  border-color: var(--line-visible);
+  background: linear-gradient(145deg, rgba(61, 61, 61, 0.96), rgba(47, 47, 47, 0.98));
+  box-shadow:
+    10px 12px 24px rgba(0, 0, 0, 0.34),
+    -6px -6px 15px rgba(255, 255, 255, 0.035),
+    inset 0 1px 0 rgba(255, 255, 255, 0.06);
+}
+
+.panel-section-heading {
+  min-height: 23px;
+  padding-bottom: 11px;
+  color: var(--text-normal);
+}
+
+.panel-section-heading small {
+  display: grid;
+  min-width: 25px;
+  height: 23px;
+  padding: 0 7px;
+  place-items: center;
+  color: var(--text-high);
+  border-color: rgba(255, 255, 255, 0.24);
+  border-radius: 11px;
+  background: linear-gradient(145deg, #343434, #252525);
+  box-shadow:
+    inset 2px 2px 4px rgba(0, 0, 0, 0.38),
+    inset -2px -2px 4px rgba(255, 255, 255, 0.035);
+  font-variant-numeric: tabular-nums;
+}
+
+.panel-section-heading small.is-placeholder {
+  visibility: hidden;
+}
+
+.nav-row:not(.is-active) {
+  background: rgba(255, 255, 255, 0.025);
+}
+
+.nav-row:not(.is-active):hover {
+  border-color: var(--line-subtle);
+  background: linear-gradient(145deg, #484848, #373737);
+}
+
+.nav-row.is-active {
+  border-color: rgba(218, 228, 231, 0.56);
+  background: linear-gradient(145deg, #5c6264, #45494a);
+  box-shadow:
+    inset 3px 3px 7px rgba(0, 0, 0, 0.35),
+    inset -3px -3px 6px rgba(255, 255, 255, 0.06),
+    4px 5px 10px rgba(0, 0, 0, 0.24);
+}
+
+.filter-chip {
+  color: var(--text-normal);
+  border-color: rgba(255, 255, 255, 0.2);
+  background: linear-gradient(145deg, var(--surface-control), #333333);
+  box-shadow:
+    6px 7px 13px rgba(0, 0, 0, 0.42),
+    -4px -4px 9px rgba(255, 255, 255, 0.045),
+    inset 0 1px 0 rgba(255, 255, 255, 0.1);
+}
+
+.filter-chip:hover:not(.is-active) {
+  border-color: rgba(255, 255, 255, 0.36);
+  background: linear-gradient(145deg, var(--surface-control-hover), #3a3a3a);
+}
+
+.filter-chip.is-active {
+  border-color: rgba(235, 242, 244, 0.72);
+  background: linear-gradient(145deg, #62696b, #494e50);
+  box-shadow:
+    inset 3px 3px 7px rgba(0, 0, 0, 0.4),
+    inset -3px -3px 6px rgba(255, 255, 255, 0.055);
+}
+
+.match-mode {
+  border-color: var(--line-subtle);
+  background: var(--surface-control-pressed);
+}
+
+.match-mode button.is-active {
+  color: var(--text-high);
+  background: linear-gradient(145deg, #505050, #383838);
+}
+
+.left-panel-footer {
+  border-color: var(--line-visible);
+  background: linear-gradient(145deg, #3a3a3a, #292929);
+}
+
+.center-workspace {
+  background:
+    radial-gradient(circle at 50% 0%, rgba(255, 255, 255, 0.045), transparent 34%),
+    linear-gradient(150deg, var(--surface-0), #101010 58%, #1d1d1d);
+}
+
+.content-toolbar {
+  background: linear-gradient(180deg, #292929, #212121);
+  border-bottom-color: var(--line-visible);
+}
+
+.asset-card {
+  border-color: var(--line-subtle);
+  background: linear-gradient(145deg, #383838, #2a2a2a);
+}
+
+.asset-card:hover {
+  border-color: var(--line-visible);
+  background: linear-gradient(145deg, #444444, #333333);
+}
+
+.detail-preview,
+.detail-section {
+  border-color: var(--line-visible);
+  background: linear-gradient(145deg, #383838, #2b2b2b);
+}
+
+.analysis-grid > div,
+.classification-field,
+.classification-tags-editor {
+  border-color: var(--line-subtle);
+  background: linear-gradient(145deg, #414141, #303030);
+}

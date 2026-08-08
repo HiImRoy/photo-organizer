@@ -211,6 +211,30 @@ describe("PhotoOrganizer application shell", () => {
     expect(screen.getByText("语义模型未就绪")).toBeInTheDocument();
   });
 
+  it("reserves the semantic filter count badge before a category is selected", async () => {
+    const user = userEvent.setup();
+    api.fetchLibraries.mockResolvedValue([library]);
+    api.fetchSemanticCatalog.mockResolvedValue([
+      {
+        id: "portrait",
+        displayName: "人像",
+        threshold: 0.2,
+        isPrimaryCategory: true,
+      },
+    ]);
+    render(<App />);
+
+    const categoryButton = await screen.findByRole("button", { name: "人像" });
+    const categorySection = screen.getByText("主类别").closest(".panel-section");
+    const countBadge = categorySection?.querySelector(".panel-section-heading small");
+
+    expect(countBadge).toHaveClass("is-placeholder");
+    await user.click(categoryButton);
+
+    expect(countBadge).not.toHaveClass("is-placeholder");
+    expect(countBadge).toHaveTextContent("1");
+  });
+
   it("opens the folder chooser and starts a scan", async () => {
     const user = userEvent.setup();
     api.chooseLibraryFolder.mockResolvedValue("C:\\fixtures\\emoji 😀");

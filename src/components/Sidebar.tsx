@@ -667,17 +667,23 @@ function LibraryTreeNode({
 function PanelSection({
   title,
   trailing,
+  reserveTrailing = false,
   children,
 }: {
   title: string;
   trailing?: string;
+  reserveTrailing?: boolean;
   children: React.ReactNode;
 }) {
   return (
     <section className="panel-section">
       <div className="panel-section-heading">
         <span>{title}</span>
-        {trailing ? <small>{trailing}</small> : null}
+        {trailing || reserveTrailing ? (
+          <small className={trailing ? undefined : "is-placeholder"} aria-hidden={!trailing}>
+            {trailing ?? "0"}
+          </small>
+        ) : null}
       </div>
       {children}
     </section>
@@ -705,6 +711,7 @@ function SemanticFilterSection({
     <PanelSection
       title={title}
       trailing={selectedValues.length ? `${selectedValues.length}` : undefined}
+      reserveTrailing
     >
       <div className="chip-grid">
         {labels.map((label) => {
