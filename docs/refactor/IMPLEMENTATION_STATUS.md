@@ -75,7 +75,7 @@ Pending: DetailPanel single-asset editor, Auxiliary Tag ADD/REMOVE, Restore Auto
 Known issues:
 
 - B cannot be marked `COMPLETED` until the manual checklist in `checkpoint-b-classification-filter.md` is run in the desktop app.
-- The classification editor is collapsed by default, uses Chinese labels and select-only controls, and no longer accepts raw classification IDs as text input.
+- The classification editor is collapsed by default, uses Chinese labels and selection-only controls, uses color swatches for main-color choices, and no longer accepts raw classification IDs as text input.
 - Checkpoint A remains `BLOCKED_FOR_REVIEW`; this implementation does not silently change A's status.
 - Objective Numeric Feature remains read-only and outside the Derived Classification Registry.
 

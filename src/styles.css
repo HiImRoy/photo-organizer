@@ -756,7 +756,8 @@ select:disabled {
 [data-color="purple"] {
   background: #715f87;
 }
-[data-color="gray"] {
+[data-color="gray"],
+[data-color="neutral"] {
   background: #777c83;
 }
 .range-filters {
@@ -1451,6 +1452,9 @@ select:disabled {
   gap: 5px;
   min-width: 0;
 }
+.classification-control {
+  flex-wrap: wrap;
+}
 .classification-field-heading {
   justify-content: space-between;
 }
@@ -1484,6 +1488,38 @@ select:disabled {
   height: auto;
   min-height: 92px;
   padding: 4px 7px;
+}
+.classification-color-picker {
+  display: grid;
+  grid-template-columns: repeat(8, minmax(0, 1fr));
+  flex: 1 1 100%;
+  width: 100%;
+  gap: 5px;
+  min-width: 0;
+}
+.classification-color-choice {
+  display: grid;
+  width: 100%;
+  aspect-ratio: 1;
+  padding: 3px;
+  place-items: center;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: transparent;
+  cursor: pointer;
+}
+.classification-color-choice i {
+  width: 100%;
+  aspect-ratio: 1;
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  border-radius: 4px;
+  box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.18);
+}
+.classification-color-choice:hover,
+.classification-color-choice.is-active {
+  border-color: #617d9a;
+  background: #303c49;
+  box-shadow: var(--shadow-pressed);
 }
 .classification-control .secondary-action,
 .classification-tag-add .secondary-action {

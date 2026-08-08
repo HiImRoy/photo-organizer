@@ -31,13 +31,9 @@ import {
   subscribeScanProgress,
   subscribeSemanticProgress,
 } from "./api";
-import {
-  COLOR_OPTIONS,
-  primaryCategoryOptions,
-  SATURATION_OPTIONS,
-  TONE_OPTIONS,
-} from "./classificationLabels";
+import { primaryCategoryOptions, SATURATION_OPTIONS, TONE_OPTIONS } from "./classificationLabels";
 import { AssetCard } from "./components/AssetCard";
+import { ColorSwatches } from "./components/ColorSwatches";
 import { DetailPanel } from "./components/DetailPanel";
 import { OrganizationWorkspace } from "./components/OrganizationWorkspace";
 import {
@@ -1021,21 +1017,7 @@ export default function App() {
             </select>
           ) : null}
           {batchField === "dominant_color_category" ? (
-            <select
-              multiple
-              size={3}
-              value={batchValue}
-              onChange={(event) =>
-                setBatchValue(Array.from(event.target.selectedOptions, (option) => option.value))
-              }
-              aria-label="选择主色"
-            >
-              {COLOR_OPTIONS.map(([value, label]) => (
-                <option value={value} key={value}>
-                  {label}
-                </option>
-              ))}
-            </select>
+            <ColorSwatches value={batchValue} onChange={setBatchValue} ariaLabel="选择主色" />
           ) : null}
           {batchField === "saturation_level" ? (
             <select

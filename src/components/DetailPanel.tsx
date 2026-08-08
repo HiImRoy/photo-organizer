@@ -5,7 +5,6 @@ import {
   classificationSourceLabel,
   classificationValueLabel,
   classificationValuesLabel,
-  COLOR_OPTIONS,
   primaryCategoryOptions,
   SATURATION_OPTIONS,
   TONE_OPTIONS,
@@ -17,6 +16,7 @@ import type {
   SemanticLabelDescriptor,
   SemanticRuntimeStatus,
 } from "../types";
+import { ColorSwatches } from "./ColorSwatches";
 import { PanelIcon, PlayIcon } from "./Icons";
 import { PreviewNavigator, type PreviewNavigatorProps } from "./PreviewNavigator";
 import { Thumbnail } from "./Thumbnail";
@@ -358,22 +358,7 @@ function ClassificationEditor({
                 catalog,
               )}
               source={classification.dominantColorCategories.source}
-              control={
-                <select
-                  multiple
-                  size={4}
-                  value={colors}
-                  onChange={(event) =>
-                    setColors(Array.from(event.target.selectedOptions, (option) => option.value))
-                  }
-                >
-                  {COLOR_OPTIONS.map(([value, label]) => (
-                    <option value={value} key={value}>
-                      {label}
-                    </option>
-                  ))}
-                </select>
-              }
+              control={<ColorSwatches value={colors} onChange={setColors} ariaLabel="选择主色" />}
               onSave={() => save("dominant_color_category", colors)}
               onRestore={() => onRestoreAuto?.(asset.id, "dominant_color_category")}
             />
