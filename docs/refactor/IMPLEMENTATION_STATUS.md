@@ -17,17 +17,20 @@ Automated tests:
 - Passed: `npm run typecheck`
 - Passed: `npm test` (10 tests)
 - Passed: `npm run build`
-- Passed: `npm run test:rust` (36 tests; Rust toolchain on PATH for the verification shell)
+- Passed: `npm run test:rust` (38 tests; Rust toolchain on PATH for the verification shell)
 - Passed: `npm run clippy` (`-D warnings`)
 - Passed: `cargo fmt --manifest-path src-tauri/Cargo.toml -- --check`
 - Passed: `npm run tauri -- info` (WebView2, MSVC, Rust, Cargo, rustup)
 - Passed: `npm run tauri -- build --debug` (EXE, MSI, and NSIS bundles)
+- Passed: import performance regression tests (shared 640px cache, bounded resize,
+  full fingerprint reuse for small sources)
 
 Manual verification: Not completed; the interactive Parent/Child/Grandchild desktop flow has not been run. The repository currently contains no tracked synthetic image fixtures beyond `test-data/README.md`; automated Rust integration tests cover the source-boundary and Parent/Child ownership flow.
 
 Known issues:
 
 - Checkpoint A remains blocked for review until the Manual Verification list in `checkpoint-a-library-safety.md` is completed in the desktop application.
+- Import performance optimization is implemented in `docs/plans/0005-import-performance.md`; manual speed comparison is pending.
 - The installed Rust toolchain is available at `C:\Users\666\.cargo\bin`; a new terminal should be opened if an existing shell does not yet include it in PATH.
 - Checkpoints B–F remain untouched and `NOT_STARTED`.
 

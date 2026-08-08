@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::fs::{self, File, OpenOptions};
-use std::io::{BufReader, Write};
+use std::io::{BufRead, BufReader, Cursor, Seek, Write};
 use std::path::{Path, PathBuf};
 
 use exif::{In, Tag, Value};
@@ -10,8 +10,8 @@ use image::{DynamicImage, GenericImageView, RgbaImage};
 use crate::error::{AppError, AppResult};
 use crate::models::{BasicImageFeatures, ExifMetadata, ProcessedImage};
 
-pub const THUMBNAIL_SPEC: &str = "grid-320-v1";
-pub const ANALYSIS_VERSION: &str = "basic-color-v2";
+pub const THUMBNAIL_SPEC: &str = "grid-640-v1";
+pub const ANALYSIS_VERSION: &str = "basic-color-v3";
 pub const SCREEN_PREVIEW_SPEC: &str = "screen-2560-v1";
 
 pub fn process_image(
@@ -19,18 +19,37 @@ pub fn process_image(
     thumbnail_dir: &Path,
     cache_key: &str,
 ) -> AppResult<ProcessedImage> {
-    let exif = read_exif(source_path);
-    let decoded = image::ImageReader::open(source_path)?
-        .with_guessed_format()?
-        .decode()?;
+    process_image_with_source_bytes(source_path, thumbnail_dir, cache_key, None)
+}
+
+pub fn process_image_with_source_bytes(
+    source_path: &Path,
+    thumbnail_dir: &Path,
+    cache_key: &str,
+    source_bytes: Option<&[u8]>,
+) -> AppResult<ProcessedImage> {
+    let exif = source_bytes
+        .map(read_exif_bytes)
+        .unwrap_or_else(|| read_exif(source_path));
+    let decoded = match source_bytes {
+        Some(bytes) => image::load_from_memory(bytes)?,
+        None => image::ImageReader::open(source_path)?
+            .with_guessed_format()?
+            .decode()?,
+    };
     let oriented = apply_orientation(decoded, exif.orientation);
     let (width, height) = oriented.dimensions();
-    let analysis_image = oriented.thumbnail(320, 320).to_rgba8();
-    let features = analyze_rgba(&analysis_image);
+    let thumbnail = bounded_thumbnail(&oriented, 640, 640).to_rgba8();
+    let analysis_step = if thumbnail.width() > 320 || thumbnail.height() > 320 {
+        2
+    } else {
+        1
+    };
+    let features = analyze_rgba_with_step(&thumbnail, analysis_step);
 
     fs::create_dir_all(thumbnail_dir)?;
     let thumbnail_path = thumbnail_dir.join(format!("{cache_key}-{THUMBNAIL_SPEC}.jpg"));
-    write_thumbnail_once(&oriented, &thumbnail_path)?;
+    write_thumbnail_once(&thumbnail, &thumbnail_path)?;
 
     Ok(ProcessedImage {
         width,
@@ -52,14 +71,13 @@ pub fn load_oriented_image(source_path: &Path) -> AppResult<DynamicImage> {
     Ok(apply_orientation(decoded, exif.orientation))
 }
 
-fn write_thumbnail_once(image: &DynamicImage, target: &Path) -> AppResult<()> {
+fn write_thumbnail_once(image: &RgbaImage, target: &Path) -> AppResult<()> {
     if target.is_file() {
         return Ok(());
     }
 
-    let thumbnail = image.thumbnail(640, 640);
     let mut encoded = Vec::new();
-    JpegEncoder::new_with_quality(&mut encoded, 84).encode_image(&thumbnail)?;
+    JpegEncoder::new_with_quality(&mut encoded, 84).encode_image(image)?;
 
     match OpenOptions::new().write(true).create_new(true).open(target) {
         Ok(mut file) => {
@@ -72,8 +90,27 @@ fn write_thumbnail_once(image: &DynamicImage, target: &Path) -> AppResult<()> {
     Ok(())
 }
 
+fn bounded_thumbnail(image: &DynamicImage, max_width: u32, max_height: u32) -> DynamicImage {
+    let (width, height) = image.dimensions();
+    if width == 0 || height == 0 {
+        return image.clone();
+    }
+
+    let scale = (f64::from(max_width) / f64::from(width))
+        .min(f64::from(max_height) / f64::from(height))
+        .min(1.0);
+    let width = (f64::from(width) * scale).round().max(1.0) as u32;
+    let height = (f64::from(height) * scale).round().max(1.0) as u32;
+    image.thumbnail_exact(width, height)
+}
+
 pub fn analyze_rgba(image: &RgbaImage) -> BasicImageFeatures {
+    analyze_rgba_with_step(image, 1)
+}
+
+fn analyze_rgba_with_step(image: &RgbaImage, sample_step: u32) -> BasicImageFeatures {
     let (left, top, right, bottom) = analysis_bounds(image);
+    let sample_step = sample_step.max(1) as usize;
     let mut brightness = Vec::new();
     let mut saturation = Vec::new();
     let mut color_bins: HashMap<u16, (u64, u64, u64, u64)> = HashMap::new();
@@ -89,8 +126,8 @@ pub fn analyze_rgba(image: &RgbaImage) -> BasicImageFeatures {
     let mut yb_sum = 0.0;
     let mut yb_sq_sum = 0.0;
 
-    for y in top..bottom {
-        for x in left..right {
+    for y in (top..bottom).step_by(sample_step) {
+        for x in (left..right).step_by(sample_step) {
             let pixel = image.get_pixel(x, y).0;
             if pixel[3] < 16 {
                 continue;
@@ -441,7 +478,15 @@ fn read_exif(path: &Path) -> ExifMetadata {
             ..ExifMetadata::default()
         };
     };
-    let Ok(exif) = exif::Reader::new().read_from_container(&mut BufReader::new(file)) else {
+    read_exif_reader(&mut BufReader::new(file))
+}
+
+fn read_exif_bytes(bytes: &[u8]) -> ExifMetadata {
+    read_exif_reader(&mut Cursor::new(bytes))
+}
+
+fn read_exif_reader<R: BufRead + Seek>(reader: &mut R) -> ExifMetadata {
+    let Ok(exif) = exif::Reader::new().read_from_container(reader) else {
         return ExifMetadata {
             orientation: 1,
             ..ExifMetadata::default()
@@ -619,6 +664,19 @@ mod tests {
         let first = process_image(&source, &cache_dir, "same-fingerprint").expect("process image");
         let first_thumb = fs::read(&first.thumbnail_path).expect("read thumbnail");
         let second = process_image(&source, &cache_dir, "same-fingerprint").expect("cache hit");
+        let source_bytes = fs::read(&source).expect("source bytes");
+        let from_bytes = process_image_with_source_bytes(
+            &source,
+            &cache_dir,
+            "bytes-fingerprint",
+            Some(&source_bytes),
+        )
+        .expect("process from source bytes");
+        let cached_dimensions = image::ImageReader::open(&first.thumbnail_path)
+            .expect("open thumbnail")
+            .decode()
+            .expect("decode thumbnail")
+            .dimensions();
 
         assert_eq!(fs::read(&source).expect("source after"), before);
         assert_eq!(first.thumbnail_path, second.thumbnail_path);
@@ -626,7 +684,36 @@ mod tests {
             fs::read(&second.thumbnail_path).expect("second thumb"),
             first_thumb
         );
+        assert_eq!(first.features, from_bytes.features);
+        assert_eq!(first.features.algorithm_version, ANALYSIS_VERSION);
+        assert_eq!(cached_dimensions, (8, 8));
+        assert!(
+            first
+                .thumbnail_path
+                .ends_with(&format!("{THUMBNAIL_SPEC}.jpg"))
+        );
         assert!(Path::new(&first.thumbnail_path).starts_with(&cache_dir));
         assert!(!source_dir.join("thumbnails").exists());
+    }
+
+    #[test]
+    fn thumbnail_cache_uses_one_bounded_resize_for_wide_image() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let source = temp.path().join("wide.png");
+        let cache_dir = temp.path().join("cache");
+        DynamicImage::ImageRgba8(RgbaImage::from_pixel(1200, 600, Rgba([30, 120, 210, 255])))
+            .save(&source)
+            .expect("save wide fixture");
+
+        let processed =
+            process_image(&source, &cache_dir, "wide-fingerprint").expect("process wide fixture");
+        let dimensions = image::ImageReader::open(&processed.thumbnail_path)
+            .expect("open wide thumbnail")
+            .decode()
+            .expect("decode wide thumbnail")
+            .dimensions();
+
+        assert_eq!(dimensions, (640, 320));
+        assert_eq!(processed.features.algorithm_version, ANALYSIS_VERSION);
     }
 }

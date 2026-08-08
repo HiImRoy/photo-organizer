@@ -6,7 +6,7 @@ use std::time::UNIX_EPOCH;
 
 use crate::db::{LibrarySourceRoot, Repository};
 use crate::error::{AppError, AppResult};
-use crate::imaging::process_image;
+use crate::imaging::process_image_with_source_bytes;
 use crate::models::{FileSnapshot, ScanProgress, ScanSummary};
 use crate::source_identity::{
     SourceIdentity, existing_identity, identity_key, is_same_or_descendant,
@@ -32,6 +32,13 @@ pub fn is_supported_image(path: &Path) -> bool {
                 "jpg" | "jpeg" | "png" | "webp"
             )
         })
+}
+
+const MAX_IN_MEMORY_SOURCE_BYTES: u64 = 32 * 1024 * 1024;
+
+struct FingerprintedSource {
+    fingerprint: String,
+    bytes: Option<Vec<u8>>,
 }
 
 pub fn scan_library<F>(
@@ -161,7 +168,7 @@ where
             }
         }
 
-        let fingerprint = match hash_file(&path) {
+        let fingerprinted_source = match read_fingerprinted_source(&path) {
             Ok(value) => value,
             Err(error) => {
                 let fallback = fallback_fingerprint(&snapshot);
@@ -180,14 +187,20 @@ where
                 continue;
             }
         };
+        let fingerprint = &fingerprinted_source.fingerprint;
 
-        match process_image(&path, thumbnail_dir, &fingerprint) {
+        match process_image_with_source_bytes(
+            &path,
+            thumbnail_dir,
+            fingerprint,
+            fingerprinted_source.bytes.as_deref(),
+        ) {
             Ok(processed) => {
                 repository.upsert_processed_asset(
                     library_id,
                     generation,
                     &snapshot,
-                    &fingerprint,
+                    fingerprint,
                     &processed,
                 )?;
                 progress.succeeded += 1;
@@ -198,7 +211,7 @@ where
                     library_id,
                     generation,
                     &snapshot,
-                    &fingerprint,
+                    fingerprint,
                     &error.to_string(),
                 )?;
                 progress.failed += 1;
@@ -282,6 +295,23 @@ pub fn hash_file(path: &Path) -> AppResult<String> {
     Ok(hasher.finalize().to_hex().to_string())
 }
 
+fn read_fingerprinted_source(path: &Path) -> AppResult<FingerprintedSource> {
+    let file_size = fs::metadata(path)?.len();
+    if file_size <= MAX_IN_MEMORY_SOURCE_BYTES {
+        let bytes = fs::read(path)?;
+        let fingerprint = blake3::hash(&bytes).to_hex().to_string();
+        return Ok(FingerprintedSource {
+            fingerprint,
+            bytes: Some(bytes),
+        });
+    }
+
+    Ok(FingerprintedSource {
+        fingerprint: hash_file(path)?,
+        bytes: None,
+    })
+}
+
 fn fallback_fingerprint(snapshot: &FileSnapshot) -> String {
     let value = format!(
         "unreadable\0{}\0{}\0{}",
@@ -342,6 +372,22 @@ mod tests {
         DynamicImage::ImageRgba8(RgbaImage::from_pixel(dimensions.0, dimensions.1, pixel))
             .save(path)
             .expect("save fixture");
+    }
+
+    #[test]
+    fn small_source_fingerprint_reuses_the_read_bytes_for_decode() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let source = temp.path().join("small-source.bin");
+        let bytes = b"synthetic source bytes";
+        fs::write(&source, bytes).expect("write source");
+
+        let fingerprinted = read_fingerprinted_source(&source).expect("fingerprint source");
+
+        assert_eq!(fingerprinted.bytes.as_deref(), Some(bytes.as_slice()));
+        assert_eq!(
+            fingerprinted.fingerprint,
+            hash_file(&source).expect("hash source")
+        );
     }
 
     #[test]
