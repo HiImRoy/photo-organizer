@@ -8,10 +8,31 @@ use std::time::{Duration, Instant, UNIX_EPOCH};
 use crate::db::{LibrarySourceRoot, Repository};
 use crate::error::{AppError, AppResult};
 use crate::imaging::process_image_with_source_bytes;
-use crate::models::{FileSnapshot, ScanPerformance, ScanProgress, ScanSummary};
+use crate::models::{FileSnapshot, ProcessedImage, ScanPerformance, ScanProgress, ScanSummary};
 use crate::source_identity::{
     SourceIdentity, existing_identity, identity_key, is_same_or_descendant,
 };
+
+const IMPORT_IMAGE_WORKERS: usize = 2;
+
+struct PendingImageWork {
+    path: PathBuf,
+    snapshot: FileSnapshot,
+    library_id: i64,
+    generation: i64,
+}
+
+struct ImageWorkResult {
+    path: PathBuf,
+    snapshot: FileSnapshot,
+    library_id: i64,
+    generation: i64,
+    fingerprint: Option<String>,
+    processed: Option<ProcessedImage>,
+    error: Option<String>,
+    fingerprint_us: u64,
+    image_processing_us: u64,
+}
 
 pub fn validate_scan_root(root: &Path) -> AppResult<PathBuf> {
     Ok(existing_identity(root)?.source_path)
@@ -344,6 +365,7 @@ where
     progress.error = None;
     reporter.force(&mut progress, &performance)?;
 
+    let mut pending_work = Vec::with_capacity(IMPORT_IMAGE_WORKERS);
     for path in candidates {
         if cancelled.load(Ordering::Relaxed) {
             progress.status = "cancelled".into();
@@ -429,95 +451,37 @@ where
             }
         }
 
-        let fingerprint_started = Instant::now();
-        let fingerprinted_source = match read_fingerprinted_source(&path) {
-            Ok(value) => {
-                add_elapsed(&mut performance.fingerprint_us, fingerprint_started);
-                value
-            }
-            Err(error) => {
-                add_elapsed(&mut performance.fingerprint_us, fingerprint_started);
-                let fallback = fallback_fingerprint(&snapshot);
-                let database_started = Instant::now();
-                let database_result = repository.upsert_failed_asset(
-                    library_id,
-                    generation,
-                    &snapshot,
-                    &fallback,
-                    &error.to_string(),
-                );
-                add_elapsed(&mut performance.database_write_us, database_started);
-                database_result?;
-                progress.processed += 1;
-                progress.failed += 1;
-                performance.failed_files += 1;
-                progress.error = Some(error.to_string());
-                reporter.report(&mut progress, &performance)?;
-                continue;
-            }
-        };
-        let fingerprint = &fingerprinted_source.fingerprint;
-
-        let image_started = Instant::now();
-        let image_result = process_image_with_source_bytes(
-            &path,
-            thumbnail_dir,
-            fingerprint,
-            fingerprinted_source.bytes.as_deref(),
-        );
-        let image_processing_us = elapsed_us(image_started);
-        performance.image_processing_us = performance
-            .image_processing_us
-            .saturating_add(image_processing_us);
-        match image_result {
-            Ok(processed) => {
-                performance.exif_us = performance
-                    .exif_us
-                    .saturating_add(processed.timings.exif_us);
-                performance.decode_us = performance
-                    .decode_us
-                    .saturating_add(processed.timings.decode_us);
-                performance.resize_us = performance
-                    .resize_us
-                    .saturating_add(processed.timings.resize_us);
-                performance.feature_analysis_us = performance
-                    .feature_analysis_us
-                    .saturating_add(processed.timings.feature_analysis_us);
-                performance.thumbnail_write_us = performance
-                    .thumbnail_write_us
-                    .saturating_add(processed.timings.thumbnail_write_us);
-                let database_started = Instant::now();
-                let database_result = repository.upsert_processed_asset(
-                    library_id,
-                    generation,
-                    &snapshot,
-                    fingerprint,
-                    &processed,
-                );
-                add_elapsed(&mut performance.database_write_us, database_started);
-                database_result?;
-                progress.succeeded += 1;
-                performance.processed_files += 1;
-                progress.error = None;
-            }
-            Err(error) => {
-                let database_started = Instant::now();
-                let database_result = repository.upsert_failed_asset(
-                    library_id,
-                    generation,
-                    &snapshot,
-                    fingerprint,
-                    &error.to_string(),
-                );
-                add_elapsed(&mut performance.database_write_us, database_started);
-                database_result?;
-                progress.failed += 1;
-                performance.failed_files += 1;
-                progress.error = Some(error.to_string());
-            }
+        pending_work.push(PendingImageWork {
+            path,
+            snapshot,
+            library_id,
+            generation,
+        });
+        if pending_work.len() < IMPORT_IMAGE_WORKERS {
+            continue;
         }
-        progress.processed += 1;
-        reporter.report(&mut progress, &performance)?;
+
+        if let Some(next) = pending_work.last() {
+            progress.current_path = Some(path_to_string(&next.path));
+            reporter.force(&mut progress, &performance)?;
+        }
+        for result in process_image_work_batch(std::mem::take(&mut pending_work), thumbnail_dir) {
+            progress.current_path = Some(path_to_string(&result.path));
+            apply_image_work_result(repository, result, &mut progress, &mut performance)?;
+            reporter.report(&mut progress, &performance)?;
+        }
+    }
+
+    if !pending_work.is_empty() {
+        if let Some(next) = pending_work.last() {
+            progress.current_path = Some(path_to_string(&next.path));
+            reporter.force(&mut progress, &performance)?;
+        }
+        for result in process_image_work_batch(pending_work, thumbnail_dir) {
+            progress.current_path = Some(path_to_string(&result.path));
+            apply_image_work_result(repository, result, &mut progress, &mut performance)?;
+            reporter.report(&mut progress, &performance)?;
+        }
     }
 
     progress.missing = if complete_job {
@@ -531,6 +495,148 @@ where
     progress.error = None;
     reporter.force(&mut progress, &performance)?;
     Ok(summary_from_progress(&progress, library_id))
+}
+
+fn process_image_work_batch(
+    work: Vec<PendingImageWork>,
+    thumbnail_dir: &Path,
+) -> Vec<ImageWorkResult> {
+    std::thread::scope(|scope| {
+        let handles = work
+            .into_iter()
+            .map(|work| {
+                let thumbnail_dir = thumbnail_dir.to_path_buf();
+                scope.spawn(move || process_image_work(work, thumbnail_dir))
+            })
+            .collect::<Vec<_>>();
+        handles
+            .into_iter()
+            .map(|handle| handle.join().expect("image worker panicked"))
+            .collect()
+    })
+}
+
+fn process_image_work(work: PendingImageWork, thumbnail_dir: PathBuf) -> ImageWorkResult {
+    let fingerprint_started = Instant::now();
+    let fingerprinted_source = match read_fingerprinted_source(&work.path) {
+        Ok(value) => value,
+        Err(error) => {
+            return ImageWorkResult {
+                path: work.path,
+                snapshot: work.snapshot,
+                library_id: work.library_id,
+                generation: work.generation,
+                fingerprint: None,
+                processed: None,
+                error: Some(error.to_string()),
+                fingerprint_us: elapsed_us(fingerprint_started),
+                image_processing_us: 0,
+            };
+        }
+    };
+    let fingerprint_us = elapsed_us(fingerprint_started);
+    let image_started = Instant::now();
+    let fingerprint = fingerprinted_source.fingerprint;
+    let processed = process_image_with_source_bytes(
+        &work.path,
+        &thumbnail_dir,
+        &fingerprint,
+        fingerprinted_source.bytes.as_deref(),
+    );
+    let image_processing_us = elapsed_us(image_started);
+
+    match processed {
+        Ok(processed) => ImageWorkResult {
+            path: work.path,
+            snapshot: work.snapshot,
+            library_id: work.library_id,
+            generation: work.generation,
+            fingerprint: Some(fingerprint),
+            processed: Some(processed),
+            error: None,
+            fingerprint_us,
+            image_processing_us,
+        },
+        Err(error) => ImageWorkResult {
+            path: work.path,
+            snapshot: work.snapshot,
+            library_id: work.library_id,
+            generation: work.generation,
+            fingerprint: Some(fingerprint),
+            processed: None,
+            error: Some(error.to_string()),
+            fingerprint_us,
+            image_processing_us,
+        },
+    }
+}
+
+fn apply_image_work_result(
+    repository: &Repository,
+    result: ImageWorkResult,
+    progress: &mut ScanProgress,
+    performance: &mut ScanPerformance,
+) -> AppResult<()> {
+    performance.fingerprint_us = performance
+        .fingerprint_us
+        .saturating_add(result.fingerprint_us);
+    performance.image_processing_us = performance
+        .image_processing_us
+        .saturating_add(result.image_processing_us);
+
+    if let Some(processed) = result.processed {
+        performance.exif_us = performance
+            .exif_us
+            .saturating_add(processed.timings.exif_us);
+        performance.decode_us = performance
+            .decode_us
+            .saturating_add(processed.timings.decode_us);
+        performance.resize_us = performance
+            .resize_us
+            .saturating_add(processed.timings.resize_us);
+        performance.feature_analysis_us = performance
+            .feature_analysis_us
+            .saturating_add(processed.timings.feature_analysis_us);
+        performance.thumbnail_write_us = performance
+            .thumbnail_write_us
+            .saturating_add(processed.timings.thumbnail_write_us);
+        let fingerprint = result.fingerprint.as_deref().unwrap_or("unreadable");
+        let database_started = Instant::now();
+        let database_result = repository.upsert_processed_asset(
+            result.library_id,
+            result.generation,
+            &result.snapshot,
+            fingerprint,
+            &processed,
+        );
+        add_elapsed(&mut performance.database_write_us, database_started);
+        database_result?;
+        progress.succeeded += 1;
+        performance.processed_files += 1;
+        progress.error = None;
+    } else {
+        let fingerprint = result
+            .fingerprint
+            .unwrap_or_else(|| fallback_fingerprint(&result.snapshot));
+        let error = result
+            .error
+            .unwrap_or_else(|| "image processing failed".into());
+        let database_started = Instant::now();
+        let database_result = repository.upsert_failed_asset(
+            result.library_id,
+            result.generation,
+            &result.snapshot,
+            &fingerprint,
+            &error,
+        );
+        add_elapsed(&mut performance.database_write_us, database_started);
+        database_result?;
+        progress.failed += 1;
+        performance.failed_files += 1;
+        progress.error = Some(error);
+    }
+    progress.processed += 1;
+    Ok(())
 }
 
 fn snapshot_file(root: &Path, path: &Path) -> AppResult<FileSnapshot> {
@@ -995,6 +1101,10 @@ mod tests {
         .expect("repeat scan");
         assert_eq!(repeated.succeeded, 0);
         assert_eq!(repeated.skipped, 1);
+        assert_eq!(repeated.performance.processed_files, 0);
+        assert_eq!(repeated.performance.skipped_files, 1);
+        assert_eq!(repeated.performance.fingerprint_us, 0);
+        assert_eq!(repeated.performance.image_processing_us, 0);
 
         save_pixel(&first, Rgba([250, 250, 250, 255]), (8, 8));
         save_pixel(&second, Rgba([0, 200, 90, 255]), (5, 5));

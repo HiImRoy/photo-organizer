@@ -39,10 +39,10 @@ const semanticCatalog: SemanticLabelDescriptor[] = [
   ["indoor", "室内"],
   ["street", "街道"],
   ["vehicle", "车辆"],
-  ["product", "产品 / 静物"],
+  ["product", "静物"],
   ["food", "食品"],
   ["animal", "动物"],
-  ["document", "文档 / 截图"],
+  ["document", "文档"],
   ["night", "夜景"],
   ["flower", "花卉"],
   ["abstract", "抽象"],
@@ -156,6 +156,8 @@ const assets: AssetListItem[] = names.map((fileName, index) => {
     semanticStatus: "completed",
     semanticError: null,
     semanticAnalyzedAt: "2026-08-07T03:12:00Z",
+    rating: index === 0 ? 4 : index === 5 ? 2 : 0,
+    colorLabel: index === 0 ? "red" : index === 4 ? "blue" : null,
     semanticLabels: labels,
     classification: fixtureClassification(
       labels,
@@ -229,7 +231,7 @@ export function visualFixtureFromSearch(search: string): VisualFixture | null {
     semanticGroups: [
       { labelId: "landscape", displayName: "风景", assetCount: 7 },
       { labelId: "architecture", displayName: "建筑", assetCount: 4 },
-      { labelId: "product", displayName: "产品", assetCount: 4 },
+      { labelId: "product", displayName: "静物", assetCount: 4 },
       { labelId: "night", displayName: "夜景", assetCount: 3 },
     ],
     folders: [
@@ -270,7 +272,7 @@ function semanticLabelsFor(index: number) {
   const ids = [
     ["landscape", "风景"],
     ["architecture", "建筑"],
-    ["product", "产品"],
+    ["product", "静物"],
     ["mountain", "山"],
     ["night", "夜景"],
     ["forest", "森林"],
@@ -337,6 +339,11 @@ function matchesFilter(asset: AssetListItem, filter: AssetFilter) {
     if (!asset.fileName.toLocaleLowerCase().includes(search)) return false;
   }
   if (filter.analysisStatus && asset.semanticStatus !== filter.analysisStatus) return false;
+  const ratingThreshold = filter.ratings.length > 0 ? Math.max(...filter.ratings) : null;
+  if (ratingThreshold !== null && asset.rating < ratingThreshold) return false;
+  if (filter.colorLabels.length > 0) {
+    if (!asset.colorLabel || !filter.colorLabels.includes(asset.colorLabel)) return false;
+  }
   if (filter.primaryCategories.length > 0) {
     if (!filter.primaryCategories.includes(asset.classification.primaryCategory.effective ?? "")) {
       return false;

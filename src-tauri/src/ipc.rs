@@ -28,6 +28,12 @@ use crate::semantic::{
 };
 use crate::semantic_tasks::spawn_semantic_job;
 use crate::tasks::{SemanticTaskRegistry, SourceScanGuard, SourceScanRegistry, TaskRegistry};
+use crate::workflow;
+use crate::workflow::{
+    CollectionDetail, CollectionSummary, DuplicateGroup, EditExportPlan, EditExportResult,
+    EditRecipe, EditRollbackPlan, FaceFeatureStatus, LocalSearchResponse, SimilarAsset,
+    SimilarityClusterResponse, WorkflowAsset,
+};
 
 pub struct AppState {
     pub repository: Repository,
@@ -112,6 +118,30 @@ pub fn update_classification_override(
     state
         .repository
         .update_classification_override(asset_id, &field, value)
+        .map_err(ipc_error)
+}
+
+#[tauri::command]
+pub fn update_asset_rating(
+    asset_id: i64,
+    rating: i64,
+    state: State<'_, AppState>,
+) -> Result<AssetDetail, String> {
+    state
+        .repository
+        .update_asset_rating(asset_id, rating)
+        .map_err(ipc_error)
+}
+
+#[tauri::command]
+pub fn update_asset_color_label(
+    asset_id: i64,
+    color_label: Option<String>,
+    state: State<'_, AppState>,
+) -> Result<AssetDetail, String> {
+    state
+        .repository
+        .update_asset_color_label(asset_id, color_label.as_deref())
         .map_err(ipc_error)
 }
 
@@ -733,6 +763,241 @@ pub fn discard_organization_plan(
         .repository
         .delete_organization_plan(&plan_id)
         .map_err(ipc_error)
+}
+
+#[tauri::command]
+pub fn list_favorite_asset_ids(
+    library_id: i64,
+    state: State<'_, AppState>,
+) -> Result<Vec<i64>, String> {
+    workflow::list_favorite_asset_ids(&state.repository, library_id).map_err(ipc_error)
+}
+
+#[tauri::command]
+pub fn list_favorite_assets(
+    library_id: i64,
+    state: State<'_, AppState>,
+) -> Result<Vec<WorkflowAsset>, String> {
+    workflow::list_favorite_assets(&state.repository, library_id).map_err(ipc_error)
+}
+
+#[tauri::command]
+pub fn set_asset_favorite(
+    asset_id: i64,
+    favorite: bool,
+    state: State<'_, AppState>,
+) -> Result<bool, String> {
+    workflow::set_favorite(&state.repository, asset_id, favorite).map_err(ipc_error)
+}
+
+#[tauri::command]
+pub fn list_collections(state: State<'_, AppState>) -> Result<Vec<CollectionSummary>, String> {
+    workflow::list_collections(&state.repository).map_err(ipc_error)
+}
+
+#[tauri::command]
+pub fn create_collection(
+    name: String,
+    description: Option<String>,
+    state: State<'_, AppState>,
+) -> Result<CollectionSummary, String> {
+    workflow::create_collection(
+        &state.repository,
+        &name,
+        description.as_deref().unwrap_or_default(),
+    )
+    .map_err(ipc_error)
+}
+
+#[tauri::command]
+pub fn delete_collection(collection_id: i64, state: State<'_, AppState>) -> Result<bool, String> {
+    workflow::delete_collection(&state.repository, collection_id).map_err(ipc_error)
+}
+
+#[tauri::command]
+pub fn get_collection(
+    collection_id: i64,
+    state: State<'_, AppState>,
+) -> Result<CollectionDetail, String> {
+    workflow::get_collection(&state.repository, collection_id).map_err(ipc_error)
+}
+
+#[tauri::command]
+pub fn add_assets_to_collection(
+    collection_id: i64,
+    asset_ids: Vec<i64>,
+    state: State<'_, AppState>,
+) -> Result<CollectionSummary, String> {
+    workflow::add_assets_to_collection(&state.repository, collection_id, &asset_ids)
+        .map_err(ipc_error)
+}
+
+#[tauri::command]
+pub fn remove_assets_from_collection(
+    collection_id: i64,
+    asset_ids: Vec<i64>,
+    state: State<'_, AppState>,
+) -> Result<CollectionSummary, String> {
+    workflow::remove_assets_from_collection(&state.repository, collection_id, &asset_ids)
+        .map_err(ipc_error)
+}
+
+#[tauri::command]
+pub fn list_duplicate_groups(
+    library_id: i64,
+    limit: Option<u32>,
+    state: State<'_, AppState>,
+) -> Result<Vec<DuplicateGroup>, String> {
+    workflow::list_duplicate_groups(&state.repository, library_id, limit.unwrap_or(100))
+        .map_err(ipc_error)
+}
+
+#[tauri::command]
+pub async fn search_local_images(
+    library_id: i64,
+    query: String,
+    limit: Option<u32>,
+    minimum_similarity: Option<f32>,
+    state: State<'_, AppState>,
+) -> Result<LocalSearchResponse, String> {
+    let repository = state.repository.clone();
+    let classifier = state.semantic.read().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        workflow::search_by_text(
+            &repository,
+            &classifier,
+            library_id,
+            &query,
+            limit.unwrap_or(80),
+            minimum_similarity.unwrap_or(0.05),
+        )
+    })
+    .await
+    .map_err(|error| format!("local search task failed: {error}"))?
+    .map_err(ipc_error)
+}
+
+#[tauri::command]
+pub async fn find_similar_assets(
+    library_id: i64,
+    asset_id: i64,
+    limit: Option<u32>,
+    minimum_similarity: Option<f32>,
+    state: State<'_, AppState>,
+) -> Result<Vec<SimilarAsset>, String> {
+    let repository = state.repository.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        workflow::find_similar_assets(
+            &repository,
+            library_id,
+            asset_id,
+            limit.unwrap_or(80),
+            minimum_similarity.unwrap_or(0.7),
+        )
+    })
+    .await
+    .map_err(|error| format!("similarity task failed: {error}"))?
+    .map_err(ipc_error)
+}
+
+#[tauri::command]
+pub async fn build_similarity_clusters(
+    library_id: i64,
+    threshold: Option<f32>,
+    state: State<'_, AppState>,
+) -> Result<SimilarityClusterResponse, String> {
+    let repository = state.repository.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        workflow::build_similarity_clusters(&repository, library_id, threshold.unwrap_or(0.92))
+    })
+    .await
+    .map_err(|error| format!("clustering task failed: {error}"))?
+    .map_err(ipc_error)
+}
+
+#[tauri::command]
+pub fn get_face_feature_status(state: State<'_, AppState>) -> Result<FaceFeatureStatus, String> {
+    workflow::face_feature_status(&state.repository).map_err(ipc_error)
+}
+
+#[tauri::command]
+pub fn clear_face_data(state: State<'_, AppState>) -> Result<FaceFeatureStatus, String> {
+    workflow::clear_face_data(&state.repository).map_err(ipc_error)
+}
+
+#[tauri::command]
+pub async fn render_edit_preview(
+    asset_id: i64,
+    recipe: EditRecipe,
+    max_width: Option<u32>,
+    max_height: Option<u32>,
+    state: State<'_, AppState>,
+) -> Result<String, String> {
+    let repository = state.repository.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        workflow::render_edit_preview(
+            &repository,
+            asset_id,
+            &recipe,
+            max_width.unwrap_or(1_920),
+            max_height.unwrap_or(1_200),
+        )
+    })
+    .await
+    .map_err(|error| format!("edit preview task failed: {error}"))?
+    .map_err(ipc_error)
+}
+
+#[tauri::command]
+pub fn preview_edit_export(
+    asset_id: i64,
+    target_path: String,
+    recipe: EditRecipe,
+    state: State<'_, AppState>,
+) -> Result<EditExportPlan, String> {
+    workflow::preview_edit_export(
+        &state.repository,
+        asset_id,
+        Path::new(&target_path),
+        &recipe,
+    )
+    .map_err(ipc_error)
+}
+
+#[tauri::command]
+pub async fn execute_edit_export(
+    plan_id: String,
+    state: State<'_, AppState>,
+) -> Result<EditExportResult, String> {
+    let repository = state.repository.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        workflow::execute_edit_export(&repository, &plan_id)
+    })
+    .await
+    .map_err(|error| format!("edit export task failed: {error}"))?
+    .map_err(ipc_error)
+}
+
+#[tauri::command]
+pub fn preview_edit_rollback(
+    plan_id: String,
+    state: State<'_, AppState>,
+) -> Result<EditRollbackPlan, String> {
+    workflow::preview_edit_rollback(&state.repository, &plan_id).map_err(ipc_error)
+}
+
+#[tauri::command]
+pub async fn execute_edit_rollback(
+    plan_id: String,
+    state: State<'_, AppState>,
+) -> Result<EditExportResult, String> {
+    let repository = state.repository.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        workflow::execute_edit_rollback(&repository, &plan_id)
+    })
+    .await
+    .map_err(|error| format!("edit rollback task failed: {error}"))?
+    .map_err(ipc_error)
 }
 
 pub fn resume_pending_semantic_jobs(app: tauri::AppHandle, state: &AppState) {

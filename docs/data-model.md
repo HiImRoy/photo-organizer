@@ -41,7 +41,7 @@
 
 ### `semantic_embeddings`
 
-按 `asset_id + model_name + model_version + analysis_version + source_fingerprint` 唯一保存 little-endian `f32` blob、维度和生成时间。当前只用于分类缓存，不对 UI 提供相似搜索。
+按 `asset_id + model_name + model_version + analysis_version + source_fingerprint` 唯一保存 little-endian `f32` blob、维度和生成时间。智能工作台只读取与当前模型、分析版本和源 fingerprint 一致的向量，用于本地文本搜索、以图搜图和相似聚类。
 
 ### `analysis_jobs`
 
@@ -53,7 +53,23 @@
 
 ### `file_operation_jobs` / `file_operations`
 
-为后续安全复制预留：任务状态、dry-run 标志、源/目标、操作类型、计划/执行状态、冲突策略、源/目标哈希、错误和撤销状态。起步版本不暴露执行 command。
+保存文件操作任务状态、dry-run 标志、源/目标、操作类型、计划/执行状态、冲突策略、源/目标哈希、错误和撤销状态。整理工作区仍只做 dry-run；编辑器在独立计划二次确认后以 `edit_copy` 写入日志并创建一个不存在的新副本。
+
+### `assets.is_favorite` / `collections` / `collection_assets`
+
+`is_favorite` 是独立于 `rating` 和 `color_label` 的布尔字段。`collections` 保存集合名称、说明和时间；`collection_assets` 保存多对多成员及加入时间。删除集合或成员关系只改变 SQLite，不改变资产路径、图库归属或源文件。
+
+### `saved_views`
+
+保存命名查询的 `library_id` 和版本化 `query_json`。schema 已预留，当前智能工作台 MVP 尚未暴露保存视图 UI。
+
+### `edit_export_plans`
+
+保存编辑导出 plan id、asset id、计划时源 fingerprint、目标路径、完整 `EditRecipe` JSON、状态、时间和错误。计划确认后仍会重验 fingerprint、目标不存在且位于所有图库根目录之外。
+
+### `face_detections` / `face_clusters` / `face_cluster_members`
+
+仅用于未来显式 opt-in 的本地人物功能。当前迁移建立可级联清理的派生表和 `workflow_preferences.face_analysis_enabled=false`；没有合规模型时不会写入这些表。clear-all 会先删除成员、聚类和检测，再关闭开关，不触碰原图。
 
 ## 增量规则
 
@@ -68,4 +84,4 @@
 
 ## 迁移
 
-迁移文件随 Rust 二进制嵌入，在打开数据库时事务执行。`0002_semantic_workspace.sql`、`0003_organization_dry_run.sql` 和 `0004_library_ux_refinement.sql` 只新增表、列和索引，不修改已发布的旧 migration。`schema_migrations(version, applied_at)` 保证重复初始化安全。测试覆盖空库、重复初始化、版本顺序、组合筛选、组织计划表和唯一约束。
+迁移文件随 Rust 二进制嵌入，在打开数据库时事务执行。包括 `0011_photo_workflow_mvp.sql` 在内的迁移只新增表、列和索引，不修改已发布的旧 migration。`schema_migrations(version, applied_at)` 保证重复初始化安全。测试覆盖空库、重复初始化、版本顺序、组合筛选、组织计划表、收藏/集合、重复分组和唯一约束。

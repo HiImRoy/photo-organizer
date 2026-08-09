@@ -6,9 +6,18 @@ import type {
   AssetDetail,
   AssetPage,
   AssetFilter,
+  CollectionDetail,
+  CollectionSummary,
   ClassificationFieldDescriptor,
+  DuplicateGroup,
+  EditExportPlan,
+  EditExportResult,
+  EditRecipe,
+  EditRollbackPlan,
+  FaceFeatureStatus,
   FolderSummary,
   LibrarySummary,
+  LocalSearchResponse,
   OrganizationIssue,
   OrganizationPlan,
   OrganizationPlanRequest,
@@ -17,8 +26,11 @@ import type {
   SemanticLabelDescriptor,
   SemanticProgress,
   SemanticRuntimeStatus,
+  SimilarAsset,
+  SimilarityClusterResponse,
   SortDirection,
   SortField,
+  WorkflowAsset,
 } from "./types";
 import type { VisualFixture } from "./test/visual-fixture";
 
@@ -198,6 +210,22 @@ export async function updateClassificationOverride(
     field,
     value,
   });
+}
+
+export async function updateAssetRating(
+  assetId: number,
+  rating: number,
+): Promise<AssetDetail | null> {
+  if (!desktopRuntime) return null;
+  return invoke<AssetDetail>("update_asset_rating", { assetId, rating });
+}
+
+export async function updateAssetColorLabel(
+  assetId: number,
+  colorLabel: string | null,
+): Promise<AssetDetail | null> {
+  if (!desktopRuntime) return null;
+  return invoke<AssetDetail>("update_asset_color_label", { assetId, colorLabel });
 }
 
 export async function updateTagOverride(
@@ -426,4 +454,177 @@ export async function subscribeSemanticProgress(
   }
   if (!desktopRuntime) return () => undefined;
   return listen<SemanticProgress>("semantic-progress", (event) => onProgress(event.payload));
+}
+
+export async function fetchFavoriteAssetIds(libraryId: number): Promise<number[]> {
+  if (!desktopRuntime) return [];
+  return invoke<number[]>("list_favorite_asset_ids", { libraryId });
+}
+
+export async function fetchFavoriteAssets(libraryId: number): Promise<WorkflowAsset[]> {
+  if (!desktopRuntime) return [];
+  return invoke<WorkflowAsset[]>("list_favorite_assets", { libraryId });
+}
+
+export async function setAssetFavorite(assetId: number, favorite: boolean): Promise<boolean> {
+  if (!desktopRuntime) return favorite;
+  return invoke<boolean>("set_asset_favorite", { assetId, favorite });
+}
+
+export async function fetchCollections(): Promise<CollectionSummary[]> {
+  if (!desktopRuntime) return [];
+  return invoke<CollectionSummary[]>("list_collections");
+}
+
+export async function createCollection(name: string, description = ""): Promise<CollectionSummary> {
+  if (!desktopRuntime) throw new Error("集合仅在 PhotoOrganizer 桌面应用中可用。");
+  return invoke<CollectionSummary>("create_collection", { name, description });
+}
+
+export async function deleteCollection(collectionId: number): Promise<boolean> {
+  if (!desktopRuntime) return false;
+  return invoke<boolean>("delete_collection", { collectionId });
+}
+
+export async function fetchCollection(collectionId: number): Promise<CollectionDetail> {
+  if (!desktopRuntime) throw new Error("集合仅在 PhotoOrganizer 桌面应用中可用。");
+  return invoke<CollectionDetail>("get_collection", { collectionId });
+}
+
+export async function addAssetsToCollection(
+  collectionId: number,
+  assetIds: number[],
+): Promise<CollectionSummary> {
+  if (!desktopRuntime) throw new Error("集合仅在 PhotoOrganizer 桌面应用中可用。");
+  return invoke<CollectionSummary>("add_assets_to_collection", { collectionId, assetIds });
+}
+
+export async function removeAssetsFromCollection(
+  collectionId: number,
+  assetIds: number[],
+): Promise<CollectionSummary> {
+  if (!desktopRuntime) throw new Error("集合仅在 PhotoOrganizer 桌面应用中可用。");
+  return invoke<CollectionSummary>("remove_assets_from_collection", { collectionId, assetIds });
+}
+
+export async function fetchDuplicateGroups(
+  libraryId: number,
+  limit = 100,
+): Promise<DuplicateGroup[]> {
+  if (!desktopRuntime) return [];
+  return invoke<DuplicateGroup[]>("list_duplicate_groups", { libraryId, limit });
+}
+
+export async function searchLocalImages(
+  libraryId: number,
+  query: string,
+  options: { limit?: number; minimumSimilarity?: number } = {},
+): Promise<LocalSearchResponse> {
+  if (!desktopRuntime) {
+    return { query, normalizedQuery: query, embeddedAssetCount: 0, items: [] };
+  }
+  return invoke<LocalSearchResponse>("search_local_images", {
+    libraryId,
+    query,
+    limit: options.limit ?? 80,
+    minimumSimilarity: options.minimumSimilarity ?? 0.05,
+  });
+}
+
+export async function fetchSimilarAssets(
+  libraryId: number,
+  assetId: number,
+  options: { limit?: number; minimumSimilarity?: number } = {},
+): Promise<SimilarAsset[]> {
+  if (!desktopRuntime) return [];
+  return invoke<SimilarAsset[]>("find_similar_assets", {
+    libraryId,
+    assetId,
+    limit: options.limit ?? 80,
+    minimumSimilarity: options.minimumSimilarity ?? 0.7,
+  });
+}
+
+export async function fetchSimilarityClusters(
+  libraryId: number,
+  threshold = 0.92,
+): Promise<SimilarityClusterResponse> {
+  if (!desktopRuntime) {
+    return { clusters: [], embeddedAssetCount: 0, candidatePairCount: 0, truncated: false };
+  }
+  return invoke<SimilarityClusterResponse>("build_similarity_clusters", {
+    libraryId,
+    threshold,
+  });
+}
+
+export async function fetchFaceFeatureStatus(): Promise<FaceFeatureStatus> {
+  if (!desktopRuntime) {
+    return {
+      status: "model_unavailable",
+      message: "浏览器预览不加载本地人脸模型。",
+      enabled: false,
+      modelInstalled: false,
+      detectionCount: 0,
+      clusterCount: 0,
+      privacyNote: "人脸派生数据只保存在本机，并可清空。",
+    };
+  }
+  return invoke<FaceFeatureStatus>("get_face_feature_status");
+}
+
+export async function clearFaceData(): Promise<FaceFeatureStatus> {
+  if (!desktopRuntime) return fetchFaceFeatureStatus();
+  return invoke<FaceFeatureStatus>("clear_face_data");
+}
+
+export async function renderEditPreview(
+  assetId: number,
+  recipe: EditRecipe,
+  maxWidth = 1920,
+  maxHeight = 1200,
+): Promise<string> {
+  if (!desktopRuntime) return fetchThumbnail(assetId);
+  return invoke<string>("render_edit_preview", { assetId, recipe, maxWidth, maxHeight });
+}
+
+export async function chooseEditedCopyTarget(fileName: string): Promise<string | null> {
+  if (!desktopRuntime) return null;
+  const extension = fileName.split(".").pop()?.toLowerCase();
+  const supported = extension && ["jpg", "jpeg", "png", "webp"].includes(extension);
+  const base = supported ? fileName.slice(0, -(extension.length + 1)) : fileName;
+  const outputPath = await save({
+    title: "另存编辑副本（不会覆盖已有文件）",
+    defaultPath: `${base}-edited.${supported ? extension : "jpg"}`,
+    filters: [
+      { name: "JPEG", extensions: ["jpg", "jpeg"] },
+      { name: "PNG", extensions: ["png"] },
+      { name: "WebP", extensions: ["webp"] },
+    ],
+  });
+  return typeof outputPath === "string" ? outputPath : null;
+}
+
+export async function previewEditExport(
+  assetId: number,
+  targetPath: string,
+  recipe: EditRecipe,
+): Promise<EditExportPlan> {
+  if (!desktopRuntime) throw new Error("编辑导出仅在 PhotoOrganizer 桌面应用中可用。");
+  return invoke<EditExportPlan>("preview_edit_export", { assetId, targetPath, recipe });
+}
+
+export async function executeEditExport(planId: string): Promise<EditExportResult> {
+  if (!desktopRuntime) throw new Error("编辑导出仅在 PhotoOrganizer 桌面应用中可用。");
+  return invoke<EditExportResult>("execute_edit_export", { planId });
+}
+
+export async function previewEditRollback(planId: string): Promise<EditRollbackPlan> {
+  if (!desktopRuntime) throw new Error("编辑副本回滚仅在 PhotoOrganizer 桌面应用中可用。");
+  return invoke<EditRollbackPlan>("preview_edit_rollback", { planId });
+}
+
+export async function executeEditRollback(planId: string): Promise<EditExportResult> {
+  if (!desktopRuntime) throw new Error("编辑副本回滚仅在 PhotoOrganizer 桌面应用中可用。");
+  return invoke<EditExportResult>("execute_edit_rollback", { planId });
 }

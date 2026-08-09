@@ -10,9 +10,11 @@ import {
   TONE_OPTIONS,
 } from "../classificationLabels";
 import { formatBytes, formatDate, formatPercent } from "../format";
+import { MANUAL_COLOR_LABEL_OPTIONS } from "../types";
 import type {
   AssetListItem,
   ClassificationFieldDescriptor,
+  ManualColorLabel,
   SemanticLabelDescriptor,
   SemanticRuntimeStatus,
 } from "../types";
@@ -23,182 +25,241 @@ import { Thumbnail } from "./Thumbnail";
 
 interface DetailPanelProps {
   asset: AssetListItem | null;
-  collapsed: boolean;
   semanticStatus: SemanticRuntimeStatus | null;
   previewNavigator: PreviewNavigatorProps | null;
-  onToggle: () => void;
   onReanalyze: (asset: AssetListItem) => void;
   classificationRegistry?: ClassificationFieldDescriptor[];
   catalog?: SemanticLabelDescriptor[];
   onUpdateClassification?: (assetId: number, field: string, value: string | string[]) => void;
   onUpdateTagOverride?: (assetId: number, tagId: string, state: "add" | "remove") => void;
   onRestoreAuto?: (assetId: number, field?: string) => void;
+  onUpdateRating?: (assetId: number, rating: number) => void;
+  onUpdateColorLabel?: (assetId: number, colorLabel: ManualColorLabel | null) => void;
 }
 
 export function DetailPanel({
   asset,
-  collapsed,
   semanticStatus,
   previewNavigator,
-  onToggle,
   onReanalyze,
   classificationRegistry,
   catalog,
   onUpdateClassification,
   onUpdateTagOverride,
   onRestoreAuto,
+  onUpdateRating,
+  onUpdateColorLabel,
 }: DetailPanelProps) {
-  if (collapsed) {
-    return (
-      <aside className="right-panel is-collapsed" aria-label="图片详情">
-        <button className="panel-toggle" type="button" onClick={onToggle} aria-label="展开右侧面板">
-          <PanelIcon width="17" height="17" />
-        </button>
-      </aside>
-    );
-  }
-
   return (
     <aside className="right-panel" aria-label="图片详情">
-      <div className="panel-titlebar">
-        <strong>信息</strong>
-        <button
-          className="panel-toggle flip"
-          type="button"
-          onClick={onToggle}
-          aria-label="折叠右侧面板"
-        >
-          <PanelIcon width="17" height="17" />
-        </button>
-      </div>
-      {!asset ? (
-        <div className="details-empty">
-          <PanelIcon width="25" height="25" />
-          <strong>未选择图片</strong>
-          <span>选择网格中的图片以查看元数据和分析结果。</span>
+      <div className="right-panel-card">
+        <div className="panel-titlebar">
+          <strong>信息</strong>
         </div>
-      ) : (
-        <div className="details-scroll">
-          {previewNavigator ? (
-            <PreviewNavigator {...previewNavigator} placement="panel" />
-          ) : (
-            <div className="detail-preview">
-              <Thumbnail asset={asset} />
-            </div>
-          )}
-          <h2 title={asset.fileName}>{asset.fileName}</h2>
-          <div className="detail-path" title={asset.relativePath}>
-            {asset.relativePath}
+        {!asset ? (
+          <div className="details-empty">
+            <PanelIcon width="25" height="25" />
+            <strong>未选择图片</strong>
+            <span>选择网格中的图片以查看元数据和分析结果。</span>
           </div>
-
-          <DetailSection title="文件">
-            <dl className="property-list">
-              <Property label="格式" value={asset.extension.toUpperCase()} />
-              <Property
-                label="尺寸"
-                value={asset.width && asset.height ? `${asset.width} × ${asset.height}` : "—"}
-              />
-              <Property label="大小" value={formatBytes(asset.fileSize)} />
-              <Property label="拍摄时间" value={formatDate(asset.captureTime)} />
-            </dl>
-          </DetailSection>
-
-          <DetailSection title="拍摄信息">
-            <dl className="property-list">
-              <Property
-                label="相机"
-                value={[asset.cameraMake, asset.cameraModel].filter(Boolean).join(" ") || "—"}
-              />
-              <Property label="镜头" value={asset.lensModel ?? "—"} />
-              <Property label="曝光" value={asset.exposureTime ?? "—"} />
-              <Property label="光圈" value={asset.aperture ? `f/${asset.aperture}` : "—"} />
-              <Property label="感光度" value={asset.iso?.toString() ?? "—"} />
-              <Property label="焦距" value={asset.focalLength ? `${asset.focalLength} mm` : "—"} />
-            </dl>
-          </DetailSection>
-
-          <DetailSection
-            title="影调与色彩"
-            trailing={asset.analysisStatus === "completed" ? "已完成" : asset.analysisStatus}
-          >
-            <div className="analysis-grid">
-              <Metric label="亮度" value={formatPercent(asset.brightness)} />
-              <Metric label="对比度" value={formatPercent(asset.contrast)} />
-              <Metric label="饱和度" value={formatPercent(asset.saturation)} />
-              <Metric label="色度" value={formatPercent(asset.chroma)} />
-              <Metric label="有彩色占比" value={formatPercent(asset.dominantColorCoverage)} />
-              <Metric label="中性色占比" value={formatPercent(asset.neutralRatio)} />
-              <Metric label="影调" value={classificationValueLabel(asset.toneLabel, "tone")} />
-            </div>
-            <div className="dominant-row">
-              <span>主色</span>
-              {asset.dominantColor ? <i style={{ background: asset.dominantColor }} /> : null}
-              <strong>{asset.dominantColor ?? "—"}</strong>
-              <small>{classificationValueLabel(asset.dominantColorCategory, "color")}</small>
-            </div>
-          </DetailSection>
-
-          <ClassificationEditor
-            key={`${asset.id}:${asset.classification.revision}`}
-            asset={asset}
-            classificationRegistry={classificationRegistry}
-            catalog={catalog}
-            onUpdateClassification={onUpdateClassification}
-            onUpdateTagOverride={onUpdateTagOverride}
-            onRestoreAuto={onRestoreAuto}
-          />
-
-          <DetailSection title="语义标签" trailing={semanticStateLabel(asset.semanticStatus)}>
-            {asset.semanticLabels.length ? (
-              <div className="semantic-detail-list">
-                {asset.semanticLabels.map((label) => (
-                  <div key={label.labelId}>
-                    <span>
-                      {label.displayName}
-                      <small>{label.isPrimary ? "一级分类" : "辅助标签"}</small>
-                    </span>
-                    <strong>{label.similarity.toFixed(3)}</strong>
-                    <i
-                      style={{ width: `${Math.max(2, Math.min(100, label.similarity * 250))}%` }}
-                    />
-                  </div>
-                ))}
-                <p>数值为模型相似度，不代表准确率或概率。</p>
-              </div>
+        ) : (
+          <div className="details-scroll">
+            {previewNavigator ? (
+              <PreviewNavigator {...previewNavigator} placement="panel" />
             ) : (
-              <div className="semantic-empty">
-                {asset.semanticStatus === "failed" ? asset.semanticError : "尚无真实语义分析结果"}
+              <div className="detail-preview">
+                <Thumbnail asset={asset} />
               </div>
             )}
-            <dl className="property-list model-properties">
-              <Property
-                label="模型"
-                value={asset.semanticLabels[0]?.modelName ?? semanticStatus?.model.name ?? "—"}
-              />
-              <Property
-                label="版本"
-                value={
-                  asset.semanticLabels[0]?.modelVersion ?? semanticStatus?.model.version ?? "—"
-                }
-              />
-              <Property
-                label="后端"
-                value={semanticStatus?.selectedBackend ? "本地计算" : "未启用"}
-              />
-            </dl>
-            <button
-              className="secondary-action full"
-              type="button"
-              onClick={() => onReanalyze(asset)}
-              disabled={semanticStatus?.status !== "ready" || asset.analysisStatus !== "completed"}
+            <h2 title={asset.fileName}>{asset.fileName}</h2>
+            <div className="detail-path" title={asset.relativePath}>
+              {asset.relativePath}
+            </div>
+
+            <DetailSection title="文件">
+              <dl className="property-list">
+                <Property label="格式" value={asset.extension.toUpperCase()} />
+                <Property
+                  label="尺寸"
+                  value={asset.width && asset.height ? `${asset.width} × ${asset.height}` : "—"}
+                />
+                <Property label="大小" value={formatBytes(asset.fileSize)} />
+                <Property label="拍摄时间" value={formatDate(asset.captureTime)} />
+              </dl>
+            </DetailSection>
+
+            <DetailSection title="拍摄信息">
+              <dl className="property-list">
+                <Property
+                  label="相机"
+                  value={[asset.cameraMake, asset.cameraModel].filter(Boolean).join(" ") || "—"}
+                />
+                <Property label="镜头" value={asset.lensModel ?? "—"} />
+                <Property label="曝光" value={asset.exposureTime ?? "—"} />
+                <Property label="光圈" value={asset.aperture ? `f/${asset.aperture}` : "—"} />
+                <Property label="感光度" value={asset.iso?.toString() ?? "—"} />
+                <Property
+                  label="焦距"
+                  value={asset.focalLength ? `${asset.focalLength} mm` : "—"}
+                />
+              </dl>
+            </DetailSection>
+
+            <ManualMarkEditor
+              asset={asset}
+              onUpdateRating={onUpdateRating}
+              onUpdateColorLabel={onUpdateColorLabel}
+            />
+
+            <DetailSection
+              title="影调与色彩"
+              trailing={asset.analysisStatus === "completed" ? "已完成" : asset.analysisStatus}
             >
-              <PlayIcon width="14" height="14" />
-              重新分析此图片
-            </button>
-          </DetailSection>
-        </div>
-      )}
+              <div className="analysis-grid">
+                <Metric label="亮度" value={formatPercent(asset.brightness)} />
+                <Metric label="对比度" value={formatPercent(asset.contrast)} />
+                <Metric label="饱和度" value={formatPercent(asset.saturation)} />
+                <Metric label="色度" value={formatPercent(asset.chroma)} />
+                <Metric label="有彩色占比" value={formatPercent(asset.dominantColorCoverage)} />
+                <Metric label="中性色占比" value={formatPercent(asset.neutralRatio)} />
+                <Metric label="影调" value={classificationValueLabel(asset.toneLabel, "tone")} />
+              </div>
+              <div className="dominant-row">
+                <span>主色</span>
+                {asset.dominantColor ? <i style={{ background: asset.dominantColor }} /> : null}
+                <strong>{asset.dominantColor ?? "—"}</strong>
+                <small>{classificationValueLabel(asset.dominantColorCategory, "color")}</small>
+              </div>
+            </DetailSection>
+
+            <ClassificationEditor
+              key={`${asset.id}:${asset.classification.revision}`}
+              asset={asset}
+              classificationRegistry={classificationRegistry}
+              catalog={catalog}
+              onUpdateClassification={onUpdateClassification}
+              onUpdateTagOverride={onUpdateTagOverride}
+              onRestoreAuto={onRestoreAuto}
+            />
+
+            <DetailSection title="语义标签" trailing={semanticStateLabel(asset.semanticStatus)}>
+              {asset.semanticLabels.length ? (
+                <div className="semantic-detail-list">
+                  {asset.semanticLabels.map((label) => (
+                    <div key={label.labelId}>
+                      <span>
+                        {label.displayName}
+                        <small>{label.isPrimary ? "一级分类" : "辅助标签"}</small>
+                      </span>
+                      <strong>{label.similarity.toFixed(3)}</strong>
+                      <i
+                        style={{ width: `${Math.max(2, Math.min(100, label.similarity * 250))}%` }}
+                      />
+                    </div>
+                  ))}
+                  <p>数值为模型相似度，不代表准确率或概率。</p>
+                </div>
+              ) : (
+                <div className="semantic-empty">
+                  {asset.semanticStatus === "failed" ? asset.semanticError : "尚无真实语义分析结果"}
+                </div>
+              )}
+              <dl className="property-list model-properties">
+                <Property
+                  label="模型"
+                  value={asset.semanticLabels[0]?.modelName ?? semanticStatus?.model.name ?? "—"}
+                />
+                <Property
+                  label="版本"
+                  value={
+                    asset.semanticLabels[0]?.modelVersion ?? semanticStatus?.model.version ?? "—"
+                  }
+                />
+                <Property
+                  label="后端"
+                  value={semanticStatus?.selectedBackend ? "本地计算" : "未启用"}
+                />
+              </dl>
+              <button
+                className="secondary-action full"
+                type="button"
+                onClick={() => onReanalyze(asset)}
+                disabled={
+                  semanticStatus?.status !== "ready" || asset.analysisStatus !== "completed"
+                }
+              >
+                <PlayIcon width="14" height="14" />
+                重新分析此图片
+              </button>
+            </DetailSection>
+          </div>
+        )}
+      </div>
     </aside>
+  );
+}
+
+function ManualMarkEditor({
+  asset,
+  onUpdateRating,
+  onUpdateColorLabel,
+}: {
+  asset: AssetListItem;
+  onUpdateRating?: (assetId: number, rating: number) => void;
+  onUpdateColorLabel?: (assetId: number, colorLabel: ManualColorLabel | null) => void;
+}) {
+  return (
+    <DetailSection title="人工标记">
+      <div className="manual-mark-editor">
+        <div className="manual-mark-row">
+          <span>星级</span>
+          <div className="manual-rating-controls" role="group" aria-label="星级">
+            {Array.from({ length: 5 }, (_, index) => {
+              const value = index + 1;
+              const isActive = value <= asset.rating;
+              return (
+                <button
+                  type="button"
+                  className={isActive ? "is-active" : ""}
+                  key={value}
+                  aria-label={`${value} 星`}
+                  aria-pressed={isActive}
+                  onClick={() => onUpdateRating?.(asset.id, asset.rating === value ? 0 : value)}
+                >
+                  {isActive ? "★" : "☆"}
+                </button>
+              );
+            })}
+            <small>{asset.rating ? `${asset.rating} 星` : "未评级"}</small>
+          </div>
+        </div>
+        <div className="manual-mark-row">
+          <span>色标</span>
+          <div className="manual-color-label-controls" role="group" aria-label="色标">
+            {MANUAL_COLOR_LABEL_OPTIONS.map((option) => {
+              const isActive = asset.colorLabel === option.id;
+              return (
+                <button
+                  type="button"
+                  key={option.id}
+                  className={isActive ? "is-active" : ""}
+                  data-manual-color-label={option.id}
+                  style={{ backgroundColor: option.color }}
+                  aria-label={option.label}
+                  aria-pressed={isActive}
+                  onClick={() => onUpdateColorLabel?.(asset.id, isActive ? null : option.id)}
+                />
+              );
+            })}
+            <small>
+              {asset.colorLabel
+                ? MANUAL_COLOR_LABEL_OPTIONS.find((option) => option.id === asset.colorLabel)?.label
+                : "未设置"}
+            </small>
+          </div>
+        </div>
+      </div>
+    </DetailSection>
   );
 }
 

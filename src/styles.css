@@ -4753,3 +4753,4102 @@ button:disabled {
   border-color: var(--line-subtle);
   background: linear-gradient(145deg, #414141, #303030);
 }
+
+/* Manual asset marks and narrow-sidebar safeguards.  These rules deliberately
+   live after the tactile button layer so structural overlays keep their
+   absolute positioning while ordinary controls retain their pressed states. */
+.asset-check,
+.asset-mark-toggle {
+  position: absolute;
+}
+
+.asset-check {
+  top: 10px;
+  left: 10px;
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  z-index: 6;
+}
+
+.asset-card-shell:hover .asset-check {
+  transform: translateY(-1px);
+}
+
+.color-filter-list {
+  grid-template-columns: repeat(auto-fit, minmax(28px, 1fr));
+  min-width: 0;
+  gap: 8px;
+  overflow: hidden;
+}
+
+.color-filter {
+  width: 100%;
+  min-width: 0;
+}
+
+.asset-card-shell.color-label-red {
+  --manual-label-color: #d66b6b;
+  --manual-label-tint: #4a2f32;
+}
+
+.asset-card-shell.color-label-yellow {
+  --manual-label-color: #d7b65f;
+  --manual-label-tint: #4a4128;
+}
+
+.asset-card-shell.color-label-green {
+  --manual-label-color: #72a37b;
+  --manual-label-tint: #2f4538;
+}
+
+.asset-card-shell.color-label-blue {
+  --manual-label-color: #6f94c5;
+  --manual-label-tint: #2f3f56;
+}
+
+.asset-card-shell.color-label-purple {
+  --manual-label-color: #9d7fc1;
+  --manual-label-tint: #403451;
+}
+
+.asset-card-shell.has-color-label .asset-card {
+  border-color: var(--manual-label-color);
+  box-shadow:
+    inset 0 0 0 1px var(--manual-label-color),
+    0 0 0 1px color-mix(in srgb, var(--manual-label-color) 62%, transparent);
+}
+
+.asset-card-shell.has-color-label.is-active .asset-card,
+.asset-card-shell.has-color-label .asset-card.is-selected {
+  box-shadow:
+    inset 0 0 0 1px var(--manual-label-color),
+    0 0 0 2px color-mix(in srgb, var(--manual-label-color) 70%, transparent);
+}
+
+.asset-mark-summary {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-height: 16px;
+  margin-top: 6px;
+  color: #e6cf95;
+  font-size: 12px;
+  line-height: 1;
+}
+
+.asset-mark-summary span {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  letter-spacing: 0.04em;
+}
+
+.asset-mark-summary small {
+  color: var(--text-low);
+  font-size: 10px;
+  letter-spacing: 0;
+}
+
+.asset-mark-summary i,
+.manual-color-label-controls button,
+.manual-color-filter button {
+  display: inline-block;
+  flex: 0 0 auto;
+  width: 14px;
+  height: 14px;
+  padding: 0;
+  border: 1px solid rgba(255, 255, 255, 0.42);
+  border-radius: 50%;
+  box-shadow: inset 0 1px 1px rgba(255, 255, 255, 0.22);
+}
+
+.asset-mark-controls {
+  position: absolute;
+  right: 8px;
+  bottom: 8px;
+  left: 8px;
+  z-index: 5;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  min-width: 0;
+  padding: 5px 6px;
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  border-radius: 9px;
+  background: rgba(22, 22, 22, 0.93);
+  box-shadow: 0 6px 15px rgba(0, 0, 0, 0.38);
+  opacity: 0;
+  pointer-events: none;
+  transform: translateY(4px);
+  transition:
+    opacity 150ms ease,
+    transform 150ms ease;
+}
+
+.asset-card-shell:hover .asset-mark-controls,
+.asset-card-shell:focus-within .asset-mark-controls,
+.asset-card-shell.has-rating .asset-mark-controls,
+.asset-card-shell.has-color-label .asset-mark-controls {
+  opacity: 1;
+  pointer-events: auto;
+  transform: translateY(0);
+}
+
+.asset-rating-controls,
+.manual-rating-controls,
+.manual-color-label-controls,
+.manual-color-filter {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+}
+
+.asset-rating-controls button,
+.manual-rating-controls button {
+  width: 17px;
+  height: 19px;
+  padding: 0;
+  color: #8e8e8e;
+  border: 0;
+  background: transparent;
+  font-size: 15px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.asset-rating-controls button:hover,
+.asset-rating-controls button.is-active,
+.manual-rating-controls button:hover,
+.manual-rating-controls button.is-active {
+  color: #f1d38c;
+}
+
+.asset-color-label-controls {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+}
+
+.asset-color-label-controls button,
+.manual-color-label-controls button,
+.manual-color-filter button {
+  border-color: rgba(255, 255, 255, 0.3);
+  background: var(--manual-label-color, #656565);
+  cursor: pointer;
+}
+
+.asset-color-label-controls button.is-active,
+.manual-color-label-controls button.is-active,
+.manual-color-filter button.is-active {
+  outline: 2px solid rgba(255, 255, 255, 0.9);
+  outline-offset: 2px;
+}
+
+.manual-mark-editor {
+  display: grid;
+  gap: 10px;
+}
+
+.manual-mark-row {
+  display: grid;
+  grid-template-columns: 42px minmax(0, 1fr);
+  align-items: center;
+  gap: 10px;
+}
+
+.manual-mark-row > span,
+.manual-filter-label {
+  color: var(--text-low);
+  font-size: 12px;
+}
+
+.manual-rating-controls small,
+.manual-color-label-controls small {
+  margin-left: 4px;
+  color: var(--text-low);
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.manual-filter-group {
+  display: grid;
+  grid-template-columns: 42px minmax(0, 1fr);
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+
+.manual-rating-filter {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 3px;
+}
+
+.manual-rating-filter button {
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  color: var(--text-low);
+  border: 1px solid var(--line-subtle);
+  border-radius: 6px;
+  background: var(--surface-control);
+  font-size: 14px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.manual-rating-filter button.is-active,
+.manual-rating-filter button:hover {
+  color: #f1d38c;
+  border-color: var(--line-visible);
+}
+
+.manual-color-filter {
+  flex-wrap: wrap;
+}
+
+.manual-color-filter button {
+  width: 19px;
+  height: 19px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .asset-mark-controls {
+    transition: none;
+  }
+}
+
+/* Lightroom-style grid marks: one quiet footer inside each cell, never a
+   floating toolbar that changes the grid rhythm. */
+.asset-card-frame {
+  position: relative;
+  overflow: hidden;
+  border: 1px solid var(--line-subtle);
+  border-radius: var(--radius);
+  background: linear-gradient(145deg, #383838, #2a2a2a);
+  transition:
+    border-color 150ms ease,
+    box-shadow 150ms ease,
+    background 150ms ease;
+}
+
+.asset-card-frame:hover {
+  border-color: var(--line-visible);
+  background: linear-gradient(145deg, #404040, #303030);
+}
+
+.asset-card-frame .asset-card,
+.asset-card-frame .asset-card:hover,
+.asset-card-frame .asset-card.is-selected {
+  display: block;
+  width: 100%;
+  border: 0;
+  border-radius: calc(var(--radius) - 1px) calc(var(--radius) - 1px) 0 0;
+  background: transparent;
+  box-shadow: none;
+  transform: none;
+}
+
+.asset-card-frame .asset-mark-controls {
+  position: static;
+  display: flex;
+  min-height: 28px;
+  padding: 2px 9px 5px;
+  border: 0;
+  border-top: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+  opacity: 1;
+  pointer-events: auto;
+  transform: none;
+  transition: none;
+}
+
+.asset-card-frame .asset-rating-controls,
+.asset-card-frame .asset-color-label-controls {
+  gap: 1px;
+}
+
+.asset-card-frame .asset-rating-controls button {
+  width: 18px;
+  height: 20px;
+  color: #8d8d8d;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+  font-size: 15px;
+}
+
+.asset-card-frame .asset-rating-controls button:hover,
+.asset-card-frame .asset-rating-controls button.is-active {
+  color: #f1d38c;
+  background: transparent;
+  box-shadow: none;
+  transform: none;
+}
+
+.asset-card-frame .asset-color-label-controls button {
+  width: 11px !important;
+  height: 11px !important;
+  min-width: 11px;
+  min-height: 11px;
+  margin-left: 3px;
+  padding: 0;
+  border: 1px solid rgba(255, 255, 255, 0.38);
+  border-radius: 50% !important;
+  background: var(--manual-label-color, #656565);
+  box-shadow: inset 0 1px 1px rgba(255, 255, 255, 0.2);
+  transform: none;
+}
+
+.asset-card-frame .asset-color-label-controls button:hover,
+.asset-card-frame .asset-color-label-controls button.is-active {
+  outline: 2px solid rgba(255, 255, 255, 0.88);
+  outline-offset: 2px;
+  box-shadow: inset 0 1px 1px rgba(255, 255, 255, 0.2);
+  transform: none;
+}
+
+.asset-check {
+  position: absolute !important;
+  top: 8px;
+  left: 8px;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  color: #f3f3f3;
+  border: 1px solid rgba(255, 255, 255, 0.55);
+  border-radius: 50%;
+  background: rgba(24, 24, 24, 0.74);
+  box-shadow: none;
+  transform: none !important;
+}
+
+.asset-check.is-selected {
+  color: #2c5c91;
+  border-color: #9fc2e8;
+  background: #e7f1ff;
+  box-shadow:
+    0 0 0 2px rgba(111, 145, 184, 0.34),
+    0 2px 5px rgba(0, 0, 0, 0.32) !important;
+}
+
+.asset-card-shell.has-color-label .asset-card-frame {
+  border-color: var(--manual-label-color);
+  box-shadow:
+    inset 0 0 0 1px var(--manual-label-color),
+    0 0 0 1px color-mix(in srgb, var(--manual-label-color) 58%, transparent);
+}
+
+.asset-card-shell.has-color-label.is-active .asset-card-frame,
+.asset-card-shell.has-color-label .asset-card.is-selected {
+  box-shadow:
+    inset 0 0 0 1px var(--manual-label-color),
+    0 0 0 2px color-mix(in srgb, var(--manual-label-color) 68%, transparent);
+}
+
+.asset-card-shell.has-color-label .asset-card.is-selected {
+  border-color: transparent;
+}
+
+.asset-card-shell.has-rating .asset-card-frame {
+  border-color: rgba(231, 213, 161, 0.42);
+}
+
+.asset-card-shell.has-color-label.has-rating .asset-card-frame {
+  border-color: var(--manual-label-color);
+}
+
+.asset-card-shell.has-color-label .asset-card-frame {
+  background: linear-gradient(145deg, var(--manual-label-tint), #292929 78%);
+}
+
+.asset-card-shell.has-color-label .asset-card-body,
+.asset-card-shell.has-color-label .asset-mark-controls {
+  background: color-mix(in srgb, var(--manual-label-tint) 72%, #292929);
+}
+
+.asset-mark-summary {
+  display: none;
+}
+
+.manual-rating-controls button,
+.manual-rating-filter button {
+  width: 18px;
+  height: 20px;
+  padding: 0;
+  color: #8d8d8d;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+  font-size: 15px;
+  line-height: 1;
+}
+
+.manual-rating-controls button:hover,
+.manual-rating-controls button.is-active,
+.manual-rating-filter button:hover,
+.manual-rating-filter button.is-active {
+  color: #f1d38c;
+  border: 0;
+  background: transparent;
+  box-shadow: none;
+  transform: none;
+}
+
+.manual-color-label-controls button,
+.manual-color-filter button {
+  width: 14px !important;
+  height: 14px !important;
+  min-width: 14px;
+  min-height: 14px;
+  padding: 0;
+  border-radius: 50% !important;
+  box-shadow: inset 0 1px 1px rgba(255, 255, 255, 0.2);
+}
+
+/* Lightroom-style workspace structure: independent library/filter regions,
+   plus explicit resizers between each side panel and the image workspace. */
+.workspace-shell {
+  grid-template-columns:
+    var(--left-panel-width, 270px)
+    minmax(0, 1fr)
+    var(--right-panel-width, 320px);
+}
+
+.photo-app.left-closed .workspace-shell {
+  grid-template-columns:
+    54px
+    minmax(0, 1fr)
+    var(--right-panel-width, 320px);
+}
+
+.photo-app.right-closed .workspace-shell {
+  grid-template-columns:
+    var(--left-panel-width, 270px)
+    minmax(0, 1fr)
+    54px;
+}
+
+.photo-app.left-closed.right-closed .workspace-shell {
+  grid-template-columns: 54px minmax(0, 1fr) 54px;
+}
+
+.left-panel:not(.is-collapsed) {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.sidebar-library-area {
+  flex: 0 1 42%;
+  min-height: 150px;
+  max-height: 46%;
+  overflow-y: auto;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+  scrollbar-color: #686868 transparent;
+  scrollbar-width: thin;
+}
+
+.sidebar-filter-area {
+  flex: 1 1 0;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 0 0 14px;
+  scrollbar-color: #686868 transparent;
+  scrollbar-width: thin;
+}
+
+.sidebar-area-heading {
+  position: sticky;
+  z-index: 2;
+  top: 0;
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+  min-height: 48px;
+  padding: 16px 16px 10px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+  background: linear-gradient(
+    180deg,
+    #363636 0%,
+    rgba(54, 54, 54, 0.95) 72%,
+    rgba(54, 54, 54, 0.72)
+  );
+  backdrop-filter: blur(8px);
+}
+
+.sidebar-area-heading strong {
+  color: var(--text);
+  font-size: 13px;
+  letter-spacing: 0.02em;
+}
+
+.sidebar-area-heading span {
+  overflow: hidden;
+  color: var(--text-muted);
+  font-size: 10px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.panel-resize-handle {
+  position: relative;
+  z-index: 8;
+  width: var(--panel-resize-hit-width, 12px);
+  min-width: 0;
+  cursor: col-resize;
+  touch-action: none;
+  user-select: none;
+}
+
+.panel-resize-handle::before {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 50%;
+  width: 1px;
+  content: "";
+  background: rgba(255, 255, 255, 0.06);
+  transform: translateX(-50%);
+  transition:
+    width var(--transition),
+    background var(--transition),
+    box-shadow var(--transition);
+}
+
+.panel-resize-handle:hover::before,
+.panel-resize-handle:focus-visible::before {
+  width: 3px;
+  background: var(--accent-strong);
+  box-shadow: 0 0 10px rgba(134, 167, 204, 0.42);
+}
+
+.panel-resize-handle.is-hidden {
+  display: none;
+}
+
+.single-selection-toggle {
+  position: absolute;
+  z-index: 5;
+  top: 14px;
+  left: 14px;
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  min-height: 30px;
+  padding: 4px 10px 4px 5px;
+  color: var(--text-secondary);
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  border-radius: 16px;
+  background: rgba(28, 28, 28, 0.86);
+  box-shadow: 0 5px 14px rgba(0, 0, 0, 0.28);
+  cursor: pointer;
+  backdrop-filter: blur(7px);
+}
+
+.single-selection-toggle:hover {
+  color: var(--text);
+  border-color: rgba(134, 167, 204, 0.72);
+  background: rgba(47, 63, 82, 0.92);
+}
+
+.single-selection-toggle.is-selected {
+  color: #eff7ff;
+  border-color: #9fc2e8;
+  background: #587fae;
+  box-shadow:
+    0 0 0 2px rgba(111, 145, 184, 0.3),
+    0 5px 14px rgba(0, 0, 0, 0.32);
+}
+
+.single-selection-mark {
+  display: grid;
+  width: 21px;
+  height: 21px;
+  place-items: center;
+  border: 1px solid rgba(255, 255, 255, 0.42);
+  border-radius: 50%;
+  background: rgba(20, 20, 20, 0.6);
+}
+
+.single-selection-toggle.is-selected .single-selection-mark {
+  color: #2c5c91;
+  border-color: #c9e0fa;
+  background: #e7f1ff;
+}
+
+.filmstrip button.is-selected:not(.is-active) {
+  border-color: rgba(134, 167, 204, 0.82);
+  box-shadow: inset 0 0 0 1px rgba(134, 167, 204, 0.3);
+}
+
+/* The batch editor occupies the optional middle grid row. When it is closed,
+   the workspace must use that row as well instead of leaving a blank strip at
+   the bottom of the window. */
+.photo-app:not(.has-batch-classification) {
+  grid-template-rows: 64px minmax(0, 1fr);
+}
+
+/* Keep the library tree open and lightweight. The section title owns the
+   import action, so the tree itself is not wrapped in a second large card. */
+.sidebar-library-area {
+  padding: 0 12px 12px;
+  border-bottom-color: var(--line-subtle);
+}
+
+.library-import-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  min-height: 27px;
+  padding: 0 8px;
+  color: var(--text-normal);
+  font-size: 10px;
+  font-weight: 600;
+  white-space: nowrap;
+  border: 1px solid var(--line-subtle);
+  border-radius: 7px;
+  background: linear-gradient(145deg, var(--surface-control), #343434);
+  box-shadow:
+    2px 2px 5px rgba(0, 0, 0, 0.28),
+    inset 0 1px 0 rgba(255, 255, 255, 0.06);
+  cursor: pointer;
+}
+
+.library-import-button:hover {
+  color: var(--text-high);
+  border-color: var(--line-visible);
+  background: linear-gradient(145deg, var(--surface-control-hover), #3a3a3a);
+}
+
+.library-import-button:active {
+  background: var(--surface-control-pressed);
+  box-shadow: var(--shadow-pressed);
+}
+
+.sidebar-library-area .library-tree {
+  gap: 2px;
+}
+
+.sidebar-library-area .library-tree-row {
+  min-height: 32px;
+}
+
+.sidebar-library-area .library-tree-expander {
+  width: 18px;
+  height: 30px;
+  flex-basis: 18px;
+}
+
+.sidebar-library-area .library-tree-row > .nav-row {
+  min-height: 30px;
+  padding: 0 8px;
+  border-radius: 8px;
+}
+
+.sidebar-library-area .library-tree-row svg,
+.sidebar-library-area .library-tree-row .library-menu-trigger svg {
+  width: 13px;
+  height: 13px;
+}
+
+.sidebar-library-area .library-root-drop-target {
+  margin-top: 3px;
+}
+
+/* Lightroom-style filter strip: the manual marks belong to the image browser
+   footer, not to the content taxonomy sidebar. Both views reserve the same
+   compact row so the controls stay in one predictable place. */
+.grid-workspace-shell {
+  display: flex;
+  min-height: 0;
+  flex: 1 1 0;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.grid-workspace-results {
+  min-height: 0;
+  flex: 1 1 0;
+  overflow: auto;
+  scrollbar-color: #686868 transparent;
+  scrollbar-width: thin;
+}
+
+.single-workspace {
+  grid-template-rows: minmax(0, 1fr) 44px 112px;
+}
+
+.manual-mark-filter-bar {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 12px;
+  min-width: 0;
+  min-height: 44px;
+  padding: 0 14px;
+  color: var(--text-normal);
+  border-top: 1px solid var(--line-subtle);
+  border-bottom: 1px solid rgba(0, 0, 0, 0.45);
+  background: linear-gradient(180deg, #343434 0%, #292929 100%);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.05),
+    0 -5px 14px rgba(0, 0, 0, 0.18);
+}
+
+.manual-mark-filter-title {
+  margin-right: auto;
+  color: var(--text-low);
+  font-size: 10px;
+  letter-spacing: 0.04em;
+}
+
+.manual-mark-filter-controls,
+.manual-mark-filter-group {
+  display: flex;
+  align-items: center;
+}
+
+.manual-mark-filter-controls {
+  gap: 10px;
+}
+
+.manual-mark-filter-group {
+  gap: 2px;
+}
+
+.manual-mark-filter-group button {
+  display: grid;
+  width: 21px;
+  height: 24px;
+  padding: 0;
+  place-items: center;
+  color: #929292;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  cursor: pointer;
+  font-size: 17px;
+  line-height: 1;
+}
+
+.manual-mark-filter-group button:hover,
+.manual-mark-filter-group button:focus-visible,
+.manual-mark-filter-group button.is-active {
+  color: #efd38d;
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.manual-mark-color-group {
+  gap: 5px;
+}
+
+.manual-mark-color-group button {
+  width: 15px;
+  height: 15px;
+  border: 1px solid rgba(255, 255, 255, 0.28);
+  border-radius: 50%;
+  box-shadow:
+    inset 0 1px 1px rgba(255, 255, 255, 0.2),
+    1px 1px 2px rgba(0, 0, 0, 0.35);
+}
+
+.manual-mark-color-group button:hover,
+.manual-mark-color-group button:focus-visible,
+.manual-mark-color-group button.is-active {
+  border-color: #f0f4f4;
+  outline: 2px solid color-mix(in srgb, currentColor 58%, transparent);
+  outline-offset: 2px;
+}
+
+.manual-mark-filter-divider {
+  width: 1px;
+  height: 22px;
+  background: rgba(255, 255, 255, 0.16);
+}
+
+.manual-mark-filter-clear {
+  min-height: 24px;
+  padding: 0 7px;
+  color: var(--text-low);
+  font-size: 9px;
+  border: 1px solid var(--line-subtle);
+  border-radius: 5px;
+  background: rgba(255, 255, 255, 0.04);
+  cursor: pointer;
+}
+
+.manual-mark-filter-clear:hover {
+  color: var(--text-high);
+  border-color: var(--line-visible);
+  background: rgba(255, 255, 255, 0.1);
+}
+
+@media (max-width: 720px) {
+  .manual-mark-filter-bar {
+    gap: 6px;
+    padding-inline: 8px;
+  }
+
+  .manual-mark-filter-title {
+    display: none;
+  }
+
+  .manual-mark-filter-controls {
+    width: 100%;
+    justify-content: flex-end;
+  }
+}
+
+/* Keep the single-library sidebar direct: the titlebar owns the import action,
+   while the tree below starts with the actual Library node. */
+.panel-titlebar-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.panel-titlebar .library-import-button {
+  min-height: 26px;
+  padding: 0 7px;
+  font-size: 9px;
+}
+
+/* Compact taxonomy controls keep the sidebar dense without removing a usable
+   pointer target or the visible selected state. */
+.sidebar-filter-area .chip-grid {
+  gap: 4px;
+}
+
+.sidebar-filter-area .filter-chip {
+  min-height: 28px;
+  padding: 0 8px;
+  gap: 4px;
+  border-radius: 8px;
+  font-size: 10px;
+}
+
+.sidebar-filter-area .filter-chip small {
+  font-size: 8px;
+}
+
+.sidebar-filter-area .nav-list.compact .nav-row {
+  min-height: 28px;
+}
+
+.sidebar-filter-area .match-mode {
+  margin-top: 6px;
+  border-radius: 7px;
+}
+
+.sidebar-filter-area .match-mode button {
+  min-height: 24px;
+  border-radius: 6px;
+  font-size: 9px;
+}
+
+/* Final visual pass: cold graphite neumorphism.
+   Surfaces use light/dark relief instead of a visible outline.  A border is
+   reserved for states that carry meaning: focus, selection, drag targets and
+   manual color labels. */
+:root {
+  --neu-bg: #202020;
+  --neu-surface: #2b2b2b;
+  --neu-surface-raised: #333333;
+  --neu-surface-pressed: #242424;
+  --neu-input: #202020;
+  --neu-shadow-dark: rgba(0, 0, 0, 0.48);
+  --neu-shadow-light: rgba(255, 255, 255, 0.055);
+  --neu-shadow-raised:
+    10px 12px 24px var(--neu-shadow-dark), -6px -6px 15px var(--neu-shadow-light);
+  --neu-shadow-control: 5px 6px 12px rgba(0, 0, 0, 0.42), -4px -4px 9px rgba(255, 255, 255, 0.045);
+  --neu-shadow-pressed:
+    inset 3px 3px 7px rgba(0, 0, 0, 0.42), inset -3px -3px 6px rgba(255, 255, 255, 0.035);
+  --neu-focus-ring: rgba(134, 167, 204, 0.78);
+  --neu-radius-module: 15px;
+  --neu-radius-control: 9px;
+}
+
+body,
+.photo-app {
+  background: var(--neu-bg);
+}
+
+.topbar,
+.panel-titlebar,
+.content-toolbar,
+.sidebar-area-heading,
+.manual-mark-filter-bar,
+.filmstrip,
+.organization-preview-heading,
+.organization-safety-banner,
+.organization-panel-heading {
+  border: 0;
+}
+
+.topbar {
+  background: linear-gradient(145deg, #363636 0%, #292929 100%);
+  box-shadow:
+    0 10px 24px rgba(0, 0, 0, 0.34),
+    inset 0 -1px 0 rgba(0, 0, 0, 0.2);
+}
+
+.left-panel,
+.right-panel {
+  background: linear-gradient(160deg, #303030 0%, var(--neu-surface) 54%, #202020 100%);
+  border: 0;
+}
+
+.left-panel {
+  box-shadow: 10px 0 26px rgba(0, 0, 0, 0.2);
+}
+
+.right-panel {
+  box-shadow: -10px 0 26px rgba(0, 0, 0, 0.2);
+}
+
+.panel-titlebar,
+.sidebar-area-heading,
+.content-toolbar {
+  background: linear-gradient(145deg, #353535 0%, #292929 100%);
+  box-shadow:
+    0 8px 18px rgba(0, 0, 0, 0.22),
+    inset 0 -1px 0 rgba(255, 255, 255, 0.025);
+}
+
+.sidebar-library-area {
+  border: 0;
+}
+
+.panel-resize-handle::before {
+  background: rgba(255, 255, 255, 0.035);
+}
+
+.panel-resize-handle:hover::before,
+.panel-resize-handle:focus-visible::before {
+  background: var(--accent-strong);
+}
+
+/* Modules are separated by relief, not by a ring around every block. */
+:is(
+  .panel-section,
+  .detail-section,
+  .scan-panel,
+  .semantic-taskbar,
+  .welcome-state,
+  .import-library-dialog,
+  .organization-controls,
+  .organization-detail,
+  .organization-preview,
+  .organization-fieldset,
+  .organization-level,
+  .organization-metric,
+  .organization-issue,
+  .manual-mark-filter-bar
+) {
+  border: 0;
+}
+
+.panel-section,
+.detail-section,
+.scan-panel,
+.semantic-taskbar,
+.welcome-state,
+.import-library-dialog {
+  background: linear-gradient(145deg, var(--neu-surface-raised), var(--neu-surface));
+  box-shadow: var(--neu-shadow-raised);
+}
+
+.panel-section {
+  border-radius: var(--neu-radius-module);
+}
+
+.detail-section,
+.scan-panel,
+.semantic-taskbar {
+  border-radius: var(--neu-radius-control);
+}
+
+.analysis-grid > div,
+.classification-field,
+.classification-tags-editor,
+.organization-fieldset,
+.organization-level,
+.organization-metric,
+.organization-issue,
+.dialog-path,
+.import-option,
+.organization-target-input input,
+.template-input,
+.organization-control-group select,
+.organization-rule-row select,
+.organization-rule-row input {
+  border: 0;
+  background: var(--neu-input);
+  box-shadow: var(--neu-shadow-pressed);
+}
+
+.analysis-grid > div,
+.classification-field,
+.classification-tags-editor,
+.organization-fieldset,
+.organization-level,
+.organization-metric,
+.organization-issue,
+.import-option {
+  border-radius: var(--neu-radius-control);
+}
+
+.detail-preview,
+.preview-navigator,
+.preview-navigator-map {
+  border: 0;
+}
+
+.detail-preview,
+.preview-navigator-map {
+  box-shadow: var(--neu-shadow-pressed);
+}
+
+.preview-navigator {
+  background: linear-gradient(145deg, var(--neu-surface-raised), var(--neu-surface));
+  box-shadow: var(--neu-shadow-raised);
+}
+
+.manual-mark-filter-bar {
+  background: linear-gradient(180deg, #333333 0%, #292929 100%);
+  box-shadow:
+    0 -8px 18px rgba(0, 0, 0, 0.28),
+    inset 0 1px 0 rgba(255, 255, 255, 0.025);
+}
+
+/* Ordinary controls share one tactile language.  The pseudo-element from the
+   older theme drew a bright top line; remove it so the relief stays soft. */
+:is(
+  .tool-button,
+  .primary-action,
+  .secondary-action,
+  .direction-control,
+  .pagination button,
+  .quiet-button,
+  .icon-button,
+  .library-import-button,
+  .dialog-close,
+  .semantic-taskbar button,
+  .organization-target-input button,
+  .organization-actions button,
+  .organization-level button,
+  .subtle-button,
+  .manual-mark-filter-clear
+) {
+  border: 0;
+  border-radius: var(--neu-radius-control);
+  background: linear-gradient(145deg, #414141 0%, #303030 100%);
+  box-shadow: var(--neu-shadow-control);
+  transition:
+    transform 150ms cubic-bezier(0.22, 1, 0.36, 1),
+    box-shadow 150ms cubic-bezier(0.22, 1, 0.36, 1),
+    background 150ms ease,
+    color 150ms ease;
+}
+
+:is(
+  .tool-button,
+  .primary-action,
+  .secondary-action,
+  .direction-control,
+  .pagination button,
+  .quiet-button,
+  .icon-button,
+  .library-import-button,
+  .dialog-close,
+  .semantic-taskbar button,
+  .organization-target-input button,
+  .organization-actions button,
+  .organization-level button,
+  .subtle-button,
+  .manual-mark-filter-clear
+)::after {
+  display: none;
+}
+
+:is(
+    .tool-button,
+    .secondary-action,
+    .direction-control,
+    .pagination button,
+    .quiet-button,
+    .icon-button,
+    .library-import-button,
+    .dialog-close,
+    .semantic-taskbar button,
+    .organization-target-input button,
+    .organization-actions button,
+    .organization-level button,
+    .subtle-button,
+    .manual-mark-filter-clear
+  ):not(:disabled):hover {
+  color: var(--text-high);
+  background: linear-gradient(145deg, #484848 0%, #353535 100%);
+  box-shadow:
+    7px 8px 16px rgba(0, 0, 0, 0.44),
+    -5px -5px 11px rgba(255, 255, 255, 0.05);
+  transform: translateY(-1px);
+}
+
+:is(
+    .tool-button,
+    .primary-action,
+    .secondary-action,
+    .direction-control,
+    .pagination button,
+    .quiet-button,
+    .icon-button,
+    .library-import-button,
+    .dialog-close,
+    .semantic-taskbar button,
+    .organization-target-input button,
+    .organization-actions button,
+    .organization-level button,
+    .subtle-button,
+    .manual-mark-filter-clear
+  ):not(:disabled):active,
+:is(.tool-button, .secondary-action, .library-import-button, .filter-chip).is-active {
+  background: var(--neu-surface-pressed);
+  box-shadow: var(--neu-shadow-pressed);
+  transform: translateY(1px);
+}
+
+.primary-action {
+  color: #f7fbff;
+  background: linear-gradient(145deg, #6989ad 0%, #4e6e92 100%);
+  box-shadow:
+    5px 6px 13px rgba(0, 0, 0, 0.46),
+    -4px -4px 9px rgba(185, 212, 237, 0.1);
+}
+
+.primary-action:hover:not(:disabled) {
+  background: linear-gradient(145deg, #7899bf 0%, #5b7da4 100%);
+}
+
+.primary-action:active:not(:disabled) {
+  background: #557697;
+  box-shadow: var(--neu-shadow-pressed);
+}
+
+:is(
+  .tool-button,
+  .primary-action,
+  .secondary-action,
+  .direction-control,
+  .pagination button,
+  .quiet-button,
+  .icon-button,
+  .library-import-button,
+  .dialog-close,
+  .semantic-taskbar button,
+  .organization-target-input button,
+  .organization-actions button,
+  .organization-level button,
+  .subtle-button,
+  .manual-mark-filter-clear
+):focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+}
+
+.segmented,
+.search-control,
+.sort-select {
+  border: 0;
+  background: var(--neu-input);
+  box-shadow: var(--neu-shadow-pressed);
+}
+
+.segmented button.is-active {
+  background: linear-gradient(145deg, #4c5a68, #35414d);
+  box-shadow: var(--neu-shadow-control);
+}
+
+.batch-classification-bar select,
+.classification-control select,
+.classification-tag-add select,
+.sort-select select {
+  border: 0;
+  background: transparent;
+  box-shadow: none;
+}
+
+/* Library rows and filter chips remain compact, but only active states receive
+   a semantic ring. */
+.nav-row,
+.filter-chip,
+.match-mode,
+.library-context-menu,
+.left-panel-footer {
+  border: 0;
+}
+
+.nav-row:not(.is-active):hover {
+  border: 0;
+  background: linear-gradient(145deg, rgba(72, 72, 72, 0.82), rgba(49, 49, 49, 0.9));
+  box-shadow: var(--neu-shadow-control);
+}
+
+.nav-row.is-active {
+  border: 0;
+  background: linear-gradient(145deg, #596267, #41484b);
+  box-shadow:
+    var(--neu-shadow-pressed),
+    0 0 0 1px rgba(199, 214, 220, 0.44);
+}
+
+.filter-chip {
+  background: linear-gradient(145deg, #414141, #303030);
+  box-shadow: var(--neu-shadow-control);
+}
+
+.filter-chip:hover:not(.is-active) {
+  border: 0;
+  background: linear-gradient(145deg, #4a4a4a, #363636);
+}
+
+.filter-chip.is-active {
+  border: 0;
+  background: var(--neu-surface-pressed);
+  box-shadow:
+    var(--neu-shadow-pressed),
+    0 0 0 1px rgba(199, 214, 220, 0.55);
+  transform: none;
+}
+
+.library-context-menu {
+  background: var(--neu-surface-raised);
+  box-shadow:
+    14px 16px 30px rgba(0, 0, 0, 0.52),
+    -6px -6px 15px rgba(255, 255, 255, 0.035);
+}
+
+.library-context-menu button:hover {
+  border: 0;
+  background: rgba(255, 255, 255, 0.07);
+  box-shadow: var(--neu-shadow-pressed);
+}
+
+/* Gallery cells use the same surface treatment.  Label color is expressed as
+   a quiet surface tint; selection remains a separate interaction state. */
+.asset-card-frame {
+  border: 0;
+  background: linear-gradient(145deg, #383838, #2a2a2a);
+  box-shadow: var(--neu-shadow-raised);
+}
+
+.asset-card-frame:hover {
+  border: 0;
+  background: linear-gradient(145deg, #424242, #303030);
+  box-shadow:
+    13px 15px 28px rgba(0, 0, 0, 0.46),
+    -6px -6px 15px rgba(255, 255, 255, 0.045);
+  transform: translateY(-1px);
+}
+
+.asset-card-frame .asset-mark-controls {
+  border: 0;
+  box-shadow: none;
+}
+
+.asset-card,
+.asset-card-frame .asset-card,
+.asset-card-frame .asset-card:hover,
+.asset-card-frame .asset-card.is-selected {
+  border: 0;
+}
+
+.asset-image-wrap {
+  border-bottom: 0;
+}
+
+.asset-card-shell.has-color-label .asset-card-frame {
+  border: 0;
+  box-shadow:
+    0 0 0 2px var(--manual-label-color),
+    var(--neu-shadow-raised);
+}
+
+.asset-card-shell.has-color-label.is-active .asset-card-frame,
+.asset-card-shell.has-color-label .asset-card.is-selected {
+  border: 0;
+  box-shadow:
+    0 0 0 2px var(--manual-label-color),
+    0 0 0 4px rgba(134, 167, 204, 0.72),
+    var(--neu-shadow-raised);
+}
+
+.asset-card-shell.has-rating .asset-card-frame {
+  border: 0;
+  box-shadow:
+    0 0 0 1px rgba(231, 213, 161, 0.56),
+    var(--neu-shadow-raised);
+}
+
+.asset-card-shell.has-color-label.has-rating .asset-card-frame {
+  box-shadow:
+    0 0 0 2px var(--manual-label-color),
+    var(--neu-shadow-raised);
+}
+
+.asset-check {
+  border: 0;
+  background: #2b2b2b;
+  box-shadow: var(--neu-shadow-control);
+}
+
+.asset-check.is-selected {
+  border: 0;
+  background: #5b83b1;
+  box-shadow:
+    0 0 0 2px var(--neu-focus-ring),
+    4px 5px 9px rgba(0, 0, 0, 0.42);
+}
+
+.asset-card-frame .asset-color-label-controls button,
+.manual-color-label-controls button,
+.manual-color-filter button,
+.manual-mark-color-group button {
+  border: 0;
+  box-shadow:
+    inset 2px 2px 3px rgba(255, 255, 255, 0.2),
+    inset -2px -2px 3px rgba(0, 0, 0, 0.24),
+    2px 2px 5px rgba(0, 0, 0, 0.28);
+}
+
+.asset-card-frame .asset-color-label-controls button:hover,
+.asset-card-frame .asset-color-label-controls button.is-active,
+.manual-color-label-controls button:hover,
+.manual-color-label-controls button.is-active,
+.manual-color-filter button:hover,
+.manual-color-filter button.is-active,
+.manual-mark-color-group button:hover,
+.manual-mark-color-group button.is-active {
+  border: 0;
+  outline: 2px solid rgba(240, 244, 244, 0.86);
+  outline-offset: 2px;
+}
+
+.manual-rating-filter button {
+  border: 0;
+  background: linear-gradient(145deg, #414141, #303030);
+  box-shadow: var(--neu-shadow-control);
+}
+
+.manual-rating-filter button.is-active,
+.manual-rating-filter button:hover {
+  border: 0;
+  background: var(--neu-surface-pressed);
+  box-shadow:
+    var(--neu-shadow-pressed),
+    0 0 0 1px rgba(231, 213, 161, 0.62);
+}
+
+.single-selection-toggle {
+  border: 0;
+  background: rgba(38, 38, 38, 0.94);
+  box-shadow: var(--neu-shadow-control);
+}
+
+.single-selection-toggle:hover {
+  border: 0;
+  background: rgba(57, 76, 99, 0.96);
+}
+
+.single-selection-toggle.is-selected {
+  border: 0;
+  background: #587fae;
+  box-shadow:
+    0 0 0 2px var(--neu-focus-ring),
+    5px 6px 13px rgba(0, 0, 0, 0.42);
+}
+
+.single-selection-mark {
+  border: 0;
+  box-shadow: var(--neu-shadow-pressed);
+}
+
+.filmstrip button {
+  border: 0;
+  box-shadow: var(--neu-shadow-control);
+}
+
+.filmstrip button.is-active,
+.filmstrip button.is-selected:not(.is-active) {
+  border: 0;
+  box-shadow:
+    0 0 0 2px var(--neu-focus-ring),
+    var(--neu-shadow-pressed);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  :is(
+    .tool-button,
+    .primary-action,
+    .secondary-action,
+    .direction-control,
+    .pagination button,
+    .quiet-button,
+    .icon-button,
+    .library-import-button,
+    .dialog-close,
+    .semantic-taskbar button,
+    .organization-target-input button,
+    .organization-actions button,
+    .organization-level button,
+    .subtle-button,
+    .manual-mark-filter-clear,
+    .asset-card-frame
+  ) {
+    transition: none;
+  }
+}
+
+/* Final specificity pass: the shared tactile selector includes nested button
+   selectors, so the primary action needs the same explicit weight here. */
+button.primary-action {
+  color: #f7fbff;
+  border: 0;
+  background: linear-gradient(145deg, #6989ad 0%, #4e6e92 100%);
+  box-shadow:
+    5px 6px 13px rgba(0, 0, 0, 0.46),
+    -4px -4px 9px rgba(185, 212, 237, 0.1);
+}
+
+button.primary-action:hover:not(:disabled) {
+  background: linear-gradient(145deg, #7899bf 0%, #5b7da4 100%);
+}
+
+button.primary-action:active:not(:disabled) {
+  background: #557697;
+  box-shadow: var(--neu-shadow-pressed);
+}
+
+:is(
+  .filter-chip,
+  .match-mode button,
+  .classification-color-choice,
+  .color-filter,
+  .asset-check,
+  .asset-mark-toggle
+)::after {
+  display: none;
+}
+
+.color-filter {
+  border: 0;
+  box-shadow: none;
+}
+
+.color-filter:hover,
+.color-filter.is-active {
+  border: 0;
+  background: rgba(82, 105, 130, 0.28);
+  box-shadow:
+    var(--neu-shadow-pressed),
+    0 0 0 1px rgba(134, 167, 204, 0.62);
+}
+
+/* Detail well and sidebar heading tokens.  The detail panel uses the same
+   recessed surface as the preview navigator; the sidebar headings use a
+   stronger raised plane so the two navigation regions remain obvious. */
+:root {
+  --neu-detail-well-bg: var(--neu-surface-pressed);
+  --neu-detail-well-shadow:
+    inset 4px 5px 11px rgba(0, 0, 0, 0.46), inset -4px -4px 9px rgba(255, 255, 255, 0.035);
+  --neu-detail-inner-bg: #1f1f1f;
+  --neu-detail-inner-shadow:
+    inset 3px 3px 8px rgba(0, 0, 0, 0.48), inset -3px -3px 7px rgba(255, 255, 255, 0.028);
+  --neu-sidebar-heading-raised: linear-gradient(180deg, #3b3b3b 0%, #2d2d2d 100%);
+  --neu-sidebar-heading-shadow:
+    0 8px 18px rgba(0, 0, 0, 0.3), inset 0 -2px 0 rgba(0, 0, 0, 0.28),
+    inset 0 1px 0 rgba(255, 255, 255, 0.045);
+  --neu-sidebar-tree-offset: 15px;
+}
+
+/* Right information modules: all of them are wells, including the preview,
+   so the panel reads as one calm instrument surface instead of a stack of
+   floating cards. */
+.right-panel .detail-preview,
+.right-panel .preview-navigator,
+.right-panel .detail-section {
+  border: 0;
+  background: var(--neu-detail-well-bg);
+  box-shadow: var(--neu-detail-well-shadow);
+}
+
+.right-panel .detail-preview,
+.right-panel .preview-navigator,
+.right-panel .detail-section {
+  border-radius: var(--neu-radius-module);
+}
+
+.right-panel .analysis-grid > div,
+.right-panel .classification-field,
+.right-panel .classification-tags-editor,
+.right-panel .semantic-empty {
+  border: 0;
+  background: var(--neu-detail-inner-bg);
+  box-shadow: var(--neu-detail-inner-shadow);
+}
+
+.right-panel .analysis-grid > div,
+.right-panel .classification-field,
+.right-panel .classification-tags-editor,
+.right-panel .semantic-empty {
+  border-radius: var(--neu-radius-control);
+}
+
+.right-panel .semantic-detail-list > div::after,
+.right-panel .model-properties {
+  border-color: transparent;
+}
+
+.right-panel .semantic-empty {
+  border-style: solid;
+}
+
+/* Two persistent sidebar bands: their relief and contrast carry the
+   hierarchy, while the surface remains free of a hard outline. */
+.left-panel > .panel-titlebar,
+.left-panel .sidebar-area-heading {
+  min-height: 54px;
+  background: var(--neu-sidebar-heading-raised);
+  box-shadow: var(--neu-sidebar-heading-shadow);
+}
+
+.left-panel > .panel-titlebar {
+  padding-inline: 16px 12px;
+}
+
+.left-panel > .panel-titlebar strong,
+.left-panel .sidebar-area-heading strong {
+  color: var(--text-high);
+  font-size: 14px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+}
+
+.left-panel .sidebar-area-heading {
+  padding: 16px 16px 12px;
+  box-shadow:
+    0 -8px 18px rgba(0, 0, 0, 0.18),
+    0 8px 18px rgba(0, 0, 0, 0.3),
+    inset 0 -2px 0 rgba(0, 0, 0, 0.28),
+    inset 0 1px 0 rgba(255, 255, 255, 0.045);
+}
+
+.left-panel .sidebar-area-heading span {
+  color: #a5a5a5;
+}
+
+.left-panel .sidebar-library-area {
+  padding-top: var(--neu-sidebar-tree-offset);
+}
+
+/* Single-relief correction: a module floats once, while its useful content
+   may sink once inside it. This keeps the navigator and metric wells tactile
+   without stacking two identical recessed surfaces. */
+:root {
+  --neu-sidebar-module-bg: linear-gradient(145deg, #343434 0%, #2a2a2a 100%);
+  --neu-sidebar-module-shadow:
+    9px 10px 22px rgba(0, 0, 0, 0.38), -5px -5px 13px rgba(255, 255, 255, 0.04);
+  --neu-sidebar-module-radius: 18px;
+  --neu-sidebar-module-gap: 12px;
+}
+
+.right-panel .preview-navigator,
+.right-panel .detail-section {
+  background: linear-gradient(145deg, var(--neu-surface-raised), var(--neu-surface));
+  box-shadow: var(--neu-shadow-raised);
+}
+
+.right-panel .preview-navigator-map,
+.right-panel .analysis-grid > div,
+.right-panel .classification-field,
+.right-panel .classification-tags-editor,
+.right-panel .semantic-empty {
+  background: var(--neu-detail-inner-bg);
+  box-shadow: var(--neu-detail-inner-shadow);
+}
+
+/* The left rail is two independent rounded modules. The rail itself remains
+   quiet so the module edges, rather than a second container, define the split. */
+.left-panel {
+  display: flex;
+  flex-direction: column;
+  gap: var(--neu-sidebar-module-gap);
+  padding: 12px;
+  overflow: hidden;
+  background: var(--neu-bg);
+}
+
+.sidebar-module {
+  min-width: 0;
+  overflow: hidden;
+  border-radius: var(--neu-sidebar-module-radius);
+  background: var(--neu-sidebar-module-bg);
+  box-shadow: var(--neu-sidebar-module-shadow);
+}
+
+.sidebar-library-module {
+  display: flex;
+  min-height: 165px;
+  max-height: 48%;
+  flex: 0 1 42%;
+  flex-direction: column;
+}
+
+.sidebar-filter-module {
+  min-height: 0;
+  flex: 1 1 0;
+}
+
+.sidebar-library-module > .panel-titlebar {
+  position: relative;
+  z-index: 1;
+  top: auto;
+  flex: 0 0 54px;
+  min-height: 54px;
+  padding: 0 14px 0 16px;
+  border-radius: var(--neu-sidebar-module-radius) var(--neu-sidebar-module-radius) 0 0;
+  background: linear-gradient(180deg, #3b3b3b 0%, #303030 100%);
+  box-shadow:
+    inset 0 -2px 0 rgba(0, 0, 0, 0.28),
+    inset 0 1px 0 rgba(255, 255, 255, 0.045);
+}
+
+.sidebar-library-module > .panel-titlebar strong,
+.sidebar-filter-module .sidebar-area-heading strong {
+  color: var(--text-high);
+  font-size: 14px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+}
+
+.sidebar-library-area {
+  min-height: 0;
+  max-height: none;
+  flex: 1 1 0;
+  overflow-y: auto;
+  padding: var(--neu-sidebar-tree-offset) 12px 14px;
+  border: 0;
+  background: transparent;
+}
+
+.sidebar-filter-area {
+  height: 100%;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 0 12px 14px;
+  background: transparent;
+}
+
+.sidebar-filter-module .sidebar-area-heading {
+  position: sticky;
+  z-index: 2;
+  top: 0;
+  min-height: 54px;
+  margin: 0 -12px 10px;
+  padding: 16px 16px 12px;
+  border-radius: var(--neu-sidebar-module-radius) var(--neu-sidebar-module-radius) 0 0;
+  background: linear-gradient(180deg, #3b3b3b 0%, #303030 100%);
+  box-shadow:
+    inset 0 -2px 0 rgba(0, 0, 0, 0.28),
+    inset 0 1px 0 rgba(255, 255, 255, 0.045);
+}
+
+.sidebar-filter-module .sidebar-area-heading span {
+  color: #a5a5a5;
+}
+
+/* Filter groups live inside the rounded module rather than becoming a stack
+   of additional floating cards. */
+.sidebar-filter-module .panel-section {
+  padding: 10px 4px 11px;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+}
+
+.sidebar-filter-module .panel-section:first-of-type {
+  padding-top: 2px;
+}
+
+.sidebar-filter-module .left-panel-footer {
+  margin-inline: -4px;
+  padding-inline: 4px;
+  border-top-color: rgba(255, 255, 255, 0.08);
+}
+
+/* Workspace cards: each major region owns one rounded edge and one shadow.
+   Scrollbars stay inside the card so they cannot cut across its silhouette. */
+:root {
+  --neu-workspace-card-bg: linear-gradient(145deg, #303030 0%, #242424 100%);
+  --neu-workspace-card-radius: 18px;
+  --neu-workspace-card-shadow:
+    10px 12px 24px rgba(0, 0, 0, 0.38), -5px -5px 13px rgba(255, 255, 255, 0.035);
+}
+
+.workspace-shell {
+  background: var(--neu-bg);
+}
+
+/* Background jobs sit beside the image workspace.  Keeping the task surface
+   outside the workspace card avoids a rounded card nested inside another
+   rounded card while preserving one shared center-column scroll boundary. */
+.center-column {
+  display: flex;
+  min-width: 0;
+  min-height: 0;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.center-column > .scan-panel,
+.center-column > .semantic-taskbar {
+  flex: 0 0 auto;
+}
+
+.center-column > .center-workspace:not(.organization-mode-shell) {
+  flex: 1 1 auto;
+  min-height: 0;
+  margin-block: 8px 12px;
+}
+
+.center-workspace:not(.organization-mode-shell) {
+  min-height: 0;
+  margin-block: 12px;
+  overflow: hidden;
+  border-radius: var(--neu-workspace-card-radius);
+  background: var(--neu-workspace-card-bg);
+  box-shadow: var(--neu-workspace-card-shadow);
+}
+
+.center-workspace:not(.organization-mode-shell) > .content-toolbar {
+  position: relative;
+  top: auto;
+  flex: 0 0 54px;
+  min-height: 54px;
+  border-radius: var(--neu-workspace-card-radius) var(--neu-workspace-card-radius) 0 0;
+  background: linear-gradient(180deg, #363636 0%, #292929 100%);
+  box-shadow:
+    inset 0 -2px 0 rgba(0, 0, 0, 0.3),
+    inset 0 1px 0 rgba(255, 255, 255, 0.04);
+}
+
+.center-workspace:not(.organization-mode-shell) .grid-workspace-shell,
+.center-workspace:not(.organization-mode-shell) .single-workspace {
+  min-height: 0;
+}
+
+.right-panel {
+  min-height: 0;
+  padding: 12px;
+  overflow: hidden;
+  background: var(--neu-bg);
+  box-shadow: none;
+}
+
+.right-panel-card {
+  display: flex;
+  min-width: 0;
+  min-height: 0;
+  height: 100%;
+  flex-direction: column;
+  overflow: hidden;
+  border-radius: var(--neu-workspace-card-radius);
+  background: var(--neu-workspace-card-bg);
+  box-shadow: var(--neu-workspace-card-shadow);
+}
+
+.right-panel-card > .panel-titlebar {
+  position: relative;
+  z-index: 1;
+  top: auto;
+  flex: 0 0 54px;
+  min-height: 54px;
+  border-radius: var(--neu-workspace-card-radius) var(--neu-workspace-card-radius) 0 0;
+  background: linear-gradient(180deg, #363636 0%, #292929 100%);
+  box-shadow:
+    inset 0 -2px 0 rgba(0, 0, 0, 0.3),
+    inset 0 1px 0 rgba(255, 255, 255, 0.04);
+}
+
+.right-panel-card > .details-scroll,
+.right-panel-card > .details-empty {
+  min-height: 0;
+  flex: 1 1 auto;
+}
+
+.right-panel-card > .details-scroll {
+  overflow-y: auto;
+  scrollbar-gutter: stable;
+}
+
+.right-panel-card > .details-empty {
+  overflow: auto;
+}
+
+.sidebar-library-area,
+.sidebar-filter-area,
+.right-panel-card > .details-scroll,
+.right-panel-card > .details-empty,
+.grid-workspace-results {
+  scrollbar-gutter: stable;
+}
+
+@supports selector(::-webkit-scrollbar) {
+  .sidebar-library-area::-webkit-scrollbar,
+  .sidebar-filter-area::-webkit-scrollbar,
+  .right-panel-card > .details-scroll::-webkit-scrollbar,
+  .grid-workspace-results::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+  }
+
+  .sidebar-library-area::-webkit-scrollbar-track,
+  .sidebar-filter-area::-webkit-scrollbar-track,
+  .right-panel-card > .details-scroll::-webkit-scrollbar-track,
+  .grid-workspace-results::-webkit-scrollbar-track {
+    background: transparent;
+  }
+
+  .sidebar-library-area::-webkit-scrollbar-thumb,
+  .sidebar-filter-area::-webkit-scrollbar-thumb,
+  .right-panel-card > .details-scroll::-webkit-scrollbar-thumb,
+  .grid-workspace-results::-webkit-scrollbar-thumb {
+    border: 2px solid transparent;
+    border-radius: 999px;
+    background: #5a5a5a;
+    background-clip: padding-box;
+  }
+}
+
+/* Light-theme text pass: several gallery/detail labels intentionally use
+   fixed dark-theme values in the legacy card rules, so give them explicit
+   daylight contrast after the palette layer. */
+.photo-app.theme-light .asset-card,
+.photo-app.theme-light .asset-card-frame .asset-card,
+.photo-app.theme-light .asset-card-frame .asset-card:hover,
+.photo-app.theme-light .asset-card-frame .asset-card.is-selected {
+  color: var(--text);
+  background: transparent;
+}
+
+.photo-app.theme-light .asset-title {
+  color: var(--text-high);
+}
+
+.photo-app.theme-light .asset-metrics {
+  color: var(--text-muted);
+}
+
+.photo-app.theme-light .asset-labels span {
+  color: #3d5c78;
+  border-color: rgba(61, 92, 120, 0.16);
+  background: #e4edf5;
+}
+
+.photo-app.theme-light .asset-alert {
+  color: #7d3030;
+  background: rgba(255, 241, 241, 0.92);
+}
+
+.photo-app.theme-light .thumbnail-placeholder {
+  color: #75828c;
+  background: #dfe4e7;
+}
+
+.photo-app.theme-light .detail-path,
+.photo-app.theme-light .property-list dt,
+.photo-app.theme-light .classification-provenance,
+.photo-app.theme-light .semantic-detail-list span,
+.photo-app.theme-light .dominant-row {
+  color: var(--text-muted);
+}
+
+.photo-app.theme-light .property-list dd,
+.photo-app.theme-light .detail-section-heading strong,
+.photo-app.theme-light .dominant-row strong,
+.photo-app.theme-light .classification-field-heading strong,
+.photo-app.theme-light .classification-field-label,
+.photo-app.theme-light .semantic-detail-list strong {
+  color: var(--text-secondary);
+}
+
+.photo-app.theme-light .semantic-detail-list > div {
+  border-bottom-color: rgba(43, 52, 60, 0.1);
+}
+
+.photo-app.theme-light .progress-track,
+.photo-app.theme-light .task-progress {
+  background: rgba(91, 101, 110, 0.16);
+}
+
+/* Daylight theme.  The palette deliberately uses layered cool grays rather
+   than pure white so photographs remain the strongest visual element. */
+.photo-app.theme-light {
+  color-scheme: light;
+  --app: #e5e8eb;
+  --topbar: #eef0f2;
+  --panel: #e9ecef;
+  --panel-raised: #f5f7f8;
+  --panel-inset: #dce1e5;
+  --canvas: #e0e4e7;
+  --canvas-soft: #edf0f2;
+  --border: rgba(43, 52, 60, 0.14);
+  --border-soft: rgba(43, 52, 60, 0.09);
+  --text: #273038;
+  --text-secondary: #53606a;
+  --text-muted: #7b8790;
+  --accent: #5d7fa2;
+  --accent-strong: #3e638a;
+  --accent-soft: #d6e3ef;
+  --focus: #4b82b4;
+  --success: #34785b;
+  --warning: #966d2e;
+  --error: #a64747;
+  --surface-0: #e0e4e7;
+  --surface-1: #e9ecef;
+  --surface-2: #f0f2f4;
+  --surface-3: #f7f8f9;
+  --surface-control: #edf0f2;
+  --surface-control-hover: #f8f9fa;
+  --surface-control-pressed: #dce1e5;
+  --line-subtle: rgba(43, 52, 60, 0.1);
+  --line-visible: rgba(43, 52, 60, 0.18);
+  --text-high: #20282e;
+  --text-normal: #43515b;
+  --text-low: #7c878f;
+  --neu-bg: #e5e8eb;
+  --neu-surface: #edf0f2;
+  --neu-surface-raised: #f7f8f9;
+  --neu-surface-pressed: #dce1e5;
+  --neu-input: #f9fafb;
+  --neu-shadow-dark: rgba(91, 101, 110, 0.22);
+  --neu-shadow-light: rgba(255, 255, 255, 0.92);
+  --neu-shadow-raised:
+    9px 10px 22px rgba(91, 101, 110, 0.22), -6px -6px 14px rgba(255, 255, 255, 0.88);
+  --neu-shadow-control:
+    5px 6px 12px rgba(91, 101, 110, 0.18), -4px -4px 9px rgba(255, 255, 255, 0.82);
+  --neu-shadow-pressed:
+    inset 3px 3px 7px rgba(91, 101, 110, 0.18), inset -3px -3px 6px rgba(255, 255, 255, 0.76);
+  --neu-focus-ring: rgba(75, 130, 180, 0.76);
+  --shadow-panel: 9px 10px 22px rgba(91, 101, 110, 0.22), -6px -6px 14px rgba(255, 255, 255, 0.88);
+  --shadow-control: 5px 6px 12px rgba(91, 101, 110, 0.18), -4px -4px 9px rgba(255, 255, 255, 0.82);
+  --shadow-pressed:
+    inset 3px 3px 7px rgba(91, 101, 110, 0.18), inset -3px -3px 6px rgba(255, 255, 255, 0.76);
+  --shadow-float: 18px 22px 44px rgba(91, 101, 110, 0.28), -9px -9px 24px rgba(255, 255, 255, 0.8);
+  --neu-detail-well-bg: #e0e4e7;
+  --neu-detail-inner-bg: #d9dfe3;
+  --neu-detail-well-shadow:
+    inset 4px 5px 11px rgba(91, 101, 110, 0.2), inset -4px -4px 9px rgba(255, 255, 255, 0.74);
+  --neu-detail-inner-shadow:
+    inset 3px 3px 8px rgba(91, 101, 110, 0.2), inset -3px -3px 7px rgba(255, 255, 255, 0.68);
+  --neu-sidebar-heading-raised: linear-gradient(180deg, #f7f8f9 0%, #e9ecef 100%);
+  --neu-sidebar-heading-shadow:
+    0 8px 18px rgba(91, 101, 110, 0.13), inset 0 -2px 0 rgba(91, 101, 110, 0.12),
+    inset 0 1px 0 rgba(255, 255, 255, 0.9);
+  --neu-sidebar-module-bg: linear-gradient(145deg, #f5f7f8 0%, #e5e8eb 100%);
+  --neu-sidebar-module-shadow:
+    9px 10px 22px rgba(91, 101, 110, 0.2), -5px -5px 13px rgba(255, 255, 255, 0.85);
+  --neu-workspace-card-bg: linear-gradient(145deg, #f3f5f6 0%, #e3e7e9 100%);
+  --neu-workspace-card-shadow:
+    10px 12px 24px rgba(91, 101, 110, 0.2), -5px -5px 13px rgba(255, 255, 255, 0.85);
+}
+
+.photo-app.theme-light {
+  background: linear-gradient(145deg, #f1f3f4 0%, var(--app) 52%, #dce1e5 100%);
+}
+
+.photo-app.theme-light .topbar,
+.photo-app.theme-light .panel-titlebar,
+.photo-app.theme-light .content-toolbar,
+.photo-app.theme-light .batch-classification-bar,
+.photo-app.theme-light .manual-mark-filter-bar,
+.photo-app.theme-light .filmstrip {
+  color: var(--text-secondary);
+  border-color: rgba(43, 52, 60, 0.1);
+  background: linear-gradient(180deg, #f7f8f9 0%, #e9ecef 100%);
+  box-shadow:
+    0 8px 18px rgba(91, 101, 110, 0.12),
+    inset 0 -1px 0 rgba(91, 101, 110, 0.1);
+}
+
+.photo-app.theme-light .app-identity strong,
+.photo-app.theme-light .library-stat strong,
+.photo-app.theme-light .content-toolbar strong,
+.photo-app.theme-light .detail-section-heading strong,
+.photo-app.theme-light .panel-section-heading,
+.photo-app.theme-light .sidebar-library-module > .panel-titlebar strong,
+.photo-app.theme-light .sidebar-filter-module .sidebar-area-heading strong,
+.photo-app.theme-light .right-panel-card > .panel-titlebar strong {
+  color: var(--text-high);
+}
+
+.photo-app.theme-light .app-identity small,
+.photo-app.theme-light .library-stat,
+.photo-app.theme-light .content-toolbar span,
+.photo-app.theme-light .group-toggle,
+.photo-app.theme-light .sidebar-area-heading span,
+.photo-app.theme-light .preview-navigator-heading span,
+.photo-app.theme-light .preview-navigator-zoom-label {
+  color: var(--text-muted);
+}
+
+.photo-app.theme-light .brand-mark {
+  color: #35536f;
+  border: 0;
+  background: linear-gradient(145deg, #f8fafb, #dce3e8);
+  box-shadow: var(--neu-shadow-control);
+}
+
+.photo-app.theme-light .left-panel,
+.photo-app.theme-light .right-panel,
+.photo-app.theme-light .workspace-shell {
+  background: var(--neu-bg);
+  color: var(--text-secondary);
+}
+
+.photo-app.theme-light .sidebar-module,
+.photo-app.theme-light .right-panel-card,
+.photo-app.theme-light .center-workspace:not(.organization-mode-shell) {
+  background: var(--neu-sidebar-module-bg);
+  box-shadow: var(--neu-sidebar-module-shadow);
+}
+
+.photo-app.theme-light .right-panel-card,
+.photo-app.theme-light .center-workspace:not(.organization-mode-shell) {
+  background: var(--neu-workspace-card-bg);
+  box-shadow: var(--neu-workspace-card-shadow);
+}
+
+.photo-app.theme-light .sidebar-library-module > .panel-titlebar,
+.photo-app.theme-light .sidebar-filter-module .sidebar-area-heading,
+.photo-app.theme-light .right-panel-card > .panel-titlebar,
+.photo-app.theme-light .center-workspace:not(.organization-mode-shell) > .content-toolbar {
+  color: var(--text-high);
+  background: var(--neu-sidebar-heading-raised);
+  box-shadow: var(--neu-sidebar-heading-shadow);
+}
+
+.photo-app.theme-light .panel-section,
+.photo-app.theme-light .detail-section,
+.photo-app.theme-light .detail-preview,
+.photo-app.theme-light .preview-navigator,
+.photo-app.theme-light .scan-panel,
+.photo-app.theme-light .semantic-taskbar,
+.photo-app.theme-light .welcome-state,
+.photo-app.theme-light .import-library-dialog,
+.photo-app.theme-light .organization-preview,
+.photo-app.theme-light .organization-detail,
+.photo-app.theme-light .organization-fieldset,
+.photo-app.theme-light .organization-level {
+  border-color: transparent;
+  background: linear-gradient(145deg, var(--neu-surface-raised), var(--neu-surface));
+  box-shadow: var(--neu-shadow-raised);
+}
+
+.photo-app.theme-light .sidebar-filter-module .panel-section {
+  background: transparent;
+  box-shadow: none;
+}
+
+.photo-app.theme-light .right-panel .preview-navigator-map,
+.photo-app.theme-light .right-panel .analysis-grid > div,
+.photo-app.theme-light .right-panel .classification-field,
+.photo-app.theme-light .right-panel .classification-tags-editor,
+.photo-app.theme-light .right-panel .semantic-empty {
+  border-color: transparent;
+  background: var(--neu-detail-inner-bg);
+  box-shadow: var(--neu-detail-inner-shadow);
+}
+
+.photo-app.theme-light .nav-row:not(.is-active),
+.photo-app.theme-light .filter-row,
+.photo-app.theme-light .library-root-drop-target {
+  color: var(--text-secondary);
+  background: rgba(255, 255, 255, 0.28);
+}
+
+.photo-app.theme-light .nav-row:not(.is-active):hover,
+.photo-app.theme-light .filter-row:hover {
+  color: var(--text-high);
+  background: linear-gradient(145deg, #f8f9fa, #e4e8eb);
+  box-shadow: var(--neu-shadow-control);
+}
+
+.photo-app.theme-light .nav-row.is-active {
+  color: #244563;
+  background: linear-gradient(145deg, #e4f0fa, #cbddea);
+  box-shadow:
+    var(--neu-shadow-pressed),
+    0 0 0 1px rgba(75, 130, 180, 0.48);
+}
+
+.photo-app.theme-light .filter-chip,
+.photo-app.theme-light .manual-rating-filter button {
+  color: var(--text-secondary);
+  border-color: transparent;
+  background: linear-gradient(145deg, #f5f7f8, #dfe4e7);
+  box-shadow: var(--neu-shadow-control);
+}
+
+.photo-app.theme-light .filter-chip:hover:not(.is-active),
+.photo-app.theme-light .manual-rating-filter button:hover {
+  background: linear-gradient(145deg, #ffffff, #e8ecef);
+}
+
+.photo-app.theme-light .filter-chip.is-active,
+.photo-app.theme-light .manual-rating-filter button.is-active {
+  color: #244563;
+  background: var(--accent-soft);
+  box-shadow:
+    var(--neu-shadow-pressed),
+    0 0 0 1px rgba(75, 130, 180, 0.48);
+}
+
+.photo-app.theme-light .color-filter:hover,
+.photo-app.theme-light .color-filter.is-active {
+  background: rgba(75, 130, 180, 0.14);
+  box-shadow:
+    var(--neu-shadow-pressed),
+    0 0 0 1px rgba(75, 130, 180, 0.52);
+}
+
+.photo-app.theme-light .asset-card-frame {
+  border-color: transparent;
+  background: linear-gradient(145deg, #f8f9fa, #e4e8eb);
+  box-shadow: var(--neu-shadow-raised);
+}
+
+.photo-app.theme-light .asset-card-frame:hover {
+  background: linear-gradient(145deg, #ffffff, #edf0f2);
+  box-shadow:
+    13px 15px 28px rgba(91, 101, 110, 0.24),
+    -6px -6px 15px rgba(255, 255, 255, 0.9);
+}
+
+.photo-app.theme-light .asset-image-wrap,
+.photo-app.theme-light .grid-workspace-results,
+.photo-app.theme-light .single-canvas {
+  border-color: rgba(43, 52, 60, 0.08);
+  background: #e1e5e8;
+}
+
+.photo-app.theme-light .asset-card-frame .asset-card,
+.photo-app.theme-light .asset-card-frame .asset-card-body,
+.photo-app.theme-light .filmstrip button {
+  color: var(--text-secondary);
+  background: transparent;
+}
+
+.photo-app.theme-light .filmstrip button {
+  background: linear-gradient(145deg, #f8f9fa, #e0e5e8);
+  box-shadow: var(--neu-shadow-control);
+}
+
+.photo-app.theme-light .filmstrip button.is-active,
+.photo-app.theme-light .filmstrip button.is-selected:not(.is-active) {
+  box-shadow:
+    0 0 0 2px var(--neu-focus-ring),
+    var(--neu-shadow-pressed);
+}
+
+.photo-app.theme-light .search-control,
+.photo-app.theme-light .sort-select,
+.photo-app.theme-light .segmented,
+.photo-app.theme-light .batch-classification-bar select,
+.photo-app.theme-light .classification-control select,
+.photo-app.theme-light .classification-tag-add select,
+.photo-app.theme-light .range-pair input,
+.photo-app.theme-light .date-filter input,
+.photo-app.theme-light .organization-target-input input,
+.photo-app.theme-light .template-input {
+  color: var(--text-secondary);
+  border-color: transparent;
+  background: var(--neu-input);
+  box-shadow: var(--neu-shadow-pressed);
+}
+
+.photo-app.theme-light .search-control input,
+.photo-app.theme-light .sort-select select,
+.photo-app.theme-light .batch-classification-bar select,
+.photo-app.theme-light .classification-control select,
+.photo-app.theme-light .classification-tag-add select,
+.photo-app.theme-light .range-pair input,
+.photo-app.theme-light .date-filter input {
+  color: var(--text);
+}
+
+.photo-app.theme-light .search-control input::placeholder {
+  color: #9aa4ac;
+}
+
+.photo-app.theme-light
+  :is(
+    .tool-button,
+    .secondary-action,
+    .direction-control,
+    .pagination button,
+    .quiet-button,
+    .icon-button,
+    .library-import-button
+  ):not(.primary-action) {
+  color: var(--text-secondary);
+  border-color: transparent;
+  background: linear-gradient(145deg, #f5f7f8, #dfe4e7);
+  box-shadow: var(--neu-shadow-control);
+}
+
+.photo-app.theme-light
+  :is(
+    .tool-button,
+    .secondary-action,
+    .direction-control,
+    .pagination button,
+    .quiet-button,
+    .icon-button,
+    .library-import-button
+  ):not(.primary-action):hover {
+  color: var(--text-high);
+  background: linear-gradient(145deg, #ffffff, #e8ecef);
+}
+
+.photo-app.theme-light
+  :is(.tool-button, .secondary-action, .pagination button, .quiet-button).is-active,
+.photo-app.theme-light .tool-button:active,
+.photo-app.theme-light .secondary-action:active {
+  color: #244563;
+  background: var(--accent-soft);
+  box-shadow: var(--neu-shadow-pressed);
+}
+
+.photo-app.theme-light button.primary-action {
+  color: #ffffff;
+  border-color: transparent;
+  background: linear-gradient(145deg, #6f96bc 0%, #4f76a0 100%);
+  box-shadow:
+    5px 6px 13px rgba(75, 101, 127, 0.3),
+    -4px -4px 9px rgba(255, 255, 255, 0.7);
+}
+
+.photo-app.theme-light .single-selection-toggle {
+  color: var(--text-secondary);
+  border-color: transparent;
+  background: rgba(248, 250, 251, 0.92);
+  box-shadow: var(--neu-shadow-control);
+}
+
+.photo-app.theme-light .single-selection-toggle:hover {
+  background: #e0edf8;
+}
+
+.photo-app.theme-light .single-selection-toggle.is-selected {
+  color: #ffffff;
+  background: #5d88b6;
+}
+
+.photo-app.theme-light .preview-loading,
+.photo-app.theme-light .preview-error,
+.photo-app.theme-light .library-context-menu {
+  color: var(--text-secondary);
+  border-color: transparent;
+  background: rgba(248, 250, 251, 0.96);
+  box-shadow: var(--neu-shadow-raised);
+}
+
+.photo-app.theme-light .left-panel-footer {
+  color: var(--text-muted);
+  background: transparent;
+}
+
+@supports selector(::-webkit-scrollbar) {
+  .photo-app.theme-light .sidebar-library-area::-webkit-scrollbar-thumb,
+  .photo-app.theme-light .sidebar-filter-area::-webkit-scrollbar-thumb,
+  .photo-app.theme-light .right-panel-card > .details-scroll::-webkit-scrollbar-thumb,
+  .photo-app.theme-light .grid-workspace-results::-webkit-scrollbar-thumb {
+    background: #a9b2b9;
+  }
+}
+
+.photo-app.theme-light .left-panel,
+.photo-app.theme-light .right-panel,
+.photo-app.theme-light .center-workspace,
+.photo-app.theme-light .organization-workspace,
+.photo-app.theme-light .grid-workspace-results,
+.photo-app.theme-light .filmstrip {
+  scrollbar-color: #a9b2b9 transparent;
+}
+
+/* Plan 0016: compact chrome and a protected information header.  Keep the
+   density change at the component layer so the existing image dimensions and
+   interaction logic remain untouched. */
+:root {
+  --compact-topbar-height: 54px;
+  --compact-titlebar-height: 42px;
+  --compact-panel-gap: 8px;
+  --compact-panel-padding: 8px;
+}
+
+.photo-app {
+  grid-template-rows: var(--compact-topbar-height) auto minmax(0, 1fr);
+}
+
+.photo-app:not(.has-batch-classification) {
+  grid-template-rows: var(--compact-topbar-height) minmax(0, 1fr);
+}
+
+.topbar {
+  min-height: var(--compact-topbar-height);
+  padding-inline: 12px;
+  gap: 10px;
+}
+
+.app-identity {
+  gap: 8px;
+}
+
+.brand-mark {
+  width: 32px;
+  height: 32px;
+  border-radius: 10px;
+}
+
+.app-identity strong {
+  font-size: 14px;
+}
+
+.app-identity small {
+  margin-top: 1px;
+}
+
+.library-stat {
+  gap: 6px;
+  font-size: 10px;
+}
+
+.library-stat i {
+  height: 12px;
+}
+
+.topbar-actions {
+  gap: 5px;
+}
+
+.segmented {
+  padding: 3px;
+}
+
+.segmented button {
+  width: 27px;
+  height: 26px;
+}
+
+.search-control {
+  width: clamp(160px, 17vw, 235px);
+  height: 32px;
+  padding-inline: 9px;
+}
+
+.search-control input {
+  font-size: 11px;
+}
+
+:is(
+  .tool-button,
+  .primary-action,
+  .secondary-action,
+  .direction-control,
+  .pagination button,
+  .quiet-button,
+  .icon-button
+) {
+  min-height: 30px;
+  padding-inline: 9px;
+  border-radius: 9px;
+}
+
+.direction-control {
+  width: 30px;
+  padding-inline: 0;
+}
+
+.sort-select {
+  height: 30px;
+  padding-left: 8px;
+  border-radius: 9px;
+}
+
+.sort-select select {
+  width: 76px;
+  height: 28px;
+}
+
+.left-panel {
+  gap: var(--compact-panel-gap);
+  padding: var(--compact-panel-padding);
+}
+
+.sidebar-library-module > .panel-titlebar,
+.sidebar-filter-module .sidebar-area-heading {
+  flex-basis: var(--compact-titlebar-height);
+  min-height: var(--compact-titlebar-height);
+}
+
+.sidebar-library-module > .panel-titlebar {
+  padding-inline: 13px 10px;
+}
+
+.sidebar-filter-module .sidebar-area-heading {
+  margin-bottom: 6px;
+  padding: 0 13px;
+}
+
+.sidebar-library-area {
+  padding-top: 8px;
+}
+
+.center-workspace:not(.organization-mode-shell) {
+  margin-block: var(--compact-panel-gap);
+}
+
+.center-workspace:not(.organization-mode-shell) > .content-toolbar {
+  flex-basis: var(--compact-titlebar-height);
+  min-height: var(--compact-titlebar-height);
+  padding-inline: 11px;
+}
+
+.content-toolbar,
+.content-toolbar > div {
+  gap: 7px;
+}
+
+.asset-grid,
+.grid-loading {
+  gap: 10px;
+  padding: 10px;
+}
+
+.right-panel {
+  padding: var(--compact-panel-padding);
+}
+
+.right-panel-card {
+  isolation: isolate;
+  position: relative;
+}
+
+.right-panel-card > .panel-titlebar {
+  position: relative;
+  z-index: 3;
+  flex-basis: var(--compact-titlebar-height);
+  min-height: var(--compact-titlebar-height);
+  padding-inline: 13px;
+  box-shadow:
+    inset 0 -2px 0 rgba(0, 0, 0, 0.24),
+    inset 0 1px 0 rgba(255, 255, 255, 0.04),
+    0 4px 10px rgba(0, 0, 0, 0.12);
+}
+
+.right-panel-card > .details-scroll {
+  position: relative;
+  z-index: 1;
+  overscroll-behavior: contain;
+  padding-bottom: 12px;
+  background: transparent;
+}
+
+.right-panel-card > .details-empty {
+  position: relative;
+  z-index: 1;
+}
+
+.right-panel h2 {
+  margin: 7px 10px 0;
+}
+
+.right-panel .detail-path {
+  margin: 2px 10px 6px;
+}
+
+.right-panel .preview-navigator.is-panel,
+.right-panel .detail-preview {
+  width: calc(100% - 16px);
+  margin: 8px 8px 0;
+}
+
+.right-panel .preview-navigator.is-panel {
+  padding: 7px;
+}
+
+.right-panel .preview-navigator-heading {
+  margin-bottom: 5px;
+}
+
+.right-panel .detail-section {
+  margin: 8px 8px 0;
+  padding: 9px 10px;
+}
+
+.right-panel .detail-section-heading {
+  margin-bottom: 5px;
+}
+
+.right-panel .property-list {
+  row-gap: 5px;
+}
+
+.right-panel .analysis-grid {
+  gap: 6px;
+}
+
+.right-panel .classification-summary {
+  gap: 5px;
+}
+
+.single-workspace {
+  grid-template-rows: minmax(0, 1fr) 38px 96px;
+}
+
+.single-canvas {
+  padding: 12px;
+}
+
+.manual-mark-filter-bar {
+  min-height: 38px;
+  padding-inline: 10px;
+  gap: 8px;
+}
+
+.manual-mark-filter-controls {
+  gap: 7px;
+}
+
+.manual-mark-filter-divider {
+  height: 19px;
+}
+
+.filmstrip {
+  gap: 5px;
+  padding: 6px 8px;
+}
+
+.filmstrip button {
+  width: 88px;
+  height: 78px;
+}
+
+/* Daylight controls need a real value contrast, not only a pale highlight.
+   The inset ring is intentionally subtle: it separates a control from the
+   light chrome without returning to hard outlined cards. */
+.photo-app.theme-light
+  :is(
+    .tool-button,
+    .secondary-action,
+    .direction-control,
+    .pagination button,
+    .quiet-button,
+    .icon-button,
+    .library-import-button
+  ):not(.primary-action),
+.photo-app.theme-light .search-control,
+.photo-app.theme-light .sort-select,
+.photo-app.theme-light .segmented {
+  color: #35434e;
+  border: 0;
+  background: linear-gradient(145deg, #ffffff 0%, #d5dde3 100%);
+  box-shadow:
+    4px 5px 10px rgba(71, 84, 94, 0.26),
+    -3px -3px 8px rgba(255, 255, 255, 0.92),
+    inset 0 0 0 1px rgba(54, 68, 78, 0.12);
+}
+
+.photo-app.theme-light .search-control,
+.photo-app.theme-light .sort-select,
+.photo-app.theme-light .segmented {
+  background: linear-gradient(145deg, #fafdff 0%, #d9e1e6 100%);
+}
+
+.photo-app.theme-light .search-control input,
+.photo-app.theme-light .sort-select select {
+  color: #2e3d48;
+}
+
+.photo-app.theme-light .search-control input::placeholder {
+  color: #6e7d87;
+}
+
+.photo-app.theme-light
+  :is(
+    .tool-button,
+    .secondary-action,
+    .direction-control,
+    .pagination button,
+    .quiet-button,
+    .icon-button,
+    .library-import-button
+  ):not(.primary-action):hover {
+  color: #1f3444;
+  background: linear-gradient(145deg, #ffffff 0%, #e2e9ed 100%);
+  box-shadow:
+    5px 6px 12px rgba(71, 84, 94, 0.28),
+    -4px -4px 9px rgba(255, 255, 255, 0.96),
+    inset 0 0 0 1px rgba(54, 68, 78, 0.18);
+}
+
+.photo-app.theme-light
+  :is(.tool-button, .secondary-action, .direction-control, .pagination button).is-active,
+.photo-app.theme-light
+  :is(.tool-button, .secondary-action, .direction-control, .pagination button):active {
+  color: #1e4669;
+  background: linear-gradient(145deg, #dbeaf5 0%, #bdd2e2 100%);
+  box-shadow:
+    inset 3px 3px 7px rgba(75, 104, 128, 0.2),
+    inset -3px -3px 6px rgba(255, 255, 255, 0.74),
+    0 0 0 1px rgba(62, 99, 138, 0.36);
+}
+
+.photo-app.theme-light .segmented button {
+  color: #60707c;
+}
+
+.photo-app.theme-light .segmented button:hover {
+  color: #29465d;
+  background: rgba(255, 255, 255, 0.58);
+}
+
+.photo-app.theme-light .segmented button.is-active {
+  color: #f7fbff;
+  background: linear-gradient(145deg, #42586c 0%, #2f4355 100%);
+  box-shadow:
+    3px 4px 8px rgba(71, 84, 94, 0.28),
+    inset 0 0 0 1px rgba(255, 255, 255, 0.16);
+}
+
+.photo-app.theme-light .filter-chip {
+  color: #35434e;
+  background: linear-gradient(145deg, #ffffff 0%, #d5dde3 100%);
+  box-shadow:
+    3px 4px 9px rgba(71, 84, 94, 0.22),
+    -3px -3px 8px rgba(255, 255, 255, 0.88),
+    inset 0 0 0 1px rgba(54, 68, 78, 0.1);
+}
+
+.photo-app.theme-light .filter-chip:hover:not(.is-active) {
+  color: #1f3444;
+  background: linear-gradient(145deg, #ffffff 0%, #e3e9ed 100%);
+}
+
+.photo-app.theme-light .filter-chip.is-active {
+  color: #1e4669;
+  background: linear-gradient(145deg, #dbeaf5 0%, #bdd2e2 100%);
+  box-shadow:
+    inset 3px 3px 7px rgba(75, 104, 128, 0.2),
+    inset -3px -3px 6px rgba(255, 255, 255, 0.74),
+    0 0 0 1px rgba(62, 99, 138, 0.36);
+}
+
+/* One continuous base plane behind the three raised workspace cards. */
+.workspace-shell {
+  background: var(--neu-bg);
+}
+
+.photo-app.theme-light .workspace-shell {
+  background: var(--neu-bg);
+}
+
+/* Keep the library and filter modules distinct while giving the second band
+   a little more vertical separation from the library tree. */
+.left-panel {
+  gap: 12px;
+}
+
+.sidebar-filter-module {
+  margin-top: 4px;
+}
+
+.photo-app.theme-light .organization-mode-shell,
+.photo-app.theme-light .organization-workspace,
+.photo-app.theme-light .organization-preview,
+.photo-app.theme-light .organization-controls,
+.photo-app.theme-light .organization-detail {
+  color: var(--text-secondary);
+  background: var(--neu-bg);
+}
+
+.photo-app.theme-light .organization-safety-banner,
+.photo-app.theme-light .organization-preview-heading,
+.photo-app.theme-light .organization-panel-heading {
+  color: var(--text-secondary);
+  border-color: rgba(43, 52, 60, 0.1);
+  background: var(--neu-sidebar-heading-raised);
+}
+
+.photo-app.theme-light .organization-safety-banner strong,
+.photo-app.theme-light .organization-preview-heading h2,
+.photo-app.theme-light .organization-panel-heading h2 {
+  color: var(--text-high);
+}
+
+.photo-app.theme-light .organization-message {
+  color: #34785b;
+  border-color: rgba(52, 120, 91, 0.2);
+  background: #e3f1e9;
+}
+
+.photo-app.theme-light .organization-message.is-error {
+  color: #9d3e3e;
+  border-color: rgba(166, 71, 71, 0.2);
+  background: #fae9e9;
+}
+
+.photo-app.theme-light .organization-fieldset,
+.photo-app.theme-light .organization-level,
+.photo-app.theme-light .organization-metric,
+.photo-app.theme-light .organization-issue,
+.photo-app.theme-light .path-card,
+.photo-app.theme-light .dialog-path,
+.photo-app.theme-light .import-option,
+.photo-app.theme-light .organization-target-input input,
+.photo-app.theme-light .template-input,
+.photo-app.theme-light .organization-control-group select,
+.photo-app.theme-light .organization-rule-row select,
+.photo-app.theme-light .organization-rule-row input {
+  color: var(--text-secondary);
+  border-color: rgba(43, 52, 60, 0.12);
+  background: var(--neu-detail-inner-bg);
+  box-shadow: var(--neu-shadow-pressed);
+}
+
+.photo-app.theme-light .organization-target-input button,
+.photo-app.theme-light .organization-actions button,
+.photo-app.theme-light .organization-level button,
+.photo-app.theme-light .subtle-button,
+.photo-app.theme-light .dialog-close {
+  color: var(--text-secondary);
+  border-color: transparent;
+  background: linear-gradient(145deg, #f5f7f8, #dfe4e7);
+  box-shadow: var(--neu-shadow-control);
+}
+
+.photo-app.theme-light .organization-target-input button:hover,
+.photo-app.theme-light .organization-actions button:hover,
+.photo-app.theme-light .organization-level button:hover,
+.photo-app.theme-light .subtle-button:hover,
+.photo-app.theme-light .dialog-close:hover {
+  color: var(--text-high);
+  background: #ffffff;
+}
+
+/* Lap-inspired workflow MVP.  It deliberately reuses the application's
+   restrained slate palette and raised/inset surfaces instead of importing
+   Lap's Vue/Tailwind presentation layer. */
+.asset-favorite {
+  position: absolute;
+  z-index: 5;
+  top: 7px;
+  right: 7px;
+  display: grid;
+  width: 27px;
+  height: 27px;
+  padding: 0;
+  place-items: center;
+  color: rgba(255, 255, 255, 0.78);
+  font-size: 17px;
+  line-height: 1;
+  border: 0;
+  border-radius: 9px;
+  background: rgba(18, 21, 25, 0.68);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
+  cursor: pointer;
+  opacity: 0;
+  transition:
+    opacity var(--transition),
+    color var(--transition),
+    transform var(--transition);
+  backdrop-filter: blur(5px);
+}
+
+.asset-card-shell:hover .asset-favorite,
+.asset-favorite:focus-visible,
+.asset-favorite.is-active {
+  opacity: 1;
+}
+
+.asset-favorite:hover {
+  transform: translateY(-1px);
+}
+
+.asset-favorite.is-active {
+  color: #ee9b9f;
+}
+
+.workflow-mode-shell {
+  grid-column: 1 / -1;
+  min-width: 0;
+  margin: 8px;
+  overflow: hidden;
+}
+
+.workflow-workspace {
+  display: grid;
+  grid-template-columns: 224px minmax(0, 1fr);
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+  color: var(--text-secondary);
+  background: var(--panel-inset);
+}
+
+.workflow-nav {
+  display: flex;
+  min-height: 0;
+  flex-direction: column;
+  padding: 14px 10px;
+  border-right: 1px solid var(--border-soft);
+  background: linear-gradient(180deg, var(--panel-raised), var(--panel));
+}
+
+.workflow-nav-heading {
+  padding: 4px 8px 14px;
+}
+
+.workflow-nav-heading small,
+.workflow-header small {
+  color: var(--accent-strong);
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+.workflow-nav-heading h2,
+.workflow-header h1,
+.workflow-section-intro h2 {
+  margin: 4px 0 0;
+  color: var(--text);
+  font-weight: 600;
+}
+
+.workflow-nav-heading h2 {
+  font-size: 16px;
+}
+
+.workflow-nav-heading p,
+.workflow-section-intro p,
+.workflow-empty p,
+.face-status-card p {
+  margin: 6px 0 0;
+  color: var(--text-muted);
+  font-size: 11px;
+  line-height: 1.55;
+}
+
+.workflow-nav nav {
+  display: grid;
+  gap: 4px;
+  overflow: auto;
+}
+
+.workflow-nav nav button,
+.collection-list button {
+  display: flex;
+  min-height: 46px;
+  padding: 8px 10px;
+  align-items: center;
+  justify-content: space-between;
+  text-align: left;
+  border: 0;
+  border-radius: 9px;
+  background: transparent;
+  cursor: pointer;
+}
+
+.workflow-nav nav button:hover,
+.workflow-nav nav button.is-active,
+.collection-list button:hover,
+.collection-list button.is-active {
+  color: var(--text);
+  background: var(--accent-soft);
+  box-shadow: inset 3px 3px 7px rgba(0, 0, 0, 0.22);
+}
+
+.workflow-nav nav button span {
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.workflow-nav nav button small,
+.collection-list button small {
+  color: var(--text-muted);
+  font-size: 9px;
+}
+
+.workflow-selection-note {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 1px 7px;
+  margin-top: auto;
+  padding: 11px;
+  border: 1px solid var(--border-soft);
+  border-radius: 10px;
+  background: var(--panel-inset);
+  box-shadow: var(--shadow-pressed);
+}
+
+.workflow-selection-note strong {
+  grid-row: span 2;
+  align-self: center;
+  color: var(--accent-strong);
+  font-size: 20px;
+}
+
+.workflow-selection-note span {
+  font-size: 11px;
+}
+
+.workflow-selection-note small {
+  color: var(--text-muted);
+  font-size: 9px;
+}
+
+.workflow-content {
+  position: relative;
+  min-width: 0;
+  min-height: 0;
+  overflow: auto;
+  background:
+    radial-gradient(circle at 80% -20%, rgba(111, 145, 184, 0.1), transparent 35%),
+    var(--canvas-soft);
+}
+
+.workflow-header {
+  position: sticky;
+  z-index: 8;
+  top: 0;
+  display: flex;
+  min-height: 67px;
+  padding: 12px 18px;
+  align-items: center;
+  justify-content: space-between;
+  border-bottom: 1px solid var(--border-soft);
+  background: color-mix(in srgb, var(--panel) 94%, transparent);
+  backdrop-filter: blur(12px);
+}
+
+.workflow-header h1 {
+  font-size: 18px;
+}
+
+.workflow-safety-pill {
+  padding: 5px 8px;
+  color: var(--success);
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  border: 1px solid color-mix(in srgb, var(--success) 36%, transparent);
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--success) 10%, transparent);
+}
+
+.workflow-banner,
+.workflow-progress {
+  margin: 12px 16px 0;
+  padding: 9px 12px;
+  color: var(--success);
+  font-size: 11px;
+  border: 1px solid color-mix(in srgb, var(--success) 28%, transparent);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--success) 8%, var(--panel));
+}
+
+.workflow-banner.is-error {
+  color: var(--error);
+  border-color: color-mix(in srgb, var(--error) 32%, transparent);
+  background: color-mix(in srgb, var(--error) 8%, var(--panel));
+}
+
+.workflow-progress {
+  color: var(--accent-strong);
+  border-color: var(--border-soft);
+  background: var(--panel);
+}
+
+.workflow-section {
+  min-height: calc(100% - 67px);
+  padding: 18px;
+}
+
+.workflow-section-intro {
+  display: flex;
+  gap: 18px;
+  margin-bottom: 16px;
+  align-items: flex-start;
+  justify-content: space-between;
+}
+
+.workflow-section-intro h2 {
+  font-size: 15px;
+}
+
+.workflow-section-intro > strong {
+  flex: 0 0 auto;
+  padding: 7px 9px;
+  color: var(--accent-strong);
+  font-size: 10px;
+  letter-spacing: 0.05em;
+  border-radius: 8px;
+  background: var(--panel);
+  box-shadow: var(--shadow-control);
+}
+
+.workflow-actions,
+.editor-export,
+.editor-button-grid {
+  display: flex;
+  gap: 7px;
+  margin-bottom: 14px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.workflow-actions button,
+.workflow-inline-form button,
+.ai-search-form button,
+.editor-controls button,
+.workflow-asset-action {
+  min-height: 31px;
+  padding: 6px 10px;
+  color: var(--text-secondary);
+  font-size: 10px;
+  border: 0;
+  border-radius: 8px;
+  background: var(--panel-raised);
+  box-shadow: var(--shadow-control);
+  cursor: pointer;
+}
+
+.workflow-actions button:hover,
+.workflow-actions button.is-active,
+.editor-controls button:hover,
+.editor-controls button.is-active {
+  color: var(--text);
+  background: var(--accent-soft);
+}
+
+.workflow-actions button.is-danger {
+  color: var(--error);
+}
+
+.workflow-actions > span {
+  color: var(--text-muted);
+  font-size: 10px;
+}
+
+.workflow-mosaic {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(148px, 1fr));
+  gap: 10px;
+}
+
+.workflow-asset {
+  position: relative;
+  min-width: 0;
+  overflow: hidden;
+  border: 1px solid var(--border-soft);
+  border-radius: 10px;
+  background: var(--panel);
+  box-shadow: var(--shadow-panel);
+}
+
+.workflow-asset-preview {
+  position: relative;
+  display: grid;
+  width: 100%;
+  aspect-ratio: 4 / 3;
+  padding: 0;
+  place-items: center;
+  overflow: hidden;
+  border: 0;
+  background: var(--canvas);
+  cursor: pointer;
+}
+
+.workflow-asset-preview img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  transition: transform 180ms ease;
+}
+
+.workflow-asset:hover .workflow-asset-preview img {
+  transform: scale(1.025);
+}
+
+.workflow-thumb-placeholder {
+  color: var(--text-muted);
+  font-size: 10px;
+  letter-spacing: 0.16em;
+}
+
+.keeper-badge,
+.similarity-badge {
+  position: absolute;
+  top: 7px;
+  right: 7px;
+  padding: 4px 6px;
+  color: #e9f2fb;
+  font-size: 9px;
+  border-radius: 6px;
+  background: rgba(48, 69, 89, 0.88);
+  backdrop-filter: blur(6px);
+}
+
+.keeper-badge {
+  color: #d9f0e3;
+  background: rgba(48, 91, 69, 0.9);
+}
+
+.workflow-asset-meta {
+  display: grid;
+  gap: 3px;
+  padding: 8px 9px;
+}
+
+.workflow-asset-meta strong {
+  overflow: hidden;
+  color: var(--text);
+  font-size: 10px;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.workflow-asset-meta span {
+  color: var(--text-muted);
+  font-size: 9px;
+}
+
+.workflow-asset-action {
+  width: calc(100% - 14px);
+  margin: 0 7px 7px;
+  box-shadow: none;
+  background: var(--panel-inset);
+}
+
+.workflow-empty {
+  display: grid;
+  min-height: 280px;
+  place-content: center;
+  justify-items: center;
+  text-align: center;
+}
+
+.workflow-empty > span {
+  color: var(--accent-strong);
+  font-size: 30px;
+}
+
+.workflow-empty > strong {
+  margin-top: 8px;
+  color: var(--text);
+  font-size: 13px;
+}
+
+.collection-layout {
+  display: grid;
+  grid-template-columns: 220px minmax(0, 1fr);
+  gap: 16px;
+}
+
+.collection-rail {
+  padding: 10px;
+  border: 1px solid var(--border-soft);
+  border-radius: 10px;
+  background: var(--panel);
+}
+
+.workflow-inline-form,
+.ai-search-form {
+  display: flex;
+  gap: 7px;
+}
+
+.workflow-inline-form input,
+.ai-search-form input {
+  min-width: 0;
+  height: 33px;
+  flex: 1;
+  padding: 0 10px;
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--panel-inset);
+  box-shadow: var(--shadow-pressed);
+}
+
+.collection-list {
+  display: grid;
+  gap: 4px;
+  margin-top: 10px;
+}
+
+.collection-list button {
+  min-height: 38px;
+}
+
+.ai-search-form {
+  max-width: 760px;
+  margin-bottom: 10px;
+}
+
+.ai-search-form input {
+  height: 40px;
+}
+
+.ai-search-form button {
+  min-width: 100px;
+  color: #eef5fb;
+  background: var(--accent);
+}
+
+.workflow-meta {
+  margin: 6px 0 14px;
+  color: var(--text-muted);
+  font-size: 10px;
+}
+
+.duplicate-group {
+  margin-top: 12px;
+  padding: 11px;
+  border: 1px solid var(--border-soft);
+  border-radius: 11px;
+  background: color-mix(in srgb, var(--panel) 82%, transparent);
+}
+
+.duplicate-group > header {
+  display: flex;
+  margin-bottom: 10px;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.duplicate-group > header div {
+  display: grid;
+  gap: 2px;
+}
+
+.duplicate-group > header strong {
+  color: var(--text);
+  font-size: 11px;
+}
+
+.duplicate-group > header small,
+.duplicate-group > header span {
+  color: var(--text-muted);
+  font-size: 9px;
+}
+
+.similarity-actions label {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  color: var(--text-muted);
+  font-size: 10px;
+}
+
+.similarity-actions input,
+.editor-adjustment input {
+  accent-color: var(--accent);
+}
+
+.compare-section {
+  display: flex;
+  flex-direction: column;
+}
+
+.compare-grid {
+  display: grid;
+  min-height: 0;
+  flex: 1;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 6px;
+  overflow: hidden;
+  border-radius: 10px;
+  background: #0d0f12;
+}
+
+.compare-grid.compare-count-2 {
+  grid-template-rows: minmax(0, 1fr);
+}
+
+.compare-grid figure {
+  position: relative;
+  display: grid;
+  min-height: 220px;
+  margin: 0;
+  place-items: center;
+  overflow: hidden;
+  background: #0a0c0e;
+}
+
+.compare-grid img {
+  width: 100%;
+  height: 100%;
+}
+
+.compare-grid figcaption {
+  position: absolute;
+  right: 8px;
+  bottom: 8px;
+  padding: 3px 6px;
+  color: rgba(255, 255, 255, 0.72);
+  font-size: 9px;
+  border-radius: 5px;
+  background: rgba(0, 0, 0, 0.58);
+}
+
+.editor-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 300px;
+  gap: 14px;
+}
+
+.editor-canvas {
+  position: relative;
+  display: grid;
+  min-height: 460px;
+  place-items: center;
+  overflow: hidden;
+  border-radius: 11px;
+  background:
+    linear-gradient(45deg, #15181c 25%, transparent 25%),
+    linear-gradient(-45deg, #15181c 25%, transparent 25%),
+    linear-gradient(45deg, transparent 75%, #15181c 75%),
+    linear-gradient(-45deg, transparent 75%, #15181c 75%), #111316;
+  background-position:
+    0 0,
+    0 8px,
+    8px -8px,
+    -8px 0;
+  background-size: 16px 16px;
+}
+
+.editor-canvas > img {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+}
+
+.editor-canvas-meta {
+  position: absolute;
+  right: 10px;
+  bottom: 10px;
+  display: grid;
+  gap: 2px;
+  max-width: 70%;
+  padding: 6px 8px;
+  text-align: right;
+  border-radius: 7px;
+  background: rgba(12, 14, 17, 0.72);
+  backdrop-filter: blur(7px);
+}
+
+.editor-canvas-meta strong {
+  overflow: hidden;
+  color: #fff;
+  font-size: 10px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.editor-canvas-meta span {
+  color: var(--success);
+  font-size: 9px;
+}
+
+.editor-controls {
+  padding: 13px;
+  overflow: auto;
+  border: 1px solid var(--border-soft);
+  border-radius: 11px;
+  background: var(--panel);
+}
+
+.editor-button-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.editor-adjustment {
+  display: grid;
+  gap: 7px;
+  margin-top: 14px;
+}
+
+.editor-adjustment span {
+  display: flex;
+  justify-content: space-between;
+  color: var(--text-secondary);
+  font-size: 10px;
+}
+
+.editor-adjustment strong {
+  color: var(--accent-strong);
+  font-variant-numeric: tabular-nums;
+}
+
+.editor-export {
+  margin-top: 20px;
+}
+
+.export-confirmation {
+  display: grid;
+  gap: 7px;
+  margin-top: 12px;
+  padding: 10px;
+  border: 1px solid color-mix(in srgb, var(--success) 30%, transparent);
+  border-radius: 9px;
+  background: color-mix(in srgb, var(--success) 8%, var(--panel-inset));
+}
+
+.export-confirmation strong {
+  color: var(--text);
+  font-size: 11px;
+}
+
+.export-confirmation span,
+.export-confirmation small {
+  overflow: hidden;
+  color: var(--text-muted);
+  font-size: 9px;
+  line-height: 1.45;
+  text-overflow: ellipsis;
+}
+
+.face-status-card {
+  display: flex;
+  gap: 13px;
+  padding: 16px;
+  align-items: flex-start;
+  border: 1px solid var(--border-soft);
+  border-radius: 11px;
+  background: var(--panel);
+  box-shadow: var(--shadow-panel);
+}
+
+.face-status-indicator {
+  width: 11px;
+  height: 11px;
+  flex: 0 0 auto;
+  margin-top: 3px;
+  border-radius: 50%;
+  background: var(--warning);
+  box-shadow: 0 0 0 5px color-mix(in srgb, var(--warning) 12%, transparent);
+}
+
+.face-status-indicator[data-ready="true"] {
+  background: var(--success);
+}
+
+.face-status-card strong {
+  color: var(--text);
+  font-size: 12px;
+}
+
+.face-status-card small {
+  color: var(--text-muted);
+  font-size: 10px;
+}
+
+.face-metrics {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+  margin: 12px 0;
+}
+
+.face-metrics span {
+  display: grid;
+  gap: 3px;
+  padding: 12px;
+  color: var(--text-muted);
+  font-size: 9px;
+  border-radius: 9px;
+  background: var(--panel);
+}
+
+.face-metrics strong {
+  color: var(--text);
+  font-size: 14px;
+}
+
+.photo-app.theme-light .workflow-workspace,
+.photo-app.theme-light .workflow-content,
+.photo-app.theme-light .workflow-nav,
+.photo-app.theme-light .workflow-header,
+.photo-app.theme-light .workflow-asset,
+.photo-app.theme-light .collection-rail,
+.photo-app.theme-light .editor-controls,
+.photo-app.theme-light .face-status-card,
+.photo-app.theme-light .face-metrics span,
+.photo-app.theme-light .duplicate-group {
+  color: var(--text-secondary);
+  border-color: rgba(43, 52, 60, 0.1);
+  background-color: var(--neu-bg);
+}
+
+.photo-app.theme-light .workflow-header {
+  background: color-mix(in srgb, var(--neu-bg) 94%, transparent);
+}
+
+.photo-app.theme-light .workflow-nav {
+  background: var(--neu-sidebar-heading-raised);
+}
+
+.photo-app.theme-light .workflow-asset-preview,
+.photo-app.theme-light .editor-canvas {
+  background-color: #d5dadd;
+}
+
+@media (max-width: 1180px) {
+  .workflow-workspace {
+    grid-template-columns: 190px minmax(0, 1fr);
+  }
+
+  .workflow-nav nav button small,
+  .workflow-selection-note small {
+    display: none;
+  }
+
+  .editor-layout {
+    grid-template-columns: minmax(0, 1fr) 270px;
+  }
+}
+
+@media (max-width: 880px) {
+  .workflow-workspace {
+    grid-template-columns: 68px minmax(0, 1fr);
+  }
+
+  .workflow-nav-heading,
+  .workflow-selection-note,
+  .workflow-nav nav button small {
+    display: none;
+  }
+
+  .workflow-nav nav button {
+    min-height: 42px;
+    padding: 6px;
+    justify-content: center;
+    text-align: center;
+  }
+
+  .workflow-nav nav button span {
+    font-size: 10px;
+  }
+
+  .collection-layout,
+  .editor-layout {
+    grid-template-columns: 1fr;
+  }
+
+  .collection-rail {
+    max-height: 180px;
+    overflow: auto;
+  }
+}
+
+/* Manual color marks are a quiet Lightroom-style surface cue.  They should
+   not add a colored ring around the card, and their controls should stay out
+   of the visual rhythm until the pointer reaches the card. */
+.asset-card-shell .asset-mark-controls,
+.asset-card-shell.has-rating .asset-mark-controls,
+.asset-card-shell.has-color-label .asset-mark-controls,
+.asset-card-shell.has-rating.has-color-label .asset-mark-controls {
+  opacity: 0;
+  pointer-events: none;
+  transform: translateY(4px);
+}
+
+.asset-card-shell:hover .asset-mark-controls,
+.asset-card-shell:focus-within .asset-mark-controls {
+  opacity: 1;
+  pointer-events: auto;
+  transform: translateY(0);
+}
+
+.asset-card-shell.has-color-label .asset-card-frame,
+.asset-card-shell.has-color-label.is-active .asset-card-frame,
+.asset-card-shell.has-color-label .asset-card.is-selected,
+.asset-card-shell.has-color-label.has-rating .asset-card-frame {
+  border-color: transparent !important;
+  outline: none !important;
+}
+
+.asset-card-shell.has-color-label .asset-card,
+.asset-card-shell.has-color-label.is-active .asset-card,
+.asset-card-shell.has-color-label .asset-card.is-selected,
+.asset-card-shell.has-color-label.has-rating .asset-card {
+  border-color: transparent !important;
+  outline: none !important;
+  box-shadow: none !important;
+}
+
+.asset-card-shell.has-color-label .asset-card-frame {
+  box-shadow: var(--neu-shadow-raised) !important;
+  background: linear-gradient(
+    145deg,
+    color-mix(in srgb, var(--manual-label-color) 24%, var(--neu-surface-raised)),
+    color-mix(in srgb, var(--manual-label-color) 12%, var(--neu-surface))
+  );
+}
+
+.asset-card-shell.has-color-label.has-rating .asset-card-frame {
+  box-shadow: var(--neu-shadow-raised) !important;
+}
+
+/* The active preview ring is an interaction cue, not the manual color mark. */
+.asset-card-shell.has-color-label.is-active .asset-card-frame {
+  box-shadow:
+    0 0 0 2px var(--neu-focus-ring),
+    var(--neu-shadow-raised) !important;
+}
+
+.asset-card-shell.has-color-label .asset-card,
+.asset-card-shell.has-color-label .asset-card-body,
+.asset-card-shell.has-color-label .asset-mark-controls {
+  background: transparent !important;
+}
+
+.photo-app.theme-light .asset-card-shell.has-color-label .asset-card-frame {
+  background: linear-gradient(
+    145deg,
+    color-mix(in srgb, var(--manual-label-color) 24%, var(--neu-surface-raised)),
+    color-mix(in srgb, var(--manual-label-color) 12%, var(--neu-surface))
+  );
+}
+
+/* Keep selected emphasis inside each control's own box.  The old outer rings
+   were clipped by the compact filter scroller and could overlap its scrollbar
+   or adjacent controls, especially for the last color swatch in a row. */
+.color-filter-list {
+  overflow: visible;
+}
+
+:is(.color-filter, .classification-color-choice) {
+  overflow: visible;
+}
+
+:is(
+  .color-filter:hover,
+  .color-filter.is-active,
+  .classification-color-choice:hover,
+  .classification-color-choice.is-active
+) {
+  border-color: transparent !important;
+  box-shadow:
+    var(--neu-shadow-pressed),
+    inset 0 0 0 1px var(--neu-focus-ring) !important;
+}
+
+:is(.nav-row.is-active, .filter-chip.is-active, .manual-rating-filter button.is-active) {
+  box-shadow:
+    var(--neu-shadow-pressed),
+    inset 0 0 0 1px var(--neu-focus-ring) !important;
+}
+
+.filmstrip button.is-active,
+.filmstrip button.is-selected:not(.is-active) {
+  box-shadow:
+    inset 0 0 0 2px var(--neu-focus-ring),
+    var(--neu-shadow-pressed) !important;
+}
+
+.single-selection-toggle.is-selected {
+  box-shadow:
+    inset 0 0 0 2px var(--neu-focus-ring),
+    5px 6px 13px rgba(0, 0, 0, 0.42) !important;
+}
+
+:is(
+  .asset-card-frame .asset-color-label-controls button:hover,
+  .asset-card-frame .asset-color-label-controls button.is-active,
+  .manual-color-label-controls button:hover,
+  .manual-color-label-controls button.is-active,
+  .manual-color-filter button:hover,
+  .manual-color-filter button.is-active,
+  .manual-mark-color-group button:hover,
+  .manual-mark-color-group button.is-active
+) {
+  outline: none !important;
+  outline-offset: 0;
+  box-shadow:
+    inset 0 0 0 2px rgba(240, 244, 244, 0.86),
+    inset 2px 2px 3px rgba(255, 255, 255, 0.2),
+    inset -2px -2px 3px rgba(0, 0, 0, 0.24),
+    2px 2px 5px rgba(0, 0, 0, 0.28) !important;
+}
+
+:is(
+  .color-filter,
+  .classification-color-choice,
+  .nav-row,
+  .filter-chip,
+  .manual-rating-filter button,
+  .filmstrip button,
+  .single-selection-toggle,
+  .asset-card-frame .asset-color-label-controls button,
+  .manual-color-label-controls button,
+  .manual-color-filter button,
+  .manual-mark-color-group button
+):focus-visible {
+  outline: none !important;
+  box-shadow:
+    var(--neu-shadow-pressed),
+    inset 0 0 0 2px var(--focus) !important;
+}
+
+/* Grid and single-preview views share one workspace surface.  The single
+   canvas previously supplied its own legacy dark/light fill, which made the
+   preview look like a separate black panel instead of the same gallery. */
+.single-canvas,
+.photo-app.theme-light .single-canvas {
+  background: var(--neu-workspace-card-bg);
+}
+
+/* Selection actions live at the leading edge of the toolbar.  The toolbar's
+   right-aligned main actions therefore keep their position when a selection
+   appears, while the two selection-specific controls grow into the open space
+   on the left. */
+.topbar-selection-actions {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 6px;
+}
+
+.filter-popover-anchor {
+  position: relative;
+  display: flex;
+  flex: 0 0 auto;
+}
+
+.filter-conditions-popover {
+  position: absolute;
+  top: calc(100% + 10px);
+  right: 0;
+  z-index: 40;
+  display: flex;
+  width: min(360px, calc(100vw - 24px));
+  max-height: min(65vh, 430px);
+  flex-direction: column;
+  padding: 14px;
+  overflow: auto;
+  color: var(--text-secondary);
+  border-radius: var(--neu-radius-module);
+  background: linear-gradient(145deg, var(--neu-surface-raised), var(--neu-surface));
+  box-shadow: var(--neu-shadow-raised);
+}
+
+.filter-conditions-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding-bottom: 10px;
+  border-bottom: 1px solid var(--line-subtle);
+}
+
+.filter-conditions-header strong {
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.filter-conditions-clear {
+  min-height: 26px;
+  padding: 0 8px;
+  color: var(--accent-strong);
+  border: 0;
+  border-radius: var(--neu-radius-control);
+  background: transparent;
+  cursor: pointer;
+  font-size: 10px;
+  font-weight: 600;
+}
+
+.filter-conditions-clear:hover:not(:disabled) {
+  background: var(--accent-soft);
+  box-shadow: var(--neu-shadow-pressed);
+}
+
+.filter-conditions-clear:disabled {
+  color: var(--text-muted);
+  cursor: default;
+  opacity: 0.6;
+}
+
+.filter-condition-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding-top: 10px;
+}
+
+.filter-condition {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  min-height: 32px;
+  padding: 5px 6px 5px 9px;
+  border-radius: var(--neu-radius-control);
+  background: var(--neu-surface-pressed);
+  box-shadow: var(--neu-shadow-pressed);
+}
+
+.filter-condition-value {
+  display: flex;
+  min-width: 0;
+  align-items: baseline;
+  gap: 8px;
+  overflow: hidden;
+  font-size: 10px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.filter-condition-value strong {
+  flex: 0 0 auto;
+  color: var(--text-muted);
+  font-size: 9px;
+  font-weight: 500;
+}
+
+.filter-condition-value > span {
+  overflow: hidden;
+  color: var(--text);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.filter-condition-remove {
+  display: grid;
+  width: 22px;
+  height: 22px;
+  flex: 0 0 auto;
+  place-items: center;
+  color: var(--text-muted);
+  border: 0;
+  border-radius: 50%;
+  background: transparent;
+  cursor: pointer;
+  font-size: 16px;
+  line-height: 1;
+}
+
+.filter-condition-remove:hover,
+.filter-condition-remove:focus-visible {
+  color: var(--text);
+  background: var(--accent-soft);
+  box-shadow: var(--neu-shadow-pressed);
+}
+
+.filter-conditions-empty {
+  margin: 12px 2px 2px;
+  color: var(--text-muted);
+  font-size: 10px;
+  text-align: center;
+}
+
+/* Filmstrip cells are image surfaces, not padded button frames.  Padding here
+   exposed the cell background as a visible inner rim and made the thumbnail
+   stop short of the rounded rectangle.  Let the button own the clipping and
+   let its image occupy the complete surface; the main preview keeps its own
+   contain-based sizing. */
+.filmstrip button {
+  padding: 0 !important;
+  overflow: hidden;
+  border-radius: var(--neu-radius-control) !important;
+}
+
+.filmstrip button > .thumbnail-image,
+.filmstrip button > .thumbnail-skeleton,
+.filmstrip button > .thumbnail-placeholder {
+  display: block;
+  width: 100%;
+  height: 100%;
+  border-radius: inherit;
+}
+
+/* Resize from the rounded panel edge itself.  The semantic separator remains
+   keyboard accessible, but no longer occupies a visible gutter or draws a
+   standalone drag handle between the panels. */
+:root {
+  --panel-resize-hit-width: 12px;
+  --panel-resize-hit-offset: 6px;
+  --panel-resize-edge-inset: var(--compact-panel-padding, 8px);
+}
+
+.workspace-shell {
+  position: relative;
+}
+
+.panel-resize-handle {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  z-index: 12;
+  width: var(--panel-resize-hit-width);
+  min-width: 0;
+  background: transparent;
+  cursor: col-resize;
+}
+
+.panel-resize-handle-left {
+  left: calc(
+    var(--left-panel-width, 270px) - var(--panel-resize-edge-inset) - var(--panel-resize-hit-offset)
+  );
+}
+
+.panel-resize-handle-right {
+  right: calc(
+    var(--right-panel-width, 320px) - var(--panel-resize-edge-inset) -
+      var(--panel-resize-hit-offset)
+  );
+}
+
+.panel-resize-handle::before {
+  display: none;
+}
+
+.panel-resize-handle:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--accent-strong) 72%, transparent);
+  outline-offset: -1px;
+}
+
+.photo-app.left-closed .panel-resize-handle-left,
+.photo-app.right-closed .panel-resize-handle-right {
+  display: none;
+}
+
+.filmstrip button > .thumbnail-image {
+  object-fit: cover;
+}
+
+/* Analysis status is a contextual image-area filter, not a permanent sidebar
+   category.  Keep it compact and lifted just above the results. */
+.analysis-status-filter-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-height: 42px;
+  margin: 8px 10px 0;
+  padding: 6px 10px 6px 12px;
+  border-radius: 12px;
+  background: linear-gradient(145deg, var(--neu-surface-raised), var(--neu-surface));
+  box-shadow: var(--neu-shadow-control);
+}
+
+.analysis-status-filter-heading,
+.analysis-status-filter-controls {
+  display: flex;
+  align-items: center;
+}
+
+.analysis-status-filter-heading {
+  min-width: 0;
+  gap: 8px;
+}
+
+.analysis-status-filter-heading strong {
+  color: var(--text-high);
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.analysis-status-filter-heading span {
+  overflow: hidden;
+  color: var(--text-muted);
+  font-size: 9px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.analysis-status-filter-controls {
+  flex: 0 0 auto;
+  gap: 6px;
+}
+
+.analysis-status-filter-controls button {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 27px;
+  padding: 0 9px;
+  color: var(--text-secondary);
+  border: 0;
+  border-radius: 8px;
+  background: var(--neu-surface-raised);
+  box-shadow: var(--neu-shadow-control);
+  cursor: pointer;
+  font-size: 10px;
+}
+
+.analysis-status-filter-controls button:hover:not(.is-active) {
+  color: var(--text-high);
+  background: linear-gradient(145deg, var(--neu-surface-raised), var(--neu-surface-pressed));
+}
+
+.analysis-status-filter-controls button.is-active {
+  color: var(--accent-strong);
+  background: var(--accent-soft);
+  box-shadow: var(--neu-shadow-pressed);
+}
+
+.analysis-status-filter-controls button:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--accent-strong) 72%, transparent);
+  outline-offset: 2px;
+}
+
+.analysis-status-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: #9faeba;
+  box-shadow: inset 1px 1px 2px rgba(0, 0, 0, 0.32);
+}
+
+.analysis-status-dot.is-failed {
+  background: #c9958d;
+}
+
+@media (max-width: 720px) {
+  .analysis-status-filter-bar {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .analysis-status-filter-controls {
+    flex-wrap: wrap;
+  }
+}

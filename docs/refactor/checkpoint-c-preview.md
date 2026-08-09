@@ -130,7 +130,7 @@
 - 点击卡片、Enter、双击和 Filmstrip 都只改变 activeAssetId。
 - Preview 和 DetailPanel 始终显示同一个 Asset。
 - Escape 返回 Grid，但不产生第二个 preview selection。
-- Original 只在需要时加载，不预加载整组原图。
+- Original 只为当前单图查看器加载；进入单图时优先请求原图，不预加载整组原图。
 
 ## 7. Detailed Implementation Steps
 
@@ -324,8 +324,8 @@ Goal：验证预览在真实桌面窗口中的性能和交互。
    - 预期：Detail、Preview、当前高亮同步变化。
 4. 使用左右方向键。
    - 预期：按照当前 sort/filter 和 recursive scope 导航。
-5. 缩放到 screen threshold。
-   - 预期：按需请求 screen/original tier，不加载无关图片。
+5. 打开单图并缩放到不同级别。
+   - 预期：当前图片优先请求 original；原图读取失败时回退 screen，不加载无关图片。
 6. 快速连续切换多张图片。
    - 预期：旧请求不会覆盖最后选中的图片。
 7. 调整窗口 DPR 或尺寸。

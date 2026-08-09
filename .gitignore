@@ -66,3 +66,6 @@ tmp/
 
 # Generated reports
 license-reports/
+
+# Local read-only source references used for architecture research
+reference/

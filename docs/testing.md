@@ -43,7 +43,7 @@ http://localhost:1420/?visual-fixture=scanning
 http://localhost:1420/?visual-fixture=error
 ```
 
-每次结构或样式调整至少检查 1920×1080、1440×900、1366×768 和 960×720，并检查折叠面板、组合筛选、分组、单图/胶片栏、扫描/语义任务、错误、模型不可用、图片选中、详情与焦点。正式基准图保存到 `docs/screenshots/semantic-*.png`。production build 后确认确定性夹具模块只存在于开发动态分支。
+每次结构或样式调整至少检查 1920×1080、1440×900、1366×768 和 960×720，并检查可调宽度侧栏、组合筛选、分组、单图/胶片栏、扫描/语义任务、错误、模型不可用、图片选中、详情与焦点。正式基准图保存到 `docs/screenshots/semantic-*.png`。production build 后确认确定性夹具模块只存在于开发动态分支。
 
 ## 发布前附加验证
 
@@ -62,7 +62,7 @@ http://localhost:1420/?visual-fixture=error
 - 前端：Prettier、ESLint、TypeScript、Vitest 6/6 和 Vite production build 通过；开发视觉 fixture 未进入 production bundle。
 - Rust core：`rustfmt --check` 通过；gnullvm `cargo test --no-default-features --all-targets` 18/18；对应 Clippy `-D warnings` 通过。
 - 真实模型：release CPU 路径对 48 张仓库 PNG 完成 TinyCLIP 推理，失败 0，平均 23.8269 ms，P50 23.1080 ms，P95 30.6964 ms，吞吐 41.9687 张/秒。
-- 浏览器：验证网格/单图/胶片栏、双侧折叠、语义 AND 筛选与分组；1920×1080、1440×900、1366×768、960×720 无页面溢出；最终新页面控制台无 error/warn。
+- 浏览器：验证网格/单图/胶片栏、双侧宽度调整、语义 AND 筛选与分组；1920×1080、1440×900、1366×768、960×720 无页面溢出；最终新页面控制台无 error/warn。
 - 桌面打包：`npm.cmd run tauri build` 的前端阶段通过，Rust MSVC 编译因本机没有 `link.exe` 失败；没有生成包含本里程碑变更的安装包，因此打包 WebView2 smoke 未执行。
 - 安全：Rust 文件系统测试只使用临时夹具，语义基准只使用仓库图标；未读取或修改个人图库。
 
@@ -83,3 +83,10 @@ http://localhost:1420/?visual-fixture=error
 - Tauri 显式 `--target x86_64-pc-windows-msvc` 后生成 NSIS 与中英文 MSI；三个产物均 `NotSigned`，哈希和路径记录在 `docs/release.md`。资源目录包含 TinyCLIP、tokenizer、ONNX Runtime DLL 及许可证。
 - NSIS 安装退出码 0；安装后主进程响应，应用数据目录和 SQLite 可打开（本机已有旧测试数据库，未删除用户数据）。已安装 TinyCLIP benchmark（3 张临时夹具）和评估 CLI（2 张 `unknown` 夹具）均真实 CPU 完成且失败 0；关闭/重启后 SQLite 保留；自带卸载器退出码 0 且安装目录移除。临时源夹具 SHA-256 未变化。
 - 打包 WebView UI 的导入、暂停/继续、组合筛选和重启续作点击流未能执行：桌面自动化 helper 返回 `EnumWindows failed: 0x80070003`，按规范重试和重置后仍失败。不得将这些 UI 步骤标记为通过；需人工或修复桌面自动化后补测。
+
+## Lap-inspired 智能工作台 MVP（2026-08-09）
+
+- Rust 新增覆盖：migration 11 重复初始化；收藏与集合保持虚拟；完整 BLAKE3 重复分组；Unicode 编辑副本目标；计划后执行、拒绝覆盖；生成副本预览撤销；源夹具导出与回滚前后 BLAKE3 不变。
+- React 新增覆盖：卡片收藏状态与星级更新相互独立；原有图库、选择、筛选、预览和侧栏交互回归保持通过。
+- 发布前必须补充桌面手工 smoke：收藏重启恢复、集合成员、TinyCLIP 文本/以图结果、重复审阅集合、2/4 图比较、编辑预览与另存确认、已有目标拒绝、人物 clear-all。
+- 人脸检测/身份聚类不在当前自动化验收中，因为安装包没有经产品许可审核的模型；验收标准是明确 `model_unavailable`、默认关闭、无云端回退且 clear-all 可用。

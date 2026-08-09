@@ -5,6 +5,19 @@ export type SortDirection = "asc" | "desc";
 export type SemanticMatchMode = "any" | "all";
 export type ViewMode = "grid" | "single";
 export type ClassificationSource = "none" | "auto" | "manual" | "mixed";
+export type ManualColorLabel = "red" | "yellow" | "green" | "blue" | "purple";
+
+export const MANUAL_COLOR_LABEL_OPTIONS: ReadonlyArray<{
+  id: ManualColorLabel;
+  label: string;
+  color: string;
+}> = [
+  { id: "red", label: "红色", color: "#d66b6b" },
+  { id: "yellow", label: "黄色", color: "#d7b65f" },
+  { id: "green", label: "绿色", color: "#72a37b" },
+  { id: "blue", label: "蓝色", color: "#6f94c5" },
+  { id: "purple", label: "紫色", color: "#9d7fc1" },
+];
 
 export interface ClassificationFieldState<T> {
   auto: T | null;
@@ -135,6 +148,8 @@ export interface AssetListItem {
   semanticStatus: string;
   semanticError: string | null;
   semanticAnalyzedAt: string | null;
+  rating: number;
+  colorLabel: ManualColorLabel | null;
   semanticLabels: SemanticLabelResult[];
   classification: EffectiveClassification;
 }
@@ -158,6 +173,8 @@ export interface AssetFilter {
   toneLabels: string[];
   colorCategories: string[];
   saturationLevels: string[];
+  ratings: number[];
+  colorLabels: ManualColorLabel[];
   brightnessMin: number | null;
   brightnessMax: number | null;
   saturationMin: number | null;
@@ -175,6 +192,8 @@ export const emptyAssetFilter: AssetFilter = {
   toneLabels: [],
   colorCategories: [],
   saturationLevels: [],
+  ratings: [],
+  colorLabels: [],
   brightnessMin: null,
   brightnessMax: null,
   saturationMin: null,
@@ -362,4 +381,124 @@ export interface OrganizationPlan {
   summary: OrganizationPlanSummary;
   items: OrganizationPlanItem[];
   tree: OrganizationTreeNode;
+}
+
+export interface WorkflowAsset {
+  id: number;
+  libraryId: number;
+  fileName: string;
+  extension: string;
+  fileSize: number;
+  width: number | null;
+  height: number | null;
+  captureTime: string | null;
+  rating: number;
+  colorLabel: ManualColorLabel | null;
+  isFavorite: boolean;
+  thumbnailAvailable: boolean;
+}
+
+export interface CollectionSummary {
+  id: number;
+  name: string;
+  description: string;
+  createdAt: string;
+  updatedAt: string;
+  assetCount: number;
+}
+
+export interface CollectionDetail extends CollectionSummary {
+  assets: WorkflowAsset[];
+}
+
+export interface DuplicateGroup {
+  fingerprint: string;
+  assets: WorkflowAsset[];
+  totalBytes: number;
+  reclaimableBytes: number;
+}
+
+export interface SimilarAsset extends WorkflowAsset {
+  similarity: number;
+}
+
+export interface LocalSearchResponse {
+  query: string;
+  normalizedQuery: string;
+  embeddedAssetCount: number;
+  items: SimilarAsset[];
+}
+
+export interface SimilarityCluster {
+  id: string;
+  assets: SimilarAsset[];
+}
+
+export interface SimilarityClusterResponse {
+  clusters: SimilarityCluster[];
+  embeddedAssetCount: number;
+  candidatePairCount: number;
+  truncated: boolean;
+}
+
+export interface FaceFeatureStatus {
+  status: string;
+  message: string;
+  enabled: boolean;
+  modelInstalled: boolean;
+  detectionCount: number;
+  clusterCount: number;
+  privacyNote: string;
+}
+
+export interface CropRecipe {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+export interface EditRecipe {
+  rotateDegrees: 0 | 90 | 180 | 270;
+  flipHorizontal: boolean;
+  flipVertical: boolean;
+  crop: CropRecipe | null;
+  exposure: number;
+  contrast: number;
+  saturation: number;
+}
+
+export const emptyEditRecipe: EditRecipe = {
+  rotateDegrees: 0,
+  flipHorizontal: false,
+  flipVertical: false,
+  crop: null,
+  exposure: 0,
+  contrast: 0,
+  saturation: 0,
+};
+
+export interface EditExportPlan {
+  planId: string;
+  assetId: number;
+  sourcePath: string;
+  targetPath: string;
+  sourceFingerprint: string;
+  recipe: EditRecipe;
+  status: string;
+  issues: string[];
+}
+
+export interface EditExportResult {
+  planId: string;
+  targetPath: string;
+  status: string;
+}
+
+export interface EditRollbackPlan {
+  planId: string;
+  targetPath: string;
+  targetHash: string;
+  status: string;
+  issues: string[];
 }

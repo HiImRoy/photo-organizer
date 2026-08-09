@@ -175,7 +175,7 @@ startCopyExport 不接受可重新计算规则的 frontend payload。
 
 Goal：建立 COPY Job 和 Item 的持久化模型。
 
-- Files to change：[src-tauri/src/models.rs](E:/Code/Codex/photo-organizer/src-tauri/src/models.rs)、[src-tauri/src/db.rs](E:/Code/Codex/photo-organizer/src-tauri/src/db.rs)；未来新增 0010 migration。
+- Files to change：[src-tauri/src/models.rs](E:/Code/Codex/photo-organizer/src-tauri/src/models.rs)、[src-tauri/src/db.rs](E:/Code/Codex/photo-organizer/src-tauri/src/db.rs)；未来新增 0011 migration（B 使用 0009，E 使用 0010）。
 - DB/schema impact：创建 export_jobs、export_job_items 和必要的 log/status fields；不创建 rollback tables。
 - API impact：增加 Job response、progress response 和 status enums。
 - React state impact：增加 ExportJob state，但不改变 immutable plan state。
@@ -279,7 +279,7 @@ Goal：验证从 Preview 到 COPY、Progress、Cancel 和 Log 的完整桌面流
 
 本阶段规划未来 Export Job migration，但当前不创建文件。
 
-### Planned 0010 — Export Jobs
+### Planned 0011 — Export Jobs
 
 - 迁移前备份 SQLite。
 - 创建 export_jobs。
@@ -401,7 +401,7 @@ Goal：验证从 Preview 到 COPY、Progress、Cancel 和 Log 的完整桌面流
 - [src-tauri/src/organization.rs](E:/Code/Codex/photo-organizer/src-tauri/src/organization.rs)
 - [src-tauri/src/paths.rs](E:/Code/Codex/photo-organizer/src-tauri/src/paths.rs)
 - 新增 COPY/export executor module。
-- 未来新增 0010 Export Job migration；本次不创建。
+- 未来新增 0011 Export Job migration；本次不创建。
 
 ## 13. Risks
 

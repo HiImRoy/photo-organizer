@@ -20,7 +20,7 @@ use crate::models::{
 };
 use crate::semantic::{
     ANALYSIS_VERSION as SEMANTIC_ANALYSIS_VERSION, MODEL_NAME, MODEL_VERSION,
-    SemanticAnalysisOutput,
+    SemanticAnalysisOutput, known_display_name_for_label_id,
 };
 use crate::source_identity::{SourceIdentity, identity_key, is_same_or_descendant};
 
@@ -37,6 +37,10 @@ const ASSET_LIBRARY_ASSIGNMENT_MIGRATION: &str =
     include_str!("../migrations/0008_asset_library_assignments.sql");
 const MANUAL_CLASSIFICATION_MIGRATION: &str =
     include_str!("../migrations/0009_manual_classification_overrides.sql");
+const MANUAL_ASSET_MARKS_MIGRATION: &str =
+    include_str!("../migrations/0010_manual_asset_marks.sql");
+const PHOTO_WORKFLOW_MVP_MIGRATION: &str =
+    include_str!("../migrations/0011_photo_workflow_mvp.sql");
 
 #[derive(Debug, Clone)]
 pub struct Repository {
@@ -47,6 +51,7 @@ pub struct Repository {
 pub struct SemanticAssetCandidate {
     pub id: i64,
     pub absolute_path: PathBuf,
+    pub analysis_path: PathBuf,
     pub fingerprint: String,
 }
 
@@ -107,6 +112,8 @@ impl Repository {
             (7_i64, MANUAL_LIBRARY_HIERARCHY_MIGRATION),
             (8_i64, ASSET_LIBRARY_ASSIGNMENT_MIGRATION),
             (9_i64, MANUAL_CLASSIFICATION_MIGRATION),
+            (10_i64, MANUAL_ASSET_MARKS_MIGRATION),
+            (11_i64, PHOTO_WORKFLOW_MVP_MIGRATION),
         ] {
             if current < version {
                 let transaction = connection.transaction()?;
@@ -1307,7 +1314,7 @@ impl Repository {
                     cf.saturation_mean, cf.chroma_mean, cf.saturation_label, cf.dominant_color_rgb,
                     cf.dominant_color_category, cf.neutral_ratio, cf.dominant_color_coverage,
                     a.semantic_status, a.semantic_error,
-                    a.semantic_analyzed_at
+                    a.semantic_analyzed_at, a.rating, a.color_label
              FROM assets a
              LEFT JOIN thumbnails t ON t.asset_id=a.id AND t.spec=?
              LEFT JOIN tone_features tf ON tf.asset_id=a.id
@@ -1366,6 +1373,8 @@ impl Repository {
                 semantic_status: row.get(34)?,
                 semantic_error: row.get(35)?,
                 semantic_analyzed_at: row.get(36)?,
+                rating: row.get(37)?,
+                color_label: row.get(38)?,
                 semantic_labels: Vec::new(),
                 classification: EffectiveClassification::default(),
             })
@@ -1770,9 +1779,13 @@ impl Repository {
                 "semantic job is already active: {active_job}"
             )));
         }
-        let mut sql = String::from(
-            "SELECT a.id, a.absolute_path, a.fingerprint
+        let thumbnail_spec = sql_literal(crate::imaging::THUMBNAIL_SPEC);
+        let mut sql = format!(
+            "SELECT a.id, a.absolute_path, a.fingerprint, t.cache_path
              FROM assets a
+             LEFT JOIN thumbnails t
+               ON t.asset_id=a.id AND t.spec={thumbnail_spec} AND t.status='ready'
+              AND t.source_modified_at=a.modified_at AND t.source_size=a.file_size
              WHERE COALESCE(
                      (SELECT assignment.library_id
                       FROM asset_library_assignments assignment
@@ -1818,9 +1831,14 @@ impl Repository {
             let mut statement = transaction.prepare(&sql)?;
             statement
                 .query_map(params_from_iter(values.iter()), |row| {
+                    let absolute_path = PathBuf::from(row.get::<_, String>(1)?);
                     Ok(SemanticAssetCandidate {
                         id: row.get(0)?,
-                        absolute_path: PathBuf::from(row.get::<_, String>(1)?),
+                        absolute_path: absolute_path.clone(),
+                        analysis_path: row
+                            .get::<_, Option<String>>(3)?
+                            .map(PathBuf::from)
+                            .unwrap_or(absolute_path),
                         fingerprint: row.get(2)?,
                     })
                 })?
@@ -2098,17 +2116,26 @@ impl Repository {
         job_id: &str,
     ) -> AppResult<Vec<SemanticAssetCandidate>> {
         let connection = self.open()?;
-        let mut statement = connection.prepare(
-            "SELECT a.id, a.absolute_path, ji.source_fingerprint
+        let thumbnail_spec = sql_literal(crate::imaging::THUMBNAIL_SPEC);
+        let mut statement = connection.prepare(&format!(
+            "SELECT a.id, a.absolute_path, ji.source_fingerprint, t.cache_path
              FROM analysis_job_items ji
              JOIN assets a ON a.id=ji.asset_id
+             LEFT JOIN thumbnails t
+               ON t.asset_id=a.id AND t.spec={thumbnail_spec} AND t.status='ready'
+              AND t.source_modified_at=a.modified_at AND t.source_size=a.file_size
              WHERE ji.job_id=?1 AND ji.status IN('queued', 'running')
-             ORDER BY ji.id ASC",
-        )?;
+             ORDER BY ji.id ASC"
+        ))?;
         let rows = statement.query_map([job_id], |row| {
+            let absolute_path = PathBuf::from(row.get::<_, String>(1)?);
             Ok(SemanticAssetCandidate {
                 id: row.get(0)?,
-                absolute_path: PathBuf::from(row.get::<_, String>(1)?),
+                absolute_path: absolute_path.clone(),
+                analysis_path: row
+                    .get::<_, Option<String>>(3)?
+                    .map(PathBuf::from)
+                    .unwrap_or(absolute_path),
                 fingerprint: row.get(2)?,
             })
         })?;
@@ -2186,6 +2213,42 @@ impl Repository {
         }
         bump_classification_revision(&transaction, asset_id)?;
         transaction.commit()?;
+        self.get_asset_detail(asset_id)
+    }
+
+    pub fn update_asset_rating(&self, asset_id: i64, rating: i64) -> AppResult<AssetDetail> {
+        if !(0..=5).contains(&rating) {
+            return Err(AppError::InvalidArgument(
+                "asset rating must be between 0 and 5".to_owned(),
+            ));
+        }
+        let connection = self.open()?;
+        ensure_asset_exists(&connection, asset_id)?;
+        connection.execute(
+            "UPDATE assets SET rating=?1 WHERE id=?2",
+            params![rating, asset_id],
+        )?;
+        self.get_asset_detail(asset_id)
+    }
+
+    pub fn update_asset_color_label(
+        &self,
+        asset_id: i64,
+        color_label: Option<&str>,
+    ) -> AppResult<AssetDetail> {
+        if let Some(color_label) = color_label
+            && !matches!(color_label, "red" | "yellow" | "green" | "blue" | "purple")
+        {
+            return Err(AppError::InvalidArgument(
+                "asset color label is not supported".to_owned(),
+            ));
+        }
+        let connection = self.open()?;
+        ensure_asset_exists(&connection, asset_id)?;
+        connection.execute(
+            "UPDATE assets SET color_label=?1 WHERE id=?2",
+            params![color_label, asset_id],
+        )?;
         self.get_asset_detail(asset_id)
     }
 
@@ -2362,7 +2425,7 @@ fn load_asset_by_id(connection: &Connection, asset_id: i64) -> AppResult<AssetLi
                     cf.saturation_mean, cf.chroma_mean, cf.saturation_label, cf.dominant_color_rgb,
                     cf.dominant_color_category, cf.neutral_ratio, cf.dominant_color_coverage,
                     a.semantic_status, a.semantic_error,
-                    a.semantic_analyzed_at
+                    a.semantic_analyzed_at, a.rating, a.color_label
              FROM assets a
              LEFT JOIN thumbnails t ON t.asset_id=a.id AND t.spec=?1
              LEFT JOIN tone_features tf ON tf.asset_id=a.id
@@ -2412,6 +2475,8 @@ fn load_asset_by_id(connection: &Connection, asset_id: i64) -> AppResult<AssetLi
                     semantic_status: row.get(34)?,
                     semantic_error: row.get(35)?,
                     semantic_analyzed_at: row.get(36)?,
+                    rating: row.get(37)?,
+                    color_label: row.get(38)?,
                     semantic_labels: Vec::new(),
                     classification: EffectiveClassification::default(),
                 })
@@ -2514,6 +2579,13 @@ fn asset_filter_sql(library_id: i64, filter: &AssetFilter) -> (String, Vec<Value
         &filter.tone_labels,
     );
     add_palette_filter(&mut clauses, &mut values, &filter.color_categories);
+    add_rating_threshold_filter(&mut clauses, &mut values, "a.rating", &filter.ratings);
+    add_string_in_filter(
+        &mut clauses,
+        &mut values,
+        "a.color_label",
+        &filter.color_labels,
+    );
     add_string_in_filter(
         &mut clauses,
         &mut values,
@@ -2637,6 +2709,18 @@ fn add_number_bound(
     }
 }
 
+fn add_rating_threshold_filter(
+    clauses: &mut Vec<String>,
+    values: &mut Vec<Value>,
+    column: &str,
+    selected: &[i64],
+) {
+    if let Some(threshold) = selected.iter().copied().max() {
+        clauses.push(format!("{column} >= ?"));
+        values.push(Value::Integer(threshold));
+    }
+}
+
 fn placeholders(count: usize) -> String {
     std::iter::repeat_n("?", count)
         .collect::<Vec<_>>()
@@ -2671,9 +2755,13 @@ fn semantic_labels_for_asset(
             SEMANTIC_ANALYSIS_VERSION
         ],
         |row| {
+            let label_id: String = row.get(0)?;
+            let stored_display_name: String = row.get(1)?;
             Ok(SemanticLabelResult {
-                label_id: row.get(0)?,
-                display_name: row.get(1)?,
+                display_name: known_display_name_for_label_id(&label_id)
+                    .unwrap_or(stored_display_name.as_str())
+                    .to_owned(),
+                label_id,
                 similarity: row.get(2)?,
                 threshold: row.get(3)?,
                 model_name: row.get(4)?,
@@ -3072,7 +3160,7 @@ mod tests {
         let repository = Repository::new(temp.path().join("database.sqlite3"));
         repository.initialize().expect("first initialization");
         repository.initialize().expect("second initialization");
-        assert_eq!(repository.migration_version().expect("version"), 9);
+        assert_eq!(repository.migration_version().expect("version"), 11);
         let connection = repository.open().expect("connection");
         for table in [
             "organization_plans",
@@ -3090,6 +3178,16 @@ mod tests {
                 )
                 .expect("table lookup");
             assert_eq!(exists, 1, "missing table {table}");
+        }
+        for column in ["rating", "color_label"] {
+            let exists: i64 = connection
+                .query_row(
+                    "SELECT COUNT(*) FROM pragma_table_info('assets') WHERE name=?1",
+                    [column],
+                    |row| row.get(0),
+                )
+                .expect("column lookup");
+            assert_eq!(exists, 1, "missing asset column {column}");
         }
     }
 
@@ -3200,6 +3298,70 @@ mod tests {
         let detail = repository
             .get_asset_detail(asset_id)
             .expect("initial detail");
+        assert_eq!(detail.asset.rating, 0);
+        assert_eq!(detail.asset.color_label, None);
+        let marked = repository
+            .update_asset_rating(asset_id, 4)
+            .expect("rating update");
+        assert_eq!(marked.asset.rating, 4);
+        let marked = repository
+            .update_asset_color_label(asset_id, Some("purple"))
+            .expect("color label update");
+        assert_eq!(marked.asset.color_label.as_deref(), Some("purple"));
+        assert!(repository.update_asset_rating(asset_id, 6).is_err());
+        assert!(
+            repository
+                .update_asset_color_label(asset_id, Some("orange"))
+                .is_err()
+        );
+        let high_rated_path = "C:\\fixtures\\classification-one\\high-rated.jpg";
+        let connection = repository.open().expect("open database for rating threshold");
+        connection
+            .execute(
+                "INSERT INTO assets(
+                    library_id, asset_identity_key, absolute_path, relative_path, file_name,
+                    extension, file_size, modified_at, fingerprint, width, height, orientation,
+                    file_status, scan_status, analysis_status, first_seen_at, last_seen_at,
+                    last_seen_scan, rating
+                 ) VALUES(?1, ?2, ?3, 'high-rated.jpg', 'high-rated.jpg', 'jpg', 100, 1,
+                          'fingerprint-high-rated', 1000, 800, 1, 'present', 'indexed',
+                          'completed', 1, 1, 1, 5)",
+                params![
+                    library_id,
+                    identity_key(Path::new(high_rated_path)),
+                    high_rated_path
+                ],
+            )
+            .expect("insert high-rated asset");
+        let threshold_filter = repository
+            .list_assets(
+                library_id,
+                AssetSortField::FileName,
+                SortDirection::Asc,
+                1,
+                100,
+                &AssetFilter {
+                    ratings: vec![4],
+                    ..AssetFilter::default()
+                },
+            )
+            .expect("rating threshold filter");
+        assert_eq!(threshold_filter.total, 2);
+        let marked_filter = repository
+            .list_assets(
+                library_id,
+                AssetSortField::FileName,
+                SortDirection::Asc,
+                1,
+                100,
+                &AssetFilter {
+                    ratings: vec![4],
+                    color_labels: vec!["purple".into()],
+                    ..AssetFilter::default()
+                },
+            )
+            .expect("manual mark filter");
+        assert_eq!(marked_filter.total, 1);
         assert_eq!(
             detail.asset.classification.primary_category.auto.as_deref(),
             Some("landscape")

@@ -1,4 +1,4 @@
-import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -11,6 +11,7 @@ const api = vi.hoisted(() => ({
   fetchLibraries: vi.fn(),
   fetchAssets: vi.fn(),
   fetchAssetDetail: vi.fn(),
+  fetchFavoriteAssetIds: vi.fn(),
   fetchClassificationRegistry: vi.fn(),
   startLibraryScan: vi.fn(),
   rescanLibrary: vi.fn(),
@@ -31,6 +32,9 @@ const api = vi.hoisted(() => ({
   startSemanticAnalysisForAssets: vi.fn(),
   reanalyzeAsset: vi.fn(),
   updateClassificationOverride: vi.fn(),
+  updateAssetRating: vi.fn(),
+  updateAssetColorLabel: vi.fn(),
+  setAssetFavorite: vi.fn(),
   updateTagOverride: vi.fn(),
   restoreAutoClassification: vi.fn(),
   pauseSemanticAnalysis: vi.fn(),
@@ -97,6 +101,8 @@ const asset: AssetListItem = {
   semanticStatus: "completed",
   semanticError: null,
   semanticAnalyzedAt: "2026-08-06T10:00:00Z",
+  rating: 0,
+  colorLabel: null,
   semanticLabels: [
     {
       labelId: "sunset",
@@ -138,11 +144,16 @@ let progressListener: ((progress: ScanProgress) => void) | undefined;
 
 beforeEach(() => {
   vi.clearAllMocks();
+  window.localStorage.removeItem("photo-organizer-theme");
   progressListener = undefined;
   api.chooseLibraryFolder.mockResolvedValue(null);
   api.fetchLibraries.mockResolvedValue([]);
   api.fetchAssets.mockResolvedValue({ items: [], total: 0, page: 1, pageSize: 200 });
   api.fetchAssetDetail.mockResolvedValue(null);
+  api.fetchFavoriteAssetIds.mockResolvedValue([]);
+  api.updateAssetRating.mockResolvedValue(null);
+  api.updateAssetColorLabel.mockResolvedValue(null);
+  api.setAssetFavorite.mockResolvedValue(true);
   api.fetchClassificationRegistry.mockResolvedValue([]);
   api.startLibraryScan.mockResolvedValue({ taskId: "task-1" });
   api.rescanLibrary.mockResolvedValue({ taskId: "task-2" });
@@ -202,6 +213,24 @@ beforeEach(() => {
 });
 
 describe("PhotoOrganizer application shell", () => {
+  it("switches to the light theme and persists the day-mode choice", async () => {
+    const user = userEvent.setup();
+    render(<App />);
+
+    const app = document.querySelector<HTMLElement>(".photo-app");
+    const themeToggle = await screen.findByRole("button", { name: "切换到白天模式" });
+    expect(app).not.toHaveClass("theme-light");
+
+    await user.click(themeToggle);
+
+    expect(app).toHaveClass("theme-light");
+    expect(window.localStorage.getItem("photo-organizer-theme")).toBe("light");
+    expect(screen.getByRole("button", { name: "切换到深色模式" })).toHaveAttribute(
+      "aria-pressed",
+      "true",
+    );
+  });
+
   it("shows the first-run empty state and import action", async () => {
     render(<App />);
     expect(await screen.findByRole("heading", { name: "建立本地图片库" })).toBeInTheDocument();
@@ -273,8 +302,8 @@ describe("PhotoOrganizer application shell", () => {
     api.fetchAssets.mockResolvedValue({ items: [asset], total: 1, page: 1, pageSize: 200 });
     render(<App />);
 
-    expect(await screen.findByText("晚霞.png")).toBeInTheDocument();
-    const assetButton = screen.getByRole("button", { name: "晚霞.png" });
+    const assetButton = await screen.findByRole("button", { name: "晚霞.png" });
+    expect(await screen.findByText("1200 × 800")).toBeInTheDocument();
     expect(assetButton).toHaveAttribute("aria-pressed", "false");
     await user.click(assetButton);
 
@@ -286,8 +315,140 @@ describe("PhotoOrganizer application shell", () => {
     await waitFor(() => expect(api.fetchThumbnail).toHaveBeenCalledWith(12));
   });
 
-  it("renders an explicit source-derived library tree without folder navigation", async () => {
+  it("applies Lightroom-style marks to one image or the selected images", async () => {
     const user = userEvent.setup();
+    api.fetchLibraries.mockResolvedValue([library]);
+    api.fetchAssets.mockResolvedValue({
+      items: [asset, secondAsset],
+      total: 2,
+      page: 1,
+      pageSize: 200,
+    });
+    render(<App />);
+
+    const firstCard = await screen.findByRole("button", { name: "晚霞.png" });
+    const firstShell = firstCard.closest<HTMLElement>(".asset-card-shell");
+    const secondCard = screen.getByRole("button", { name: "海边.png" });
+    const secondShell = secondCard.closest<HTMLElement>(".asset-card-shell");
+    expect(firstShell).not.toBeNull();
+    expect(secondShell).not.toBeNull();
+
+    await user.click(within(firstShell as HTMLElement).getByRole("button", { name: "4 星" }));
+    expect(api.updateAssetRating).toHaveBeenCalledWith(12, 4);
+    expect(firstShell).toHaveClass("has-rating", "rating-4");
+
+    await user.click(screen.getByRole("button", { name: "选择 晚霞.png" }));
+    fireEvent.click(screen.getByRole("button", { name: "选择 海边.png" }), { ctrlKey: true });
+    await user.click(within(firstShell as HTMLElement).getByRole("button", { name: "蓝色" }));
+
+    expect(api.updateAssetColorLabel).toHaveBeenCalledWith(12, "blue");
+    expect(api.updateAssetColorLabel).toHaveBeenCalledWith(13, "blue");
+    expect(firstShell).toHaveClass("has-color-label", "color-label-blue");
+    expect(secondShell).toHaveClass("has-color-label", "color-label-blue");
+  });
+
+  it("synchronizes single-preview marks and toggles color shortcuts", async () => {
+    const user = userEvent.setup();
+    api.fetchLibraries.mockResolvedValue([library]);
+    api.fetchAssets.mockResolvedValue({ items: [asset], total: 1, page: 1, pageSize: 200 });
+    render(<App />);
+
+    const firstCard = await screen.findByRole("button", { name: "晚霞.png" });
+    await user.dblClick(firstCard);
+    const details = screen.getByRole("complementary", { name: "图片详情" });
+
+    fireEvent.keyDown(window, { key: "3" });
+    await waitFor(() => expect(api.updateAssetRating).toHaveBeenCalledWith(12, 3));
+    expect(within(details).getByRole("button", { name: "3 星" })).toHaveAttribute(
+      "aria-pressed",
+      "true",
+    );
+    expect(within(details).getByText("3 星")).toBeInTheDocument();
+
+    fireEvent.keyDown(window, { key: "6" });
+    await waitFor(() => expect(api.updateAssetColorLabel).toHaveBeenCalledWith(12, "red"));
+    expect(within(details).getByRole("button", { name: "红色" })).toHaveAttribute(
+      "aria-pressed",
+      "true",
+    );
+
+    fireEvent.keyDown(window, { key: "6" });
+    await waitFor(() => expect(api.updateAssetColorLabel).toHaveBeenLastCalledWith(12, null));
+    expect(within(details).getByRole("button", { name: "红色" })).toHaveAttribute(
+      "aria-pressed",
+      "false",
+    );
+    expect(within(details).getByText("未设置")).toBeInTheDocument();
+  });
+
+  it("keeps the star filter as one Lightroom-style rating choice", async () => {
+    const user = userEvent.setup();
+    api.fetchLibraries.mockResolvedValue([library]);
+    api.fetchAssets.mockResolvedValue({ items: [asset], total: 1, page: 1, pageSize: 200 });
+    render(<App />);
+
+    const manualMarkBar = await screen.findByRole("toolbar", { name: "人工标记筛选" });
+    expect(manualMarkBar.closest(".grid-workspace-shell")).not.toBeNull();
+    expect(manualMarkBar.closest(".sidebar-filter-area")).toBeNull();
+    const thirdStar = within(manualMarkBar).getByRole("button", { name: "3 星及以上" });
+    const secondStar = within(manualMarkBar).getByRole("button", { name: "2 星及以上" });
+    const fourthStar = within(manualMarkBar).getByRole("button", { name: "4 星及以上" });
+
+    await user.click(thirdStar);
+    expect(thirdStar).toHaveAttribute("aria-pressed", "true");
+    expect(secondStar).toHaveAttribute("aria-pressed", "false");
+    expect(fourthStar).toHaveAttribute("aria-pressed", "false");
+    expect(thirdStar).toHaveClass("is-active");
+    expect(secondStar).toHaveClass("is-active");
+    expect(api.fetchAssets).toHaveBeenLastCalledWith(
+      expect.objectContaining({ filter: expect.objectContaining({ ratings: [3] }) }),
+    );
+
+    await user.click(screen.getByRole("button", { name: "筛选 1" }));
+    const filterDialog = screen.getByRole("dialog", { name: "当前条件" });
+    expect(filterDialog).toHaveTextContent("星级");
+    expect(filterDialog).toHaveTextContent("3 星及以上");
+
+    await user.click(
+      within(filterDialog).getByRole("button", {
+        name: "移除筛选条件：星级 3 星及以上",
+      }),
+    );
+    expect(thirdStar).toHaveAttribute("aria-pressed", "false");
+  });
+
+  it("keeps the manual mark filter bar available when a filter has no results", async () => {
+    api.fetchLibraries.mockResolvedValue([library]);
+    api.fetchAssets.mockResolvedValue({ items: [], total: 0, page: 1, pageSize: 200 });
+    render(<App />);
+
+    const manualMarkBar = await screen.findByRole("toolbar", { name: "人工标记筛选" });
+    expect(manualMarkBar.closest(".grid-workspace-shell")).not.toBeNull();
+    expect(screen.getByText("没有符合条件的图片")).toBeInTheDocument();
+    expect(within(manualMarkBar).getByRole("button", { name: "3 星及以上" })).toBeInTheDocument();
+  });
+
+  it("places analysis status filters above the image results", async () => {
+    const user = userEvent.setup();
+    api.fetchLibraries.mockResolvedValue([{ ...library, semanticPendingCount: 1 }]);
+    api.fetchAssets.mockResolvedValue({ items: [asset], total: 1, page: 1, pageSize: 200 });
+    render(<App />);
+
+    const statusBar = await screen.findByRole("region", { name: "分析状态筛选" });
+    expect(statusBar.closest(".center-workspace")).not.toBeNull();
+    expect(screen.queryByText("更多筛选")).not.toBeInTheDocument();
+
+    const failedFilter = within(statusBar).getByRole("button", { name: "分析失败" });
+    await user.click(failedFilter);
+    expect(failedFilter).toHaveAttribute("aria-pressed", "true");
+    expect(api.fetchAssets).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        filter: expect.objectContaining({ analysisStatus: "failed" }),
+      }),
+    );
+  });
+
+  it("renders an explicit source-derived library tree without folder navigation", async () => {
     const childLibrary: LibrarySummary = {
       ...library,
       id: 8,
@@ -302,12 +463,15 @@ describe("PhotoOrganizer application shell", () => {
     api.fetchLibraries.mockResolvedValue([library, childLibrary]);
     render(<App />);
 
-    expect(await screen.findByRole("button", { name: "折叠 中文 图库" })).toBeInTheDocument();
     expect(screen.queryByText("原始文件夹")).not.toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "＋ 导入图库" })).toBeInTheDocument();
-    expect(screen.getByText("子图库")).toBeInTheDocument();
-    await user.click(screen.getByRole("button", { name: "折叠 中文 图库" }));
-    expect(screen.queryByText("子图库")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "折叠左侧面板" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "折叠右侧面板" })).not.toBeInTheDocument();
+    expect(document.querySelector(".panel-toggle")).toBeNull();
+    const importButton = screen.getByRole("button", { name: "＋ 导入图库" });
+    expect(importButton).toBeInTheDocument();
+    expect(importButton.closest(".panel-titlebar")).not.toBeNull();
+    expect(document.querySelector(".library-area-heading")).toBeNull();
+    expect(await screen.findByText("子图库")).toBeInTheDocument();
   });
 
   it("updates scan progress and sends cancellation", async () => {
@@ -337,6 +501,9 @@ describe("PhotoOrganizer application shell", () => {
     expect(await screen.findByText("发现 20")).toBeInTheDocument();
     expect(screen.getByText("失败 1")).toBeInTheDocument();
     expect(screen.queryByText("Timing (cumulative)")).not.toBeInTheDocument();
+    const scanPanel = document.querySelector(".scan-panel");
+    expect(scanPanel?.parentElement).toHaveClass("center-column");
+    expect(scanPanel?.closest(".center-workspace")).toBeNull();
     expect(screen.getByRole("progressbar", { name: "扫描进度" })).toHaveAttribute(
       "aria-valuenow",
       "20",
@@ -554,7 +721,7 @@ describe("PhotoOrganizer application shell", () => {
     api.fetchLibraries.mockResolvedValue([library]);
     api.fetchAssets.mockResolvedValue({ items: [asset], total: 1, page: 1, pageSize: 200 });
     render(<App />);
-    await screen.findByText("晚霞.png");
+    await screen.findByRole("button", { name: "晚霞.png" });
 
     fireEvent.change(screen.getByLabelText("排序"), { target: { value: "brightness" } });
 
@@ -588,6 +755,28 @@ describe("PhotoOrganizer application shell", () => {
     await user.click(first);
     await waitFor(() => expect(first).toHaveAttribute("aria-pressed", "true"));
     await user.click(screen.getByRole("button", { name: "选择 晚霞.png" }));
+    const selectionActions = screen.getByRole("group", { name: "选择操作" });
+    expect(selectionActions).toHaveTextContent("清除选择");
+    expect(selectionActions).toHaveTextContent("批量修正");
+    expect(selectionActions.nextElementSibling).toHaveClass("segmented");
+    expect(screen.queryByRole("button", { name: "分析选中" })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "整理预览" })).toHaveClass("primary-action");
+    fireEvent.change(screen.getByLabelText("搜索图片"), { target: { value: "晚霞" } });
+    await user.click(screen.getByRole("button", { name: "筛选 1" }));
+    const filterDialog = screen.getByRole("dialog", { name: "当前条件" });
+    expect(filterDialog).toHaveTextContent("搜索");
+    expect(filterDialog).toHaveTextContent("晚霞");
+    await user.click(within(filterDialog).getByRole("button", { name: "移除筛选条件：搜索 晚霞" }));
+    expect(screen.getByText("当前没有筛选条件")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "筛选" }));
+    fireEvent.change(screen.getByLabelText("搜索图片"), { target: { value: "海边" } });
+    await user.click(screen.getByRole("button", { name: "筛选 1" }));
+    await user.click(
+      within(screen.getByRole("dialog", { name: "当前条件" })).getByRole("button", {
+        name: "清除筛选",
+      }),
+    );
+    expect(screen.getByText("当前没有筛选条件")).toBeInTheDocument();
     fireEvent.click(second, { ctrlKey: true });
     expect(await screen.findByText("已选择 2 张")).toBeInTheDocument();
     fireEvent.click(first, { ctrlKey: true });
@@ -600,6 +789,18 @@ describe("PhotoOrganizer application shell", () => {
     await user.dblClick(first);
     const filmstrip = await screen.findByLabelText("胶片栏");
     expect(filmstrip).toBeInTheDocument();
+    expect(
+      screen.getByRole("toolbar", { name: "人工标记筛选" }).closest(".single-workspace"),
+    ).not.toBeNull();
+    expect(document.querySelector(".photo-app")).not.toHaveClass("has-batch-classification");
+    const singleSelection = screen.getByRole("button", { name: "选择 晚霞.png" });
+    await user.click(singleSelection);
+    expect(singleSelection).toHaveAttribute("aria-pressed", "true");
+    expect(await screen.findByText("已选择 1 张")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "取消选择 晚霞.png" })).toHaveAttribute(
+      "aria-pressed",
+      "true",
+    );
     fireEvent.wheel(filmstrip, { deltaY: 120, deltaX: 0 });
     expect(filmstrip.scrollLeft).toBe(120);
     expect(screen.getByLabelText("图片导航图")).toBeInTheDocument();
@@ -630,6 +831,43 @@ describe("PhotoOrganizer application shell", () => {
     expect(screen.getByLabelText("图片网格")).toBeInTheDocument();
   });
 
+  it("resizes both side panels from border hit areas with accessible controls", async () => {
+    api.fetchLibraries.mockResolvedValue([library]);
+    api.fetchAssets.mockResolvedValue({ items: [asset], total: 1, page: 1, pageSize: 200 });
+    render(<App />);
+
+    const leftHandle = await screen.findByRole("separator", { name: "调整左侧面板宽度" });
+    const rightHandle = screen.getByRole("separator", { name: "调整右侧面板宽度" });
+    expect(leftHandle).toHaveClass("panel-resize-handle-left");
+    expect(rightHandle).toHaveClass("panel-resize-handle-right");
+    expect(leftHandle).toHaveAttribute("aria-valuenow", "270");
+    expect(rightHandle).toHaveAttribute("aria-valuenow", "320");
+
+    act(() => fireEvent.keyDown(leftHandle, { key: "ArrowRight" }));
+    expect(leftHandle).toHaveAttribute("aria-valuenow", "286");
+
+    act(() => fireEvent.keyDown(rightHandle, { key: "ArrowLeft" }));
+    expect(rightHandle).toHaveAttribute("aria-valuenow", "336");
+  });
+
+  it("toggles favorites independently from the existing star rating", async () => {
+    const user = userEvent.setup();
+    api.fetchLibraries.mockResolvedValue([library]);
+    api.fetchAssets.mockResolvedValue({ items: [asset], total: 1, page: 1, pageSize: 200 });
+    render(<App />);
+
+    const favorite = await screen.findByRole("button", { name: "收藏 晚霞.png" });
+    expect(favorite).toHaveAttribute("aria-pressed", "false");
+    await user.click(favorite);
+
+    expect(api.setAssetFavorite).toHaveBeenCalledWith(asset.id, true);
+    expect(screen.getByRole("button", { name: "取消收藏 晚霞.png" })).toHaveAttribute(
+      "aria-pressed",
+      "true",
+    );
+    expect(api.updateAssetRating).not.toHaveBeenCalled();
+  });
+
   it("removes a library through its menu without touching source files", async () => {
     const user = userEvent.setup();
     const confirm = vi.spyOn(window, "confirm").mockReturnValue(true);
@@ -637,13 +875,13 @@ describe("PhotoOrganizer application shell", () => {
     api.fetchAssets.mockResolvedValue({ items: [asset], total: 1, page: 1, pageSize: 200 });
     render(<App />);
 
-    await screen.findByText("晚霞.png");
+    await screen.findByRole("button", { name: "晚霞.png" });
     await user.click(screen.getByRole("button", { name: "中文 图库图库菜单" }));
     expect(screen.getByRole("menu")).toBeInTheDocument();
     fireEvent.pointerDown(document.body);
     expect(screen.queryByRole("menu")).not.toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "中文 图库图库菜单" }));
-    await user.click(screen.getByRole("button", { name: "从资料库移除" }));
+    await user.click(screen.getByRole("button", { name: "从图库移除" }));
 
     expect(api.removeLibrary).toHaveBeenCalledWith(7);
     expect(confirm).toHaveBeenCalled();

@@ -61,6 +61,8 @@ pub struct AssetListItem {
     pub semantic_status: String,
     pub semantic_error: Option<String>,
     pub semantic_analyzed_at: Option<String>,
+    pub rating: i64,
+    pub color_label: Option<String>,
     pub semantic_labels: Vec<SemanticLabelResult>,
     pub classification: EffectiveClassification,
 }
@@ -85,6 +87,8 @@ pub struct AssetGridItem {
     pub scan_status: String,
     pub analysis_status: String,
     pub error_message: Option<String>,
+    pub rating: i64,
+    pub color_label: Option<String>,
     pub thumbnail_available: bool,
     pub brightness: Option<f64>,
     pub contrast: Option<f64>,
@@ -120,6 +124,8 @@ impl From<&AssetListItem> for AssetGridItem {
             scan_status: asset.scan_status.clone(),
             analysis_status: asset.analysis_status.clone(),
             error_message: asset.error_message.clone(),
+            rating: asset.rating,
+            color_label: asset.color_label.clone(),
             thumbnail_available: asset.thumbnail_available,
             brightness: asset.brightness,
             contrast: asset.contrast,
@@ -196,6 +202,10 @@ pub struct AssetFilter {
     pub color_categories: Vec<String>,
     #[serde(default)]
     pub saturation_levels: Vec<String>,
+    #[serde(default)]
+    pub ratings: Vec<i64>,
+    #[serde(default)]
+    pub color_labels: Vec<String>,
     #[serde(default)]
     pub brightness_min: Option<f64>,
     #[serde(default)]

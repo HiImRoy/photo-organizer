@@ -2,13 +2,14 @@ use std::collections::HashMap;
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufRead, BufReader, Cursor, Seek, Write};
 use std::path::{Path, PathBuf};
+use std::time::Instant;
 
 use exif::{In, Tag, Value};
 use image::codecs::jpeg::JpegEncoder;
 use image::{DynamicImage, GenericImageView, RgbaImage};
 
 use crate::error::{AppError, AppResult};
-use crate::models::{BasicImageFeatures, ExifMetadata, ProcessedImage};
+use crate::models::{BasicImageFeatures, ExifMetadata, ImageProcessingTimings, ProcessedImage};
 
 pub const THUMBNAIL_SPEC: &str = "grid-640-v1";
 pub const ANALYSIS_VERSION: &str = "basic-color-v3";
@@ -28,28 +29,41 @@ pub fn process_image_with_source_bytes(
     cache_key: &str,
     source_bytes: Option<&[u8]>,
 ) -> AppResult<ProcessedImage> {
+    let exif_started = Instant::now();
     let exif = source_bytes
         .map(read_exif_bytes)
         .unwrap_or_else(|| read_exif(source_path));
+    let exif_us = elapsed_us(exif_started);
+
+    let decode_started = Instant::now();
     let decoded = match source_bytes {
         Some(bytes) => image::load_from_memory(bytes)?,
         None => image::ImageReader::open(source_path)?
             .with_guessed_format()?
             .decode()?,
     };
+    let decode_us = elapsed_us(decode_started);
+
+    let resize_started = Instant::now();
     let oriented = apply_orientation(decoded, exif.orientation);
     let (width, height) = oriented.dimensions();
     let thumbnail = bounded_thumbnail(&oriented, 640, 640).to_rgba8();
+    let resize_us = elapsed_us(resize_started);
+
     let analysis_step = if thumbnail.width() > 320 || thumbnail.height() > 320 {
         2
     } else {
         1
     };
+    let analysis_started = Instant::now();
     let features = analyze_rgba_with_step(&thumbnail, analysis_step);
+    let feature_analysis_us = elapsed_us(analysis_started);
 
+    let thumbnail_write_started = Instant::now();
     fs::create_dir_all(thumbnail_dir)?;
     let thumbnail_path = thumbnail_dir.join(format!("{cache_key}-{THUMBNAIL_SPEC}.jpg"));
     write_thumbnail_once(&thumbnail, &thumbnail_path)?;
+    let thumbnail_write_us = elapsed_us(thumbnail_write_started);
 
     Ok(ProcessedImage {
         width,
@@ -57,7 +71,18 @@ pub fn process_image_with_source_bytes(
         exif,
         thumbnail_path: path_to_string(&thumbnail_path),
         features,
+        timings: ImageProcessingTimings {
+            exif_us,
+            decode_us,
+            resize_us,
+            feature_analysis_us,
+            thumbnail_write_us,
+        },
     })
+}
+
+fn elapsed_us(started: Instant) -> u64 {
+    started.elapsed().as_micros().min(u128::from(u64::MAX)) as u64
 }
 
 /// Decode a source image with the same EXIF orientation used by thumbnails.
@@ -82,7 +107,8 @@ fn write_thumbnail_once(image: &RgbaImage, target: &Path) -> AppResult<()> {
     match OpenOptions::new().write(true).create_new(true).open(target) {
         Ok(mut file) => {
             file.write_all(&encoded)?;
-            file.sync_all()?;
+            // Thumbnails are rebuildable application cache. Avoid forcing a
+            // physical disk flush for every source file during import.
         }
         Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
         Err(error) => return Err(AppError::Io(error)),

@@ -12,6 +12,7 @@ pub mod semantic;
 pub mod semantic_tasks;
 pub mod source_identity;
 pub mod tasks;
+pub mod workflow;
 
 #[cfg(feature = "desktop")]
 use tauri::Manager;
@@ -69,6 +70,8 @@ pub fn run() {
             ipc::get_classification_registry,
             ipc::get_asset_detail,
             ipc::update_classification_override,
+            ipc::update_asset_rating,
+            ipc::update_asset_color_label,
             ipc::update_tag_override,
             ipc::restore_auto_classification,
             ipc::batch_update_classification,
@@ -99,6 +102,26 @@ pub fn run() {
             ipc::list_organization_issues,
             ipc::export_organization_manifest,
             ipc::discard_organization_plan,
+            ipc::list_favorite_asset_ids,
+            ipc::list_favorite_assets,
+            ipc::set_asset_favorite,
+            ipc::list_collections,
+            ipc::create_collection,
+            ipc::delete_collection,
+            ipc::get_collection,
+            ipc::add_assets_to_collection,
+            ipc::remove_assets_from_collection,
+            ipc::list_duplicate_groups,
+            ipc::search_local_images,
+            ipc::find_similar_assets,
+            ipc::build_similarity_clusters,
+            ipc::get_face_feature_status,
+            ipc::clear_face_data,
+            ipc::render_edit_preview,
+            ipc::preview_edit_export,
+            ipc::execute_edit_export,
+            ipc::preview_edit_rollback,
+            ipc::execute_edit_rollback,
         ])
         .run(tauri::generate_context!())
         .expect("failed to run PhotoOrganizer");

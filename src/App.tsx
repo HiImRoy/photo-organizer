@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import type { CSSProperties } from "react";
 
 import {
   cancelLibraryScan,
@@ -9,6 +10,7 @@ import {
   fetchAssets,
   fetchAssetDetail,
   fetchClassificationRegistry,
+  fetchFavoriteAssetIds,
   fetchLibraries,
   fetchSemanticCatalog,
   fetchSemanticGroups,
@@ -24,41 +26,57 @@ import {
   setLibraryParent,
   startLibraryScan,
   startSemanticAnalysis,
-  startSemanticAnalysisForAssets,
+  setAssetFavorite,
   updateClassificationOverride,
+  updateAssetColorLabel as updateAssetColorLabelApi,
+  updateAssetRating as updateAssetRatingApi,
   updateTagOverride,
   restoreAutoClassification,
   subscribeScanProgress,
   subscribeSemanticProgress,
 } from "./api";
-import { primaryCategoryOptions, SATURATION_OPTIONS, TONE_OPTIONS } from "./classificationLabels";
+import {
+  classificationValueLabel,
+  primaryCategoryOptions,
+  SATURATION_OPTIONS,
+  TONE_OPTIONS,
+  type ClassificationValueKind,
+} from "./classificationLabels";
 import { AssetCard } from "./components/AssetCard";
+import { AnalysisStatusFilterBar } from "./components/AnalysisStatusFilterBar";
 import { ColorSwatches } from "./components/ColorSwatches";
 import { DetailPanel } from "./components/DetailPanel";
+import { ManualMarkFilterBar } from "./components/ManualMarkFilterBar";
 import { OrganizationWorkspace } from "./components/OrganizationWorkspace";
 import {
+  CheckIcon,
   FilterIcon,
   GridIcon,
   ImportIcon,
   LibraryIcon,
+  MoonIcon,
   PauseIcon,
   PlayIcon,
   SearchIcon,
   SingleImageIcon,
   SortIcon,
+  SunIcon,
 } from "./components/Icons";
 import { ProgressPanel } from "./components/ProgressPanel";
 import { Sidebar } from "./components/Sidebar";
 import { Thumbnail } from "./components/Thumbnail";
+import { WorkflowWorkspace } from "./components/WorkflowWorkspace";
 import { usePreviewController, type PreviewController } from "./components/usePreviewController";
 import { formatDate } from "./format";
 import {
   emptyAssetFilter,
+  MANUAL_COLOR_LABEL_OPTIONS,
   type AssetFilter,
   type AssetPage,
   type AssetListItem,
   type ClassificationFieldDescriptor,
   type LibrarySummary,
+  type ManualColorLabel,
   type ScanProgress,
   type SemanticGroupSummary,
   type SemanticLabelDescriptor,
@@ -72,6 +90,24 @@ import {
 const PAGE_SIZE = 120;
 const PREVIEW_PAGE_SIZE = 500;
 const IMPORT_REFRESH_INTERVAL_MS = 750;
+const DEFAULT_LEFT_PANEL_WIDTH = 270;
+const DEFAULT_RIGHT_PANEL_WIDTH = 320;
+const LEFT_PANEL_MIN_WIDTH = 218;
+const LEFT_PANEL_MAX_WIDTH = 420;
+const RIGHT_PANEL_MIN_WIDTH = 256;
+const RIGHT_PANEL_MAX_WIDTH = 460;
+const THEME_STORAGE_KEY = "photo-organizer-theme";
+
+type ThemeMode = "dark" | "light";
+
+function readThemeMode(): ThemeMode {
+  if (typeof window === "undefined") return "dark";
+  try {
+    return window.localStorage.getItem(THEME_STORAGE_KEY) === "light" ? "light" : "dark";
+  } catch {
+    return "dark";
+  }
+}
 
 type AssetQueryOptions = {
   libraryId: number;
@@ -153,11 +189,13 @@ export default function App() {
   const [sort, setSort] = useState<SortField>("capture_time");
   const [direction, setDirection] = useState<SortDirection>("desc");
   const [filter, setFilterState] = useState<AssetFilter>(emptyAssetFilter);
+  const [filterPopoverOpen, setFilterPopoverOpen] = useState(false);
   const [page, setPage] = useState(1);
   const [viewMode, setViewMode] = useState<ViewMode>("grid");
+  const [themeMode, setThemeMode] = useState<ThemeMode>(readThemeMode);
   const [groupBySemantic, setGroupBySemantic] = useState(false);
-  const [leftCollapsed, setLeftCollapsed] = useState(false);
-  const [rightCollapsed, setRightCollapsed] = useState(false);
+  const [leftPanelWidth, setLeftPanelWidth] = useState(DEFAULT_LEFT_PANEL_WIDTH);
+  const [rightPanelWidth, setRightPanelWidth] = useState(DEFAULT_RIGHT_PANEL_WIDTH);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [scanProgress, setScanProgress] = useState<ScanProgress | null>(null);
@@ -165,9 +203,10 @@ export default function App() {
   const [cancellingScan, setCancellingScan] = useState(false);
   const [semanticStatus, setSemanticStatus] = useState<SemanticRuntimeStatus | null>(null);
   const [refreshKey, setRefreshKey] = useState(0);
-  const [workspaceMode, setWorkspaceMode] = useState<"library" | "organization">(
+  const [workspaceMode, setWorkspaceMode] = useState<"library" | "organization" | "workflows">(
     visualOrganizationMode ? "organization" : "library",
   );
+  const [favoriteAssetIds, setFavoriteAssetIds] = useState<Set<number>>(new Set());
   const [selectedAssetIds, setSelectedAssetIds] = useState<number[]>([]);
   const [pendingImportPath, setPendingImportPath] = useState<string | null>(null);
   const [includeImportSubfolders, setIncludeImportSubfolders] = useState(false);
@@ -176,11 +215,40 @@ export default function App() {
   const [batchField, setBatchField] = useState("primary_category");
   const [batchValue, setBatchValue] = useState<string[]>([]);
   const refreshTimerRef = useRef<number | null>(null);
+  const filterPopoverRef = useRef<HTMLDivElement | null>(null);
+  const assetsRef = useRef<AssetListItem[]>([]);
+  const manualMarkRequestVersionRef = useRef(new Map<number, number>());
   const assetPointerDragRef = useRef<AssetPointerDragState | null>(null);
   const librariesRef = useRef(libraries);
   const assetAssignmentRef = useRef<(assetIds: number[], targetLibraryId: number) => void>(
     () => {},
   );
+  assetsRef.current = assets;
+
+  useEffect(() => {
+    let cancelled = false;
+    if (currentLibraryId === null) {
+      return;
+    }
+    void fetchFavoriteAssetIds(currentLibraryId)
+      .then((ids) => {
+        if (!cancelled) setFavoriteAssetIds(new Set(ids));
+      })
+      .catch((reason) => {
+        if (!cancelled) setError(messageFrom(reason));
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [currentLibraryId, refreshKey]);
+
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(THEME_STORAGE_KEY, themeMode);
+    } catch {
+      // Private browsing or a restricted webview may disable local storage.
+    }
+  }, [themeMode]);
 
   const requestDataRefresh = useCallback((immediate = false) => {
     if (immediate) {
@@ -310,6 +378,15 @@ export default function App() {
     viewMode === "single" ? previewAsset : null,
     viewMode === "single",
   );
+  const detailBaseAsset = activeAsset ?? (viewMode === "grid" ? (assets[0] ?? null) : null);
+  const detailPanelAsset =
+    detailAsset !== null && detailBaseAsset !== null && detailAsset.id === detailBaseAsset.id
+      ? {
+          ...detailAsset,
+          rating: detailBaseAsset.rating,
+          colorLabel: detailBaseAsset.colorLabel,
+        }
+      : detailBaseAsset;
   const totalPages = Math.max(1, Math.ceil(assetTotal / PAGE_SIZE));
   const scanRunning =
     scanProgress !== null && ["running", "cancelling"].includes(scanProgress.status);
@@ -317,7 +394,32 @@ export default function App() {
     semanticProgress !== null &&
     ["queued", "running", "paused", "cancelling"].includes(semanticProgress.status);
   const activeFilterCount = countActiveFilters(filter);
+  const activeFilterConditions = useMemo(
+    () => buildFilterConditions(filter, semanticCatalog),
+    [filter, semanticCatalog],
+  );
   const libraryName = selectedLibrary?.name || "PhotoOrganizer";
+
+  useEffect(() => {
+    if (!filterPopoverOpen) return undefined;
+
+    const handlePointerDown = (event: PointerEvent) => {
+      const target = event.target;
+      if (target instanceof Node && !filterPopoverRef.current?.contains(target)) {
+        setFilterPopoverOpen(false);
+      }
+    };
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setFilterPopoverOpen(false);
+    };
+
+    document.addEventListener("pointerdown", handlePointerDown);
+    document.addEventListener("keydown", handleKeyDown);
+    return () => {
+      document.removeEventListener("pointerdown", handlePointerDown);
+      document.removeEventListener("keydown", handleKeyDown);
+    };
+  }, [filterPopoverOpen]);
 
   useEffect(() => {
     let active = true;
@@ -490,7 +592,9 @@ export default function App() {
   }, [scanProgress]);
 
   function updateFilter(next: AssetFilter) {
-    setFilterState(next);
+    const normalized =
+      next.ratings.length > 1 ? { ...next, ratings: [Math.max(...next.ratings)] } : next;
+    setFilterState(normalized);
     setPage(1);
   }
 
@@ -561,22 +665,6 @@ export default function App() {
     }
   }
 
-  async function analyzeSelected() {
-    setError(null);
-    if (!selectedLibrary || selectedAssetIds.length === 0) return;
-    try {
-      if (semanticStatus?.status !== "ready") {
-        const status = await prepareSemanticModel();
-        setSemanticStatus(status);
-        return;
-      }
-      const { jobId } = await startSemanticAnalysisForAssets(selectedLibrary.id, selectedAssetIds);
-      setSemanticProgress(pendingSemanticProgress(jobId, selectedLibrary.id, semanticStatus));
-    } catch (reason) {
-      setError(messageFrom(reason));
-    }
-  }
-
   async function analyzeOne(asset: AssetListItem) {
     try {
       const { jobId } = await reanalyzeAsset(asset.libraryId, asset.id);
@@ -586,13 +674,118 @@ export default function App() {
     }
   }
 
-  function applyDetailUpdate(detail: AssetListItem | null) {
+  const applyDetailUpdate = useCallback((detail: AssetListItem | null) => {
     if (!detail) return;
     setDetailAsset(detail);
+    assetsRef.current = assetsRef.current.map((item) =>
+      item.id === detail.id ? { ...item, ...detail } : item,
+    );
     setAssets((current) =>
       current.map((item) => (item.id === detail.id ? { ...item, ...detail } : item)),
     );
+  }, []);
+
+  const applyAssetMarkUpdate = useCallback(
+    (assetId: number, update: Partial<Pick<AssetListItem, "rating" | "colorLabel">>) => {
+      assetsRef.current = assetsRef.current.map((item) =>
+        item.id === assetId ? { ...item, ...update } : item,
+      );
+      setAssets((current) =>
+        current.map((item) => (item.id === assetId ? { ...item, ...update } : item)),
+      );
+      setDetailAsset((current) => (current?.id === assetId ? { ...current, ...update } : current));
+    },
+    [],
+  );
+
+  const editAssetRating = useCallback(
+    async (assetId: number, rating: number) => {
+      const previous = assetsRef.current.find((item) => item.id === assetId)?.rating ?? 0;
+      const requestVersion = (manualMarkRequestVersionRef.current.get(assetId) ?? 0) + 1;
+      manualMarkRequestVersionRef.current.set(assetId, requestVersion);
+      applyAssetMarkUpdate(assetId, { rating });
+      try {
+        const detail = await updateAssetRatingApi(assetId, rating);
+        if (manualMarkRequestVersionRef.current.get(assetId) === requestVersion) {
+          applyDetailUpdate(detail);
+        }
+      } catch (reason) {
+        if (manualMarkRequestVersionRef.current.get(assetId) === requestVersion) {
+          applyAssetMarkUpdate(assetId, { rating: previous });
+        }
+        setError(messageFrom(reason));
+      }
+    },
+    [applyAssetMarkUpdate, applyDetailUpdate],
+  );
+
+  const editAssetColorLabel = useCallback(
+    async (assetId: number, colorLabel: ManualColorLabel | null) => {
+      const previous = assetsRef.current.find((item) => item.id === assetId)?.colorLabel ?? null;
+      const requestVersion = (manualMarkRequestVersionRef.current.get(assetId) ?? 0) + 1;
+      manualMarkRequestVersionRef.current.set(assetId, requestVersion);
+      applyAssetMarkUpdate(assetId, { colorLabel });
+      try {
+        const detail = await updateAssetColorLabelApi(assetId, colorLabel);
+        if (manualMarkRequestVersionRef.current.get(assetId) === requestVersion) {
+          applyDetailUpdate(detail);
+        }
+      } catch (reason) {
+        if (manualMarkRequestVersionRef.current.get(assetId) === requestVersion) {
+          applyAssetMarkUpdate(assetId, { colorLabel: previous });
+        }
+        setError(messageFrom(reason));
+      }
+    },
+    [applyAssetMarkUpdate, applyDetailUpdate],
+  );
+
+  async function editAssetRatingForSelection(assetId: number, rating: number) {
+    const targetIds = selectedAssetIds.includes(assetId) ? selectedAssetIds : [assetId];
+    await Promise.all(targetIds.map((targetId) => editAssetRating(targetId, rating)));
   }
+
+  async function editAssetColorLabelForSelection(
+    assetId: number,
+    colorLabel: ManualColorLabel | null,
+  ) {
+    const targetIds = selectedAssetIds.includes(assetId) ? selectedAssetIds : [assetId];
+    await Promise.all(targetIds.map((targetId) => editAssetColorLabel(targetId, colorLabel)));
+  }
+
+  async function toggleFavorite(assetId: number) {
+    const wasFavorite = favoriteAssetIds.has(assetId);
+    setFavoriteAssetIds((current) => {
+      const next = new Set(current);
+      if (wasFavorite) next.delete(assetId);
+      else next.add(assetId);
+      return next;
+    });
+    try {
+      await setAssetFavorite(assetId, !wasFavorite);
+    } catch (reason) {
+      setFavoriteAssetIds((current) => {
+        const next = new Set(current);
+        if (wasFavorite) next.add(assetId);
+        else next.delete(assetId);
+        return next;
+      });
+      setError(messageFrom(reason));
+    }
+  }
+
+  const toggleAssetColorLabelForSelection = useCallback(
+    async (assetId: number, colorLabel: ManualColorLabel) => {
+      const targetIds = selectedAssetIds.includes(assetId) ? selectedAssetIds : [assetId];
+      const shouldClear = targetIds.every(
+        (targetId) =>
+          assetsRef.current.find((item) => item.id === targetId)?.colorLabel === colorLabel,
+      );
+      const nextColorLabel = shouldClear ? null : colorLabel;
+      await Promise.all(targetIds.map((targetId) => editAssetColorLabel(targetId, nextColorLabel)));
+    },
+    [editAssetColorLabel, selectedAssetIds],
+  );
 
   async function editClassification(assetId: number, field: string, value: string | string[]) {
     try {
@@ -701,6 +894,14 @@ export default function App() {
       return;
     }
     setSelectionAnchorId(asset.id);
+  }
+
+  function selectWorkflowAsset(assetId: number) {
+    setWorkspaceMode("library");
+    setActiveAssetId(assetId);
+    setPreviewAssetId(assetId);
+    setSelectionAnchorId(assetId);
+    setSelectedAssetIds([assetId]);
   }
 
   function selectionRange(targetId: number): number[] | null {
@@ -814,6 +1015,49 @@ export default function App() {
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
+      const target = event.target;
+      const isFormControl =
+        target instanceof HTMLInputElement ||
+        target instanceof HTMLTextAreaElement ||
+        target instanceof HTMLSelectElement ||
+        (target instanceof HTMLElement && target.isContentEditable);
+      if (!isFormControl) {
+        const markedAssetIds =
+          activeAsset && selectedAssetIds.includes(activeAsset.id)
+            ? selectedAssetIds
+            : activeAsset
+              ? [activeAsset.id]
+              : [];
+        const ratingKey = /^[0-5]$/.test(event.key) ? Number(event.key) : null;
+        const colorLabelByKey: Record<string, ManualColorLabel> = {
+          "6": "red",
+          "7": "yellow",
+          "8": "green",
+          "9": "blue",
+        };
+        if (markedAssetIds.length > 0 && ratingKey !== null) {
+          event.preventDefault();
+          void Promise.all(markedAssetIds.map((assetId) => editAssetRating(assetId, ratingKey)));
+          return;
+        }
+        if (markedAssetIds.length > 0 && (event.key === "[" || event.key === "]")) {
+          event.preventDefault();
+          const delta = event.key === "]" ? 1 : -1;
+          void Promise.all(
+            markedAssetIds.map((assetId) => {
+              const current = assets.find((item) => item.id === assetId)?.rating ?? 0;
+              return editAssetRating(assetId, Math.max(0, Math.min(5, current + delta)));
+            }),
+          );
+          return;
+        }
+        if (markedAssetIds.length > 0 && colorLabelByKey[event.key]) {
+          event.preventDefault();
+          const colorLabel = colorLabelByKey[event.key];
+          void toggleAssetColorLabelForSelection(markedAssetIds[0], colorLabel);
+          return;
+        }
+      }
       if (event.key === "Escape") {
         if (viewMode === "single") setViewMode("grid");
         else clearSelection();
@@ -830,11 +1074,25 @@ export default function App() {
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [activeAsset, navigatePreview, previewAsset, viewMode]);
+  }, [
+    activeAsset,
+    assets,
+    editAssetColorLabel,
+    editAssetRating,
+    navigatePreview,
+    previewAsset,
+    selectedAssetIds,
+    toggleAssetColorLabelForSelection,
+    viewMode,
+  ]);
+
+  const showBatchEditor = batchEditorOpen && selectedAssetIds.length > 0;
 
   return (
     <div
-      className={`photo-app left-${leftCollapsed ? "closed" : "open"} right-${rightCollapsed ? "closed" : "open"}`}
+      className={`photo-app${showBatchEditor ? " has-batch-classification" : ""}${
+        themeMode === "light" ? " theme-light" : ""
+      }`}
     >
       <header className="topbar">
         <div className="app-identity">
@@ -859,6 +1117,20 @@ export default function App() {
           </span>
         </div>
         <div className="topbar-actions">
+          {selectedAssetIds.length > 0 ? (
+            <div className="topbar-selection-actions" role="group" aria-label="选择操作">
+              <button className="tool-button" type="button" onClick={clearSelection}>
+                清除选择
+              </button>
+              <button
+                className={batchEditorOpen ? "tool-button is-active" : "tool-button"}
+                type="button"
+                onClick={() => setBatchEditorOpen((value) => !value)}
+              >
+                批量修正
+              </button>
+            </div>
+          ) : null}
           <div className="segmented" aria-label="视图模式">
             <button
               type="button"
@@ -886,14 +1158,26 @@ export default function App() {
               onChange={(event) => updateFilter({ ...filter, search: event.target.value || null })}
             />
           </label>
-          <button
-            className={activeFilterCount ? "tool-button is-active" : "tool-button"}
-            type="button"
-            onClick={() => setLeftCollapsed(false)}
-          >
-            <FilterIcon width="15" height="15" />
-            筛选{activeFilterCount ? ` ${activeFilterCount}` : ""}
-          </button>
+          <div className="filter-popover-anchor" ref={filterPopoverRef}>
+            <button
+              className={activeFilterCount ? "tool-button is-active" : "tool-button"}
+              type="button"
+              aria-expanded={filterPopoverOpen}
+              aria-haspopup="dialog"
+              aria-controls="filter-conditions-popover"
+              onClick={() => setFilterPopoverOpen((value) => !value)}
+            >
+              <FilterIcon width="15" height="15" />
+              筛选{activeFilterCount ? ` ${activeFilterCount}` : ""}
+            </button>
+            {filterPopoverOpen ? (
+              <FilterConditionsPopover
+                conditions={activeFilterConditions}
+                onClear={() => updateFilter(emptyAssetFilter)}
+                onRemove={(condition) => updateFilter(condition.remove(filter))}
+              />
+            ) : null}
+          </div>
           <label className="sort-select">
             <SortIcon width="15" height="15" />
             <span className="sr-only">排序</span>
@@ -938,44 +1222,49 @@ export default function App() {
             <PlayIcon width="14" height="14" />
             {semanticStatus?.status === "ready" ? "分析" : "准备模型"}
           </button>
-          {selectedAssetIds.length > 0 ? (
+          {selectedLibrary ? (
             <>
               <button
-                className="tool-button is-active"
+                className={workspaceMode === "workflows" ? "tool-button is-active" : "tool-button"}
                 type="button"
-                onClick={() => void analyzeSelected()}
-                disabled={semanticRunning}
+                onClick={() =>
+                  setWorkspaceMode((value) => (value === "workflows" ? "library" : "workflows"))
+                }
               >
-                <PlayIcon width="14" height="14" />
-                分析选中
-              </button>
-              <button className="tool-button" type="button" onClick={clearSelection}>
-                清除选择
+                智能工作台
               </button>
               <button
-                className={batchEditorOpen ? "tool-button is-active" : "tool-button"}
+                className="primary-action"
                 type="button"
-                onClick={() => setBatchEditorOpen((value) => !value)}
+                onClick={() =>
+                  setWorkspaceMode((value) =>
+                    value === "organization" ? "library" : "organization",
+                  )
+                }
               >
-                批量修正
+                整理预览
               </button>
             </>
           ) : null}
-          {selectedLibrary ? (
-            <button
-              className={workspaceMode === "organization" ? "tool-button is-active" : "tool-button"}
-              type="button"
-              onClick={() =>
-                setWorkspaceMode((value) => (value === "library" ? "organization" : "library"))
-              }
-            >
-              整理预览
-            </button>
-          ) : null}
+          <button
+            className="tool-button theme-toggle"
+            type="button"
+            onClick={() => setThemeMode((value) => (value === "dark" ? "light" : "dark"))}
+            aria-label={themeMode === "dark" ? "切换到白天模式" : "切换到深色模式"}
+            aria-pressed={themeMode === "light"}
+            title={themeMode === "dark" ? "切换到白天模式" : "切换到深色模式"}
+          >
+            {themeMode === "dark" ? (
+              <SunIcon width="15" height="15" />
+            ) : (
+              <MoonIcon width="15" height="15" />
+            )}
+            <span>{themeMode === "dark" ? "白天" : "深色"}</span>
+          </button>
         </div>
       </header>
 
-      {batchEditorOpen && selectedAssetIds.length > 0 ? (
+      {showBatchEditor ? (
         <div className="batch-classification-bar">
           <strong>批量修正 {selectedAssetIds.length} 张图片</strong>
           <select
@@ -1045,8 +1334,33 @@ export default function App() {
         </div>
       ) : null}
 
-      <div className="workspace-shell">
-        {workspaceMode === "organization" && selectedLibrary ? (
+      <div
+        className="workspace-shell"
+        style={
+          {
+            "--left-panel-width": `${leftPanelWidth}px`,
+            "--right-panel-width": `${rightPanelWidth}px`,
+          } as CSSProperties
+        }
+      >
+        {workspaceMode === "workflows" && selectedLibrary ? (
+          <main className="center-workspace workflow-mode-shell">
+            <WorkflowWorkspace
+              libraryId={selectedLibrary.id}
+              selectedAssetIds={selectedAssetIds}
+              activeAsset={detailPanelAsset}
+              onSelectAsset={selectWorkflowAsset}
+              onFavoriteChange={(assetId, favorite) =>
+                setFavoriteAssetIds((current) => {
+                  const next = new Set(current);
+                  if (favorite) next.add(assetId);
+                  else next.delete(assetId);
+                  return next;
+                })
+              }
+            />
+          </main>
+        ) : workspaceMode === "organization" && selectedLibrary ? (
           <main className="center-workspace organization-mode-shell">
             <OrganizationWorkspace
               library={selectedLibrary}
@@ -1059,7 +1373,6 @@ export default function App() {
         ) : (
           <>
             <Sidebar
-              collapsed={leftCollapsed}
               libraries={libraries}
               selectedLibraryId={currentLibraryId}
               groups={semanticGroups}
@@ -1067,7 +1380,6 @@ export default function App() {
               filter={filter}
               semanticStatus={semanticStatus}
               assetDropTargetLibraryId={assetDropTargetLibraryId}
-              onToggle={() => setLeftCollapsed((value) => !value)}
               onImportLibrary={() => void importFolder()}
               onSelectLibrary={selectLibrary}
               onRescanLibrary={(library) => void rescanLibrary(library)}
@@ -1088,20 +1400,15 @@ export default function App() {
               onFilterChange={updateFilter}
             />
 
-            <main
-              className={`center-workspace${viewMode === "single" ? " is-single-preview" : ""}`}
-              onClick={(event) => {
-                if (event.target === event.currentTarget) clearSelection();
-              }}
-            >
-              {error ? (
-                <div className="global-error" role="alert">
-                  <span>{error}</span>
-                  <button type="button" onClick={() => setError(null)}>
-                    关闭
-                  </button>
-                </div>
-              ) : null}
+            <PanelResizeHandle
+              side="left"
+              value={leftPanelWidth}
+              min={LEFT_PANEL_MIN_WIDTH}
+              max={LEFT_PANEL_MAX_WIDTH}
+              onChange={setLeftPanelWidth}
+            />
+
+            <div className="center-column">
               {scanProgress ? (
                 <ProgressPanel
                   progress={scanProgress}
@@ -1118,123 +1425,157 @@ export default function App() {
                 />
               ) : null}
 
-              {selectedLibrary ? (
-                <>
-                  <div className="content-toolbar">
-                    <div>
-                      <strong>{assetTotal.toLocaleString()} 张</strong>
-                      <span>
-                        {activeFilterCount ? `已应用 ${activeFilterCount} 项筛选` : "全部图片"}
-                      </span>
-                      {selectedAssetIds.length > 0 ? (
-                        <em className="selection-count">已选择 {selectedAssetIds.length} 张</em>
-                      ) : null}
-                    </div>
-                    <div>
-                      {selectedLibrary.semanticPendingCount > 0 ? (
-                        <span className="analysis-hint">
-                          已导入 {selectedLibrary.presentCount} 张图片，
-                          {selectedLibrary.semanticPendingCount} 张尚未完成语义分析
-                        </span>
-                      ) : null}
-                      {activeFilterCount ? (
-                        <button type="button" onClick={() => updateFilter(emptyAssetFilter)}>
-                          清除筛选
-                        </button>
-                      ) : null}
-                      <label className="group-toggle">
-                        <input
-                          type="checkbox"
-                          checked={groupBySemantic}
-                          onChange={(event) => setGroupBySemantic(event.target.checked)}
-                        />
-                        按主要语义标签分组
-                      </label>
-                    </div>
-                  </div>
-                  {loading && assets.length === 0 ? (
-                    <GridLoading />
-                  ) : viewMode === "single" ? (
-                    <SinglePreview
-                      assets={assets}
-                      selected={previewAsset}
-                      controller={previewController}
-                      onSelect={selectPreview}
-                    />
-                  ) : assets.length ? (
-                    <GridWorkspace
-                      assets={assets}
-                      active={activeAsset}
-                      selectedAssetIds={selectedAssetIds}
-                      grouped={groupBySemantic}
-                      onStartAssetDrag={beginAssetPointerDrag}
-                      onSelect={selectAsset}
-                      onToggleSelection={toggleAssetSelection}
-                      onOpen={openSinglePreview}
-                      onClearSelection={clearSelection}
-                    />
-                  ) : (
-                    <section className="library-empty">
-                      <SingleImageIcon width="28" height="28" />
-                      <h2>没有符合条件的图片</h2>
-                      <p>
-                        {activeFilterCount
-                          ? "调整或清除组合筛选后重试。"
-                          : "重新扫描目录，或导入包含 JPEG、PNG、WebP 的文件夹。"}
-                      </p>
-                    </section>
-                  )}
-                  {viewMode !== "single" && totalPages > 1 ? (
-                    <nav className="pagination" aria-label="图库分页">
-                      <button
-                        type="button"
-                        disabled={page <= 1}
-                        onClick={() => setPage((value) => Math.max(1, value - 1))}
-                      >
-                        上一页
-                      </button>
-                      <span>
-                        {page} / {totalPages}
-                      </span>
-                      <button
-                        type="button"
-                        disabled={page >= totalPages}
-                        onClick={() => setPage((value) => Math.min(totalPages, value + 1))}
-                      >
-                        下一页
-                      </button>
-                    </nav>
-                  ) : null}
-                </>
-              ) : !loading ? (
-                <section className="welcome-state">
-                  <LibraryIcon width="30" height="30" />
-                  <div>
-                    <small>本地优先图片工作台</small>
-                    <h1>建立本地图片库</h1>
-                    <p>
-                      递归索引、生成私有缩略图，并在本机完成影调、色彩和真实语义分析。浏览过程不会修改原始图片。
-                    </p>
-                    <button
-                      className="primary-action"
-                      type="button"
-                      onClick={() => void importFolder()}
-                    >
-                      <ImportIcon width="16" height="16" />
-                      导入图片文件夹
+              <main
+                className={`center-workspace${viewMode === "single" ? " is-single-preview" : ""}`}
+                onClick={(event) => {
+                  if (event.target === event.currentTarget) clearSelection();
+                }}
+              >
+                {error ? (
+                  <div className="global-error" role="alert">
+                    <span>{error}</span>
+                    <button type="button" onClick={() => setError(null)}>
+                      关闭
                     </button>
-                    <span>JPEG · PNG · WebP · 支持 Unicode 路径</span>
                   </div>
-                </section>
-              ) : null}
-            </main>
+                ) : null}
+                {selectedLibrary ? (
+                  <>
+                    <div className="content-toolbar">
+                      <div>
+                        <strong>{assetTotal.toLocaleString()} 张</strong>
+                        <span>
+                          {activeFilterCount ? `已应用 ${activeFilterCount} 项筛选` : "全部图片"}
+                        </span>
+                        {selectedAssetIds.length > 0 ? (
+                          <em className="selection-count">已选择 {selectedAssetIds.length} 张</em>
+                        ) : null}
+                      </div>
+                      <div>
+                        <label className="group-toggle">
+                          <input
+                            type="checkbox"
+                            checked={groupBySemantic}
+                            onChange={(event) => setGroupBySemantic(event.target.checked)}
+                          />
+                          按主要语义标签分组
+                        </label>
+                      </div>
+                    </div>
+                    <AnalysisStatusFilterBar
+                      filter={filter}
+                      visible={selectedLibrary.semanticPendingCount > 0}
+                      onFilterChange={updateFilter}
+                    />
+                    {loading && assets.length === 0 ? (
+                      <GridLoading />
+                    ) : viewMode === "single" ? (
+                      <SinglePreview
+                        assets={assets}
+                        selected={previewAsset}
+                        controller={previewController}
+                        selectedAssetIds={selectedAssetIds}
+                        filter={filter}
+                        onSelect={selectPreview}
+                        onFilterChange={updateFilter}
+                        onToggleSelection={toggleAssetSelection}
+                      />
+                    ) : (
+                      <div className="grid-workspace-shell">
+                        <div className="grid-workspace-results">
+                          {assets.length ? (
+                            <GridWorkspace
+                              assets={assets}
+                              active={activeAsset}
+                              selectedAssetIds={selectedAssetIds}
+                              grouped={groupBySemantic}
+                              onStartAssetDrag={beginAssetPointerDrag}
+                              onSelect={selectAsset}
+                              onToggleSelection={toggleAssetSelection}
+                              onOpen={openSinglePreview}
+                              onClearSelection={clearSelection}
+                              onUpdateRating={(assetId, rating) =>
+                                void editAssetRatingForSelection(assetId, rating)
+                              }
+                              onUpdateColorLabel={(assetId, colorLabel) =>
+                                void editAssetColorLabelForSelection(assetId, colorLabel)
+                              }
+                              favoriteAssetIds={favoriteAssetIds}
+                              onToggleFavorite={(assetId) => void toggleFavorite(assetId)}
+                            />
+                          ) : (
+                            <section className="library-empty">
+                              <SingleImageIcon width="28" height="28" />
+                              <h2>没有符合条件的图片</h2>
+                              <p>
+                                {activeFilterCount
+                                  ? "调整或清除组合筛选后重试。"
+                                  : "重新扫描目录，或导入包含 JPEG、PNG、WebP 的文件夹。"}
+                              </p>
+                            </section>
+                          )}
+                        </div>
+                        <ManualMarkFilterBar filter={filter} onFilterChange={updateFilter} />
+                      </div>
+                    )}
+                    {viewMode !== "single" && totalPages > 1 ? (
+                      <nav className="pagination" aria-label="图库分页">
+                        <button
+                          type="button"
+                          disabled={page <= 1}
+                          onClick={() => setPage((value) => Math.max(1, value - 1))}
+                        >
+                          上一页
+                        </button>
+                        <span>
+                          {page} / {totalPages}
+                        </span>
+                        <button
+                          type="button"
+                          disabled={page >= totalPages}
+                          onClick={() => setPage((value) => Math.min(totalPages, value + 1))}
+                        >
+                          下一页
+                        </button>
+                      </nav>
+                    ) : null}
+                  </>
+                ) : !loading ? (
+                  <section className="welcome-state">
+                    <LibraryIcon width="30" height="30" />
+                    <div>
+                      <small>本地优先图片工作台</small>
+                      <h1>建立本地图片库</h1>
+                      <p>
+                        递归索引、生成私有缩略图，并在本机完成影调、色彩和真实语义分析。浏览过程不会修改原始图片。
+                      </p>
+                      <button
+                        className="primary-action"
+                        type="button"
+                        onClick={() => void importFolder()}
+                      >
+                        <ImportIcon width="16" height="16" />
+                        导入图片文件夹
+                      </button>
+                      <span>JPEG · PNG · WebP · 支持 Unicode 路径</span>
+                    </div>
+                  </section>
+                ) : null}
+              </main>
+            </div>
+
+            <PanelResizeHandle
+              side="right"
+              value={rightPanelWidth}
+              min={RIGHT_PANEL_MIN_WIDTH}
+              max={RIGHT_PANEL_MAX_WIDTH}
+              onChange={setRightPanelWidth}
+            />
 
             <DetailPanel
-              asset={detailAsset?.id === activeAsset?.id ? detailAsset : activeAsset}
-              collapsed={rightCollapsed}
+              asset={detailPanelAsset}
               semanticStatus={semanticStatus}
               previewNavigator={previewController.navigator}
-              onToggle={() => setRightCollapsed((value) => !value)}
               onReanalyze={(asset) => void analyzeOne(asset)}
               classificationRegistry={classificationRegistry}
               catalog={semanticCatalog}
@@ -1245,6 +1586,12 @@ export default function App() {
                 void editTagOverride(assetId, tagId, state)
               }
               onRestoreAuto={(assetId, field) => void restoreClassification(assetId, field)}
+              onUpdateRating={(assetId, rating) =>
+                void editAssetRatingForSelection(assetId, rating)
+              }
+              onUpdateColorLabel={(assetId, colorLabel) =>
+                void editAssetColorLabelForSelection(assetId, colorLabel)
+              }
             />
           </>
         )}
@@ -1324,6 +1671,76 @@ function ImportLibraryDialog({
   );
 }
 
+function PanelResizeHandle({
+  side,
+  value,
+  min,
+  max,
+  onChange,
+}: {
+  side: "left" | "right";
+  value: number;
+  min: number;
+  max: number;
+  onChange: (value: number) => void;
+}) {
+  const dragRef = useRef<{ pointerId: number; startX: number; startWidth: number } | null>(null);
+
+  useEffect(() => {
+    const handlePointerMove = (event: PointerEvent) => {
+      const drag = dragRef.current;
+      if (!drag || drag.pointerId !== (event.pointerId || 1)) return;
+      event.preventDefault();
+      const direction = side === "left" ? 1 : -1;
+      const clientX = Number.isFinite(event.clientX) ? event.clientX : drag.startX;
+      const delta = (clientX - drag.startX) * direction;
+      onChange(Math.max(min, Math.min(max, drag.startWidth + delta)));
+    };
+    const finishPointerDrag = (event: PointerEvent) => {
+      if (dragRef.current?.pointerId === (event.pointerId || 1)) dragRef.current = null;
+    };
+
+    document.addEventListener("pointermove", handlePointerMove, { passive: false });
+    document.addEventListener("pointerup", finishPointerDrag);
+    document.addEventListener("pointercancel", finishPointerDrag);
+    return () => {
+      document.removeEventListener("pointermove", handlePointerMove);
+      document.removeEventListener("pointerup", finishPointerDrag);
+      document.removeEventListener("pointercancel", finishPointerDrag);
+    };
+  }, [max, min, onChange, side]);
+
+  const changeByKeyboard = (event: React.KeyboardEvent<HTMLDivElement>) => {
+    if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
+    event.preventDefault();
+    const increasesWidth = side === "left" ? event.key === "ArrowRight" : event.key === "ArrowLeft";
+    onChange(Math.max(min, Math.min(max, value + (increasesWidth ? 16 : -16))));
+  };
+
+  return (
+    <div
+      className={`panel-resize-handle panel-resize-handle-${side}`}
+      role="separator"
+      aria-label={`调整${side === "left" ? "左侧" : "右侧"}面板宽度`}
+      aria-orientation="vertical"
+      aria-valuemin={min}
+      aria-valuemax={max}
+      aria-valuenow={Math.round(value)}
+      tabIndex={0}
+      onKeyDown={changeByKeyboard}
+      onPointerDown={(event) => {
+        event.preventDefault();
+        dragRef.current = {
+          pointerId: event.pointerId || 1,
+          startX: Number.isFinite(event.clientX) ? event.clientX : 0,
+          startWidth: value,
+        };
+        event.currentTarget.setPointerCapture?.(event.pointerId);
+      }}
+    />
+  );
+}
+
 function GridWorkspace({
   assets,
   active,
@@ -1334,6 +1751,10 @@ function GridWorkspace({
   onToggleSelection,
   onOpen,
   onClearSelection,
+  onUpdateRating,
+  onUpdateColorLabel,
+  favoriteAssetIds,
+  onToggleFavorite,
 }: {
   assets: AssetListItem[];
   active: AssetListItem | null;
@@ -1344,6 +1765,10 @@ function GridWorkspace({
   onToggleSelection: (asset: AssetListItem, modifiers?: SelectionModifiers) => void;
   onOpen: (asset: AssetListItem) => void;
   onClearSelection: () => void;
+  onUpdateRating: (assetId: number, rating: number) => void;
+  onUpdateColorLabel: (assetId: number, colorLabel: ManualColorLabel | null) => void;
+  favoriteAssetIds: Set<number>;
+  onToggleFavorite: (assetId: number) => void;
 }) {
   if (!grouped)
     return (
@@ -1364,6 +1789,10 @@ function GridWorkspace({
             onSelect={onSelect}
             onToggleSelection={onToggleSelection}
             onOpen={onOpen}
+            onUpdateRating={onUpdateRating}
+            onUpdateColorLabel={onUpdateColorLabel}
+            favorite={favoriteAssetIds.has(asset.id)}
+            onToggleFavorite={onToggleFavorite}
           />
         ))}
       </section>
@@ -1403,6 +1832,10 @@ function GridWorkspace({
                   onSelect={onSelect}
                   onToggleSelection={onToggleSelection}
                   onOpen={onOpen}
+                  onUpdateRating={onUpdateRating}
+                  onUpdateColorLabel={onUpdateColorLabel}
+                  favorite={favoriteAssetIds.has(asset.id)}
+                  onToggleFavorite={onToggleFavorite}
                 />
               ))}
             </div>
@@ -1417,20 +1850,35 @@ function SinglePreview({
   assets,
   selected,
   controller,
+  selectedAssetIds,
+  filter,
   onSelect,
+  onFilterChange,
+  onToggleSelection,
 }: {
   assets: AssetListItem[];
   selected: AssetListItem | null;
   controller: PreviewController;
+  selectedAssetIds: number[];
+  filter: AssetFilter;
   onSelect: (asset: AssetListItem) => void;
+  onFilterChange: (filter: AssetFilter) => void;
+  onToggleSelection: (asset: AssetListItem, modifiers?: SelectionModifiers) => void;
 }) {
   return (
     <section className="single-workspace">
       {selected ? (
-        <ZoomablePreview key={selected.id} asset={selected} controller={controller} />
+        <ZoomablePreview
+          key={selected.id}
+          asset={selected}
+          controller={controller}
+          selected={selectedAssetIds.includes(selected.id)}
+          onToggleSelection={onToggleSelection}
+        />
       ) : (
         <div className="single-empty">没有可预览的图片</div>
       )}
+      <ManualMarkFilterBar filter={filter} onFilterChange={onFilterChange} />
       <div
         className="filmstrip"
         aria-label="胶片栏"
@@ -1446,7 +1894,12 @@ function SinglePreview({
           <button
             type="button"
             key={asset.id}
-            className={selected?.id === asset.id ? "is-active" : ""}
+            className={[
+              selected?.id === asset.id ? "is-active" : "",
+              selectedAssetIds.includes(asset.id) ? "is-selected" : "",
+            ]
+              .filter(Boolean)
+              .join(" ")}
             ref={(element) => {
               if (
                 element &&
@@ -1458,6 +1911,7 @@ function SinglePreview({
             }}
             onClick={() => onSelect(asset)}
             aria-label={asset.fileName}
+            aria-pressed={selectedAssetIds.includes(asset.id)}
           >
             <Thumbnail asset={asset} />
           </button>
@@ -1470,9 +1924,13 @@ function SinglePreview({
 function ZoomablePreview({
   asset,
   controller,
+  selected,
+  onToggleSelection,
 }: {
   asset: AssetListItem;
   controller: PreviewController;
+  selected: boolean;
+  onToggleSelection: (asset: AssetListItem, modifiers?: SelectionModifiers) => void;
 }) {
   const {
     stageRef,
@@ -1494,6 +1952,18 @@ function ZoomablePreview({
 
   return (
     <div className="single-canvas">
+      <button
+        type="button"
+        className={`single-selection-toggle${selected ? " is-selected" : ""}`}
+        onClick={() => onToggleSelection(asset)}
+        aria-label={selected ? `取消选择 ${asset.fileName}` : `选择 ${asset.fileName}`}
+        aria-pressed={selected}
+      >
+        <span className="single-selection-mark" aria-hidden="true">
+          {selected ? <CheckIcon width="13" height="13" /> : null}
+        </span>
+        <span>{selected ? "已选择" : "选择"}</span>
+      </button>
       <div
         ref={stageRef}
         className={`zoom-stage${dragging ? " is-dragging" : ""}`}
@@ -1600,6 +2070,213 @@ function GridLoading() {
   );
 }
 
+type FilterCondition = {
+  id: string;
+  label: string;
+  value: string;
+  remove: (filter: AssetFilter) => AssetFilter;
+};
+
+type StringFilterField =
+  "primaryCategories" | "auxiliaryTags" | "toneLabels" | "colorCategories" | "saturationLevels";
+
+function FilterConditionsPopover({
+  conditions,
+  onClear,
+  onRemove,
+}: {
+  conditions: FilterCondition[];
+  onClear: () => void;
+  onRemove: (condition: FilterCondition) => void;
+}) {
+  return (
+    <div
+      id="filter-conditions-popover"
+      className="filter-conditions-popover"
+      role="dialog"
+      aria-label="当前条件"
+    >
+      <div className="filter-conditions-header">
+        <strong>当前条件</strong>
+        <button
+          type="button"
+          className="filter-conditions-clear"
+          onClick={onClear}
+          disabled={conditions.length === 0}
+        >
+          清除筛选
+        </button>
+      </div>
+      {conditions.length > 0 ? (
+        <div className="filter-condition-list">
+          {conditions.map((condition) => (
+            <div className="filter-condition" key={condition.id}>
+              <span className="filter-condition-value">
+                <strong>{condition.label}</strong>
+                <span>{condition.value}</span>
+              </span>
+              <button
+                type="button"
+                className="filter-condition-remove"
+                aria-label={`移除筛选条件：${condition.label} ${condition.value}`}
+                onClick={() => onRemove(condition)}
+              >
+                ×
+              </button>
+            </div>
+          ))}
+        </div>
+      ) : (
+        <p className="filter-conditions-empty">当前没有筛选条件</p>
+      )}
+    </div>
+  );
+}
+
+function buildFilterConditions(
+  filter: AssetFilter,
+  catalog: SemanticLabelDescriptor[],
+): FilterCondition[] {
+  const conditions: FilterCondition[] = [];
+
+  if (filter.search) {
+    conditions.push({
+      id: "search",
+      label: "搜索",
+      value: filter.search,
+      remove: (current) => ({ ...current, search: null }),
+    });
+  }
+
+  appendStringFilterConditions(
+    conditions,
+    filter,
+    "primaryCategories",
+    "主类别",
+    "primary",
+    catalog,
+  );
+  appendStringFilterConditions(conditions, filter, "auxiliaryTags", "辅助标签", "tag", catalog);
+  appendStringFilterConditions(conditions, filter, "toneLabels", "影调", "tone", catalog);
+  appendStringFilterConditions(conditions, filter, "colorCategories", "主色", "color", catalog);
+  appendStringFilterConditions(
+    conditions,
+    filter,
+    "saturationLevels",
+    "饱和度级别",
+    "saturation",
+    catalog,
+  );
+
+  const ratingThreshold = filter.ratings.length > 0 ? Math.max(...filter.ratings) : null;
+  if (ratingThreshold !== null) {
+    conditions.push({
+      id: "rating",
+      label: "星级",
+      value: `${ratingThreshold} 星及以上`,
+      remove: (current) => ({
+        ...current,
+        ratings: [],
+      }),
+    });
+  }
+
+  for (const colorLabel of filter.colorLabels) {
+    const label =
+      MANUAL_COLOR_LABEL_OPTIONS.find((option) => option.id === colorLabel)?.label ?? colorLabel;
+    conditions.push({
+      id: `color-label:${colorLabel}`,
+      label: "色标",
+      value: label,
+      remove: (current) => ({
+        ...current,
+        colorLabels: current.colorLabels.filter((value) => value !== colorLabel),
+      }),
+    });
+  }
+
+  appendRangeCondition(conditions, filter, "brightnessMin", "brightnessMax", "亮度");
+  appendRangeCondition(conditions, filter, "saturationMin", "saturationMax", "饱和度");
+
+  if (filter.capturedFrom || filter.capturedTo) {
+    conditions.push({
+      id: "capture-date",
+      label: "拍摄日期",
+      value: formatDateCondition(filter.capturedFrom, filter.capturedTo),
+      remove: (current) => ({ ...current, capturedFrom: null, capturedTo: null }),
+    });
+  }
+
+  if (filter.analysisStatus) {
+    const statusLabel = {
+      not_analyzed: "尚未语义分析",
+      failed: "分析失败",
+      completed: "分析完成",
+    }[filter.analysisStatus];
+    conditions.push({
+      id: "analysis-status",
+      label: "分析状态",
+      value: statusLabel,
+      remove: (current) => ({ ...current, analysisStatus: null }),
+    });
+  }
+
+  return conditions;
+}
+
+function appendStringFilterConditions(
+  conditions: FilterCondition[],
+  filter: AssetFilter,
+  field: StringFilterField,
+  label: string,
+  kind: ClassificationValueKind,
+  catalog: SemanticLabelDescriptor[],
+) {
+  for (const value of filter[field]) {
+    conditions.push({
+      id: `${field}:${value}`,
+      label,
+      value: classificationValueLabel(value, kind, catalog),
+      remove: (current) => ({
+        ...current,
+        [field]: current[field].filter((item) => item !== value),
+      }),
+    });
+  }
+}
+
+function appendRangeCondition(
+  conditions: FilterCondition[],
+  filter: AssetFilter,
+  minField: "brightnessMin" | "saturationMin",
+  maxField: "brightnessMax" | "saturationMax",
+  label: string,
+) {
+  const min = filter[minField];
+  const max = filter[maxField];
+  if (min === null && max === null) return;
+
+  conditions.push({
+    id: `${minField}:${maxField}`,
+    label,
+    value: formatFilterRange(min, max),
+    remove: (current) => ({ ...current, [minField]: null, [maxField]: null }),
+  });
+}
+
+function formatFilterRange(min: number | null, max: number | null) {
+  const format = (value: number) => String(Number(value.toFixed(2)));
+  if (min !== null && max !== null) return `${format(min)} — ${format(max)}`;
+  if (min !== null) return `≥ ${format(min)}`;
+  return `≤ ${format(max ?? 0)}`;
+}
+
+function formatDateCondition(from: string | null, to: string | null) {
+  const format = (value: string | null, fallback: string) =>
+    value ? value.slice(0, 10).replace(/-/g, "/") : fallback;
+  return `${format(from, "最早")} — ${format(to, "最近")}`;
+}
+
 function countActiveFilters(filter: AssetFilter) {
   return (
     Number(Boolean(filter.search)) +
@@ -1608,6 +2285,8 @@ function countActiveFilters(filter: AssetFilter) {
     filter.toneLabels.length +
     filter.colorCategories.length +
     filter.saturationLevels.length +
+    filter.ratings.length +
+    filter.colorLabels.length +
     Number(filter.brightnessMin !== null || filter.brightnessMax !== null) +
     Number(filter.saturationMin !== null || filter.saturationMax !== null) +
     Number(Boolean(filter.capturedFrom || filter.capturedTo)) +

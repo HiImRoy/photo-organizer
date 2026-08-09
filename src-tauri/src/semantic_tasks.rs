@@ -1,10 +1,13 @@
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use crate::db::{Repository, SemanticAssetCandidate};
 use crate::error::{AppError, AppResult};
 use crate::models::SemanticProgress;
-use crate::semantic::{ExecutionBackend, SemanticClassifier};
+use crate::semantic::{ExecutionBackend, SemanticAnalysisOutput, SemanticClassifier};
 use crate::tasks::{SemanticControlSignal, SemanticTaskRegistry};
+
+const SEMANTIC_BATCH_SIZE: usize = 8;
 
 pub fn spawn_semantic_job<F>(
     repository: Repository,
@@ -50,7 +53,7 @@ where
             let _ = repository.update_semantic_job_progress(&progress);
             emit(progress.clone());
 
-            for candidate in candidates {
+            for candidate_batch in candidates.chunks(SEMANTIC_BATCH_SIZE) {
                 if control.wait_until_runnable() == SemanticControlSignal::Cancel {
                     progress.status = "cancelled".into();
                     progress.current_asset_id = None;
@@ -62,62 +65,61 @@ where
                     return;
                 }
 
-                progress.status = "running".into();
-                progress.current_asset_id = Some(candidate.id);
-                progress.current_path =
-                    Some(candidate.absolute_path.to_string_lossy().into_owned());
-                if let Err(error) =
-                    repository.mark_semantic_item_running(&thread_job_id, candidate.id)
-                {
-                    progress.failed += 1;
-                    progress.processed = progress.completed + progress.failed + progress.skipped;
-                    progress.error = Some(error.to_string());
-                    let _ = repository.update_semantic_job_progress(&progress);
-                    emit(progress.clone());
-                    continue;
+                let mut ready = Vec::with_capacity(candidate_batch.len());
+                for candidate in candidate_batch {
+                    if let Err(error) =
+                        repository.mark_semantic_item_running(&thread_job_id, candidate.id)
+                    {
+                        progress.failed += 1;
+                        progress.error = Some(error.to_string());
+                    } else {
+                        ready.push(candidate);
+                    }
                 }
-                emit(progress.clone());
 
-                match classifier.classify_batch(
-                    std::slice::from_ref(&candidate.absolute_path),
-                    ExecutionBackend::Cpu,
-                ) {
-                    Ok(mut outputs) if outputs.len() == 1 => {
-                        match repository.save_semantic_result(
-                            &thread_job_id,
-                            &candidate,
-                            &outputs.remove(0),
-                        ) {
-                            Ok(true) => progress.completed += 1,
-                            Ok(false) => progress.skipped += 1,
+                if let Some(candidate) = ready.first() {
+                    progress.status = "running".into();
+                    progress.current_asset_id = Some(candidate.id);
+                    progress.current_path =
+                        Some(candidate.absolute_path.to_string_lossy().into_owned());
+                    emit(progress.clone());
+
+                    let paths = ready
+                        .iter()
+                        .map(|candidate| analysis_path(candidate))
+                        .collect::<Vec<_>>();
+                    let outputs = classify_batch_with_fallback(classifier.as_ref(), &ready, &paths);
+
+                    for ((candidate, path), output) in ready.iter().zip(paths).zip(outputs) {
+                        match output {
+                            Ok(output) => match repository.save_semantic_result(
+                                &thread_job_id,
+                                candidate,
+                                &output,
+                            ) {
+                                Ok(true) => progress.completed += 1,
+                                Ok(false) => progress.skipped += 1,
+                                Err(error) => {
+                                    progress.failed += 1;
+                                    progress.error = Some(error.to_string());
+                                    let _ = repository.fail_semantic_item(
+                                        &thread_job_id,
+                                        candidate.id,
+                                        &error.to_string(),
+                                    );
+                                }
+                            },
                             Err(error) => {
                                 progress.failed += 1;
-                                progress.error = Some(error.to_string());
+                                progress.error = Some(error.clone());
                                 let _ = repository.fail_semantic_item(
                                     &thread_job_id,
                                     candidate.id,
-                                    &error.to_string(),
+                                    &error,
                                 );
                             }
                         }
-                    }
-                    Ok(outputs) => {
-                        let error = format!(
-                            "semantic model returned {} results for one image",
-                            outputs.len()
-                        );
-                        progress.failed += 1;
-                        progress.error = Some(error.clone());
-                        let _ = repository.fail_semantic_item(&thread_job_id, candidate.id, &error);
-                    }
-                    Err(error) => {
-                        progress.failed += 1;
-                        progress.error = Some(error.to_string());
-                        let _ = repository.fail_semantic_item(
-                            &thread_job_id,
-                            candidate.id,
-                            &error.to_string(),
-                        );
+                        progress.current_path = Some(path.to_string_lossy().into_owned());
                     }
                 }
                 progress.processed = progress.completed + progress.failed + progress.skipped;
@@ -139,4 +141,75 @@ where
         })
         .map_err(AppError::Io)?;
     Ok(())
+}
+
+fn analysis_path(candidate: &SemanticAssetCandidate) -> PathBuf {
+    if candidate.analysis_path.is_file() {
+        candidate.analysis_path.clone()
+    } else {
+        candidate.absolute_path.clone()
+    }
+}
+
+fn classify_batch_with_fallback(
+    classifier: &dyn SemanticClassifier,
+    candidates: &[&SemanticAssetCandidate],
+    paths: &[PathBuf],
+) -> Vec<Result<SemanticAnalysisOutput, String>> {
+    match classifier.classify_batch(paths, ExecutionBackend::Cpu) {
+        Ok(outputs) if outputs.len() == paths.len() => outputs.into_iter().map(Ok).collect(),
+        Ok(outputs) => {
+            let error = format!(
+                "semantic model returned {} results for {} images",
+                outputs.len(),
+                paths.len()
+            );
+            candidates
+                .iter()
+                .map(|candidate| Err(format!("{}: {}", candidate.absolute_path.display(), error)))
+                .collect()
+        }
+        Err(batch_error) => {
+            let batch_error = batch_error.to_string();
+            candidates
+                .iter()
+                .zip(paths)
+                .map(|(candidate, path)| {
+                    classify_single_with_fallback(classifier, candidate, path, &batch_error)
+                })
+                .collect()
+        }
+    }
+}
+
+fn classify_single_with_fallback(
+    classifier: &dyn SemanticClassifier,
+    candidate: &SemanticAssetCandidate,
+    path: &Path,
+    batch_error: &str,
+) -> Result<SemanticAnalysisOutput, String> {
+    let mut paths = vec![path.to_path_buf()];
+    if path != candidate.absolute_path {
+        paths.push(candidate.absolute_path.clone());
+    }
+
+    let mut last_error = batch_error.to_string();
+    for path in paths {
+        match classifier.classify_batch(std::slice::from_ref(&path), ExecutionBackend::Cpu) {
+            Ok(mut outputs) if outputs.len() == 1 => return Ok(outputs.remove(0)),
+            Ok(outputs) => {
+                last_error = format!(
+                    "semantic model returned {} results for one image",
+                    outputs.len()
+                );
+            }
+            Err(error) => last_error = error.to_string(),
+        }
+    }
+    Err(format!(
+        "{}; single-image fallback failed for {}: {}",
+        batch_error,
+        candidate.absolute_path.display(),
+        last_error
+    ))
 }

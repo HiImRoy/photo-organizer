@@ -14,7 +14,8 @@
 - Semantic model version 和 taxonomy version 独立记录。
 - TinyCLIP prompt ensemble、threshold、confidence 和 margin 可追踪。
 - Imaging、Color、Tone pipeline 版本独立记录。
-- Dominant Color 使用可解释的视觉颜色算法。
+- Dominant Color 输出面积调色板和视觉显著调色板，不再依赖单一 RGB 主色。
+- 视觉显著调色板使用显著性、环境对比度、色度、面积和空间连续性综合排序，并支持多个主色。
 - Semantic 和 Color 都有固定 evaluation dataset。
 - 输出 before/after 结果并完成人工视觉复核。
 
@@ -78,7 +79,17 @@ Imaging / Color：
 - D 只写 Auto Classification。
 - 不删除 Manual Override。
 - Effective 仍由 B 的唯一 Resolver 计算。
-- Registry 仍只有 Primary Category、Auxiliary Tags、Tone、Dominant Color Category、Saturation Level。
+- Registry 仍只有 Primary Category、Auxiliary Tags、Tone、Dominant Color Category / Palette、Saturation Level。
+- Dominant Color Category / Palette 是多值分类；调色板的 RGB、coverage、saliency 和 spatial coherence 属于 Imaging Auto detail，不进入 Registry。
+
+### Dominant Color Interaction Contract
+
+- 当前 `ColorSwatches` 只负责选择 `dominantColorCategories` 的稳定分类 ID，不直接编辑 RGB、coverage、saliency 或其他算法候选数据。
+- D 升级 Color pipeline 时，不得把主色人工修正退回文本输入或单选控件；分类层仍使用可多选色块，且选择结果写入 Manual Override 的完整类别列表。
+- `coveragePalette` 和 `prominentPalette` 可以有不同数量、排序和候选指标，但只能通过稳定分类 ID 进入 Registry；候选 RGB、面积占比和显著性占比作为只读 Auto detail 展示。
+- Color reanalysis 只更新 Auto 结果和对应 pipeline 版本，不覆盖已有 Manual Override；Restore Auto 后才重新采用最新 Auto Effective 结果。
+- 如果 D 调整颜色 taxonomy 或增加类别，必须同步更新稳定 ID、中文目录、色块映射、数据库兼容读取、筛选和 evaluation fixture，不能只修改某一个界面常量。
+- 所有主色筛选继续使用 Effective category list；不能用 raw RGB 或仅 Auto 结果替代 Effective。
 
 ## 5. Current Implementation
 
@@ -99,6 +110,7 @@ Imaging / Color：
 - [src-tauri/src/imaging.rs](E:/Code/Codex/photo-organizer/src-tauri/src/imaging.rs)
   - ANALYSIS_VERSION 当前同时承担基础 imaging 版本。
   - analyze_rgba 计算 brightness、saturation、chroma、neutral ratio、dominant color 和 coverage。
+  - 当前颜色候选来自量化 RGB bin 的权重排序，没有显式 saliency map、感知空间聚类或空间连续性约束；虽然保存 top colors，但业务结果仍以单一 dominant color category 为主。
   - tone_label 当前返回 low_key、mid_tone、high_key。
 - [src-tauri/src/bin/semantic-evaluate.rs](E:/Code/Codex/photo-organizer/src-tauri/src/bin/semantic-evaluate.rs)
   - 当前提供 Semantic evaluation 工具。
@@ -106,6 +118,14 @@ Imaging / Color：
   - 当前提供 inference benchmark。
 - [docs/model-evaluation.md](E:/Code/Codex/photo-organizer/docs/model-evaluation.md)
   - 记录当前模型评估背景。
+
+### 当前分类注册表（D1/D3 已部分落地）
+
+- 活动主类别：人像、风景、建筑、静物、动物、文档、未知。
+- 活动辅助标签：多人、室内、街道、车辆、食品、夜景、花卉、抽象。
+- `still_life`、`screenshot`、`mountain`、`water`、`forest`、`sunset` 作为历史 ID 保留可读性，但不再由当前 catalog、自动预测或相似度榜单暴露。
+- 手动编辑器和筛选器只提供活动分类；历史值通过稳定 ID 和中文回退映射继续显示。
+- 这不代表 D2、D4-D10 已完成，完整 taxonomy version、失败状态和评估流程仍按本 Checkpoint 的剩余任务执行。
 
 ## 6. Target State
 
@@ -128,16 +148,30 @@ Imaging / Color：
         colorAlgorithmVersion
         toneAlgorithmVersion
         tone
-        dominantColorCategory
+        coveragePalette
+        prominentPalette
+        dominantColorCategories
         saturationLevel
         numericFeatures
         sourceFingerprint
+    }
+
+    ColorCandidate {
+        rank
+        rgb
+        category
+        areaCoverage
+        saliencyCoverage
+        localContrast
+        chroma
+        spatialCoherence
     }
 
 ### DB Model
 
 - Auto semantic rows带 semanticModelVersion、taxonomyVersion、sourceFingerprint。
 - Auto imaging rows带 imagingAnalysisVersion、colorAlgorithmVersion、toneAlgorithmVersion、sourceFingerprint。
+- Auto imaging rows保存 `coveragePalette` 和 `prominentPalette`；旧的单一 `dominantColorCategory` 只作为兼容读取字段，不得覆盖新的多值结果。
 - 失败运行有明确 status 和 error，但不生成当前 Auto 分类值。
 - 历史结果可以保留，但必须按版本隔离。
 
@@ -146,6 +180,7 @@ Imaging / Color：
 - Semantic progress 显示 pipeline-specific status。
 - DetailPanel 区分 COMPLETED/UNKNOWN、FAILED 和 no result。
 - Color/Tone stale 状态可独立显示。
+- 主色编辑继续使用色块多选；算法候选的面积/显著性/连续性等信息以只读明细展示，不改变人工修正的操作契约。
 
 ### IPC
 
@@ -182,7 +217,7 @@ Imaging / Color：
 Goal：建立不依赖 UI 文案的稳定 Semantic taxonomy。
 
 - Files to change：[src-tauri/src/semantic.rs](E:/Code/Codex/photo-organizer/src-tauri/src/semantic.rs)、[src-tauri/src/models.rs](E:/Code/Codex/photo-organizer/src-tauri/src/models.rs)、[src/types.ts](E:/Code/Codex/photo-organizer/src/types.ts)。
-- DB/schema impact：未来 0008 或等价 schema 增加 taxonomyVersion 和稳定 label IDs；旧 displayName 只作为展示。
+- DB/schema impact：未来独立 migration（A 已使用 0007、0008，B 使用 0009）或等价 schema 增加 taxonomyVersion 和稳定 label IDs；旧 displayName 只作为展示。
 - API impact：catalog 返回 id、displayName、category role、taxonomyVersion。
 - React state impact：筛选和人工修正使用 stable ID，不使用中文文案。
 - Rust/domain impact：迁移当前 LABELS id，明确 Primary/ Auxiliary、OTHER、UNKNOWN。
@@ -270,28 +305,36 @@ Goal：拆分 Imaging、Color 和 Tone pipeline version。
 
 ### D8 — Visual Dominant Color Algorithm
 
-Goal：建立有版本、可解释、可评估的 Dominant Color Category。
+Goal：建立有版本、可解释、可评估的多颜色视觉主色结果。
 
 - Files to change：[src-tauri/src/imaging.rs](E:/Code/Codex/photo-organizer/src-tauri/src/imaging.rs)、[src-tauri/src/models.rs](E:/Code/Codex/photo-organizer/src-tauri/src/models.rs)。
 - DB/schema impact：colorAlgorithmVersion 和 dominant color category 记录独立保存。
-- API impact：返回 category、dominant RGB、neutral ratio、coverage 和 color algorithm version。
-- React state impact：展示 Effective Dominant Color Category，不把 raw RGB 当作分类。
-- Rust/domain impact：保留现有 neutral/chromatic、weighted colors、coverage 思路；修复边界和稳定 enum。
-- Tests to add/update：neutral image、single hue、multi-color、low coverage、dark/highlight、Unicode source path。
-- Completion condition：颜色类别可重复、版本可追踪、neutral 与 chromatic 结果不混淆。
+- API impact：返回 `coveragePalette`、`prominentPalette`、Effective category list、neutral ratio、candidate metrics 和 color algorithm version。
+- React state impact：展示多个颜色 swatch 及其角色/占比；分类筛选使用 Effective category list，不把 raw RGB 当作单一分类。
+- Rust/domain impact：
+  - 复用现有 640px 分析缓存，先生成低分辨率显著性权重；默认采用轻量、可解释的显著性方法，不引入语义分割模型。
+  - 在 Lab/OKLab 等感知颜色空间聚类并合并感知相近颜色。
+  - 为每个候选计算 area coverage、saliency coverage、local contrast、chroma 和 spatial coherence。
+  - 输出 3–5 个 `coveragePalette` 颜色和 1–3 个 `prominentPalette` 颜色；中性颜色单独参与 neutral 结果，不得吞掉有意义的有彩色候选。
+  - 对孤立噪点设置最小面积/连续性约束，并用颜色距离阈值避免同一色相被重复计入。
+- Tests to add/update：
+  - neutral image、single hue、multi-color、low coverage、dark/highlight、Unicode source path。
+  - 大面积背景 + 小面积高对比色、主体/背景反差、多色主体、孤立噪点和空间分散色。
+  - 验证多色排序、面积与显著性占比、感知颜色合并、空间连续性和确定性。
+- Completion condition：颜色类别可重复、版本可追踪；`coveragePalette` 与 `prominentPalette` 均稳定；neutral、chromatic、多个视觉主色不混淆。
 - Dependency：D7 完成。
 
 ### D9 — Color Evaluation Dataset
 
-Goal：建立固定 Dominant Color 和 Saturation Level evaluation dataset。
+Goal：建立固定 Dominant Color、Prominent Color 和 Saturation Level evaluation dataset。
 
 - Files to change：[src-tauri/src/imaging.rs](E:/Code/Codex/photo-organizer/src-tauri/src/imaging.rs)、新增 evaluation harness、[docs/photo-evaluation.md](E:/Code/Codex/photo-organizer/docs/photo-evaluation.md)。
 - DB/schema impact：无业务 schema；评估输出不写 SourceRoot。
 - API impact：报告包含 colorAlgorithmVersion、toneAlgorithmVersion 和 source fingerprint。
 - React state impact：无。
-- Rust/domain impact：数据集覆盖 neutral、单色、多色、低饱和和高饱和图片。
-- Tests to add/update：deterministic feature output、category expected range、algorithm version recording。
-- Completion condition：Color/Tone 结果可重复比较。
+- Rust/domain impact：数据集覆盖 neutral、单色、多色、低饱和和高饱和图片，并标记 coverage palette 与 prominent palette 的人工参考结果。
+- Tests to add/update：deterministic feature output、top-k palette agreement、category expected range、algorithm version recording、saliency/coverage ranking regression。
+- Completion condition：Color/Tone 结果可重复比较，且多色结果可以通过固定人工参考集进行 before/after 评估。
 - Dependency：D8 完成。
 
 ### D10 — Before/After + Manual Visual Review
@@ -391,7 +434,7 @@ Goal：完成 Semantic、Color、Tone 的综合回归和人工视觉复核。
 7. 升级 Color algorithm version。
    - 预期：Color stale 独立出现，Semantic 不被无条件标记 stale。
 8. 运行 Dominant Color fixture。
-   - 预期：neutral、单色、多色和低 coverage 结果稳定。
+   - 预期：neutral、单色、多色、低 coverage 和小面积高对比色结果稳定；同时可以分别查看 coveragePalette 与 prominentPalette。
 9. 查看 evaluation report。
    - 预期：包含 model、taxonomy、pipeline version、confidence、margin 和 failure counts。
 10. 检查 SourceRoot。
@@ -409,6 +452,9 @@ Goal：完成 Semantic、Color、Tone 的综合回归和人工视觉复核。
 - [ ] FAILED 没有 current Auto classification。
 - [ ] TinyCLIP threshold/margin 可追踪。
 - [ ] Dominant Color 算法有版本和 evaluation。
+- [ ] Dominant Color 支持多个有序候选，并分别输出 coveragePalette 与 prominentPalette。
+- [ ] Prominent Color 使用显著性、环境对比度、色度、面积和空间连续性综合排序。
+- [ ] 感知相近颜色被合并，孤立噪点不会成为主色。
 - [ ] before/after 报告和人工视觉复核完成。
 - [ ] Manual Override 未被任何 Auto reanalysis 删除。
 - [ ] Rust、frontend、evaluation 和 source integrity 测试通过。

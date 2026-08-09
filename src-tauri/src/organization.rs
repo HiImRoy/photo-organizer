@@ -1141,6 +1141,8 @@ mod tests {
             semantic_status: "completed".into(),
             semantic_error: None,
             semantic_analyzed_at: None,
+            rating: 0,
+            color_label: None,
             semantic_labels: Vec::new(),
             classification: crate::classification::EffectiveClassification::default(),
         }

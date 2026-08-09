@@ -3,6 +3,7 @@ AGENTS.md
 dist
 coverage
 src-tauri/target
+reference
 src-tauri/gen/schemas
 package-lock.json
 src-tauri/Cargo.lock

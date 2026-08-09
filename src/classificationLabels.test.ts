@@ -20,7 +20,7 @@ describe("classification display labels", () => {
 
   it("exposes selectable Chinese options instead of free text values", () => {
     expect(primaryCategoryOptions([])).toContainEqual({ value: "landscape", label: "风景" });
-    expect(primaryCategoryOptions([])).toContainEqual({ value: "product", label: "产品 / 静物" });
+    expect(primaryCategoryOptions([])).toContainEqual({ value: "product", label: "静物" });
     expect(auxiliaryTagOptions([])).toContainEqual({ value: "night", label: "夜景" });
     expect(auxiliaryTagOptions([])).not.toContainEqual({ value: "mountain", label: "山" });
     expect(TONE_OPTIONS).toContainEqual(["balanced", "均衡"]);

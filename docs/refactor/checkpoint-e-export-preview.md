@@ -219,7 +219,7 @@ Goal：在 Preview 阶段完整解决目标冲突，而不是 Execute 时临时�
 
 Goal：生成不可变 Preview Snapshot。
 
-- Files to change：[src-tauri/src/db.rs](E:/Code/Codex/photo-organizer/src-tauri/src/db.rs)、[src-tauri/src/models.rs](E:/Code/Codex/photo-organizer/src-tauri/src/models.rs)、[src-tauri/src/ipc.rs](E:/Code/Codex/photo-organizer/src-tauri/src/ipc.rs)；未来新增 0009 migration。
+- Files to change：[src-tauri/src/db.rs](E:/Code/Codex/photo-organizer/src-tauri/src/db.rs)、[src-tauri/src/models.rs](E:/Code/Codex/photo-organizer/src-tauri/src/models.rs)、[src-tauri/src/ipc.rs](E:/Code/Codex/photo-organizer/src-tauri/src/ipc.rs)；未来新增 0010 migration（B 使用 0009）。
 - DB/schema impact：保存 plan、item、issues、Effective snapshot、OriginalDirectory、targetPath、ruleVersion、classificationRevision。
 - API impact：preview 返回 planId；读取 snapshot 不重新构建计划。
 - React state impact：Preview 页面绑定 planId 和 immutable response。
@@ -271,7 +271,7 @@ Goal：验证 Preview 的不可变和安全属性。
 
 本阶段规划未来 Export Snapshot migration，但当前不创建文件。
 
-### Planned 0009 — Export Plan Snapshot
+### Planned 0010 — Export Plan Snapshot
 
 - 迁移前备份 SQLite。
 - 建立 export_plans、export_plan_items、export_plan_issues 或等价新表。
@@ -383,7 +383,7 @@ Goal：验证 Preview 的不可变和安全属性。
 - [src-tauri/src/ipc.rs](E:/Code/Codex/photo-organizer/src-tauri/src/ipc.rs)
 - [src-tauri/src/organization.rs](E:/Code/Codex/photo-organizer/src-tauri/src/organization.rs)
 - [src-tauri/src/paths.rs](E:/Code/Codex/photo-organizer/src-tauri/src/paths.rs)
-- 未来新增 0009 Export Snapshot migration；本次不创建。
+- 未来新增 0010 Export Snapshot migration；本次不创建。
 
 ## 13. Risks
 

@@ -156,7 +156,7 @@ const LABELS: [LabelDefinition; 21] = [
     },
     LabelDefinition {
         id: "product",
-        display_name: "产品 / 静物",
+        display_name: "静物",
         prompt: "a commercial product photograph",
         threshold: 0.16,
     },
@@ -186,7 +186,7 @@ const LABELS: [LabelDefinition; 21] = [
     },
     LabelDefinition {
         id: "document",
-        display_name: "文档 / 截图",
+        display_name: "文档",
         prompt: "a scanned document or a photographed page with text",
         threshold: 0.17,
     },
@@ -273,6 +273,9 @@ pub enum SemanticError {
 pub trait SemanticClassifier: Send + Sync {
     fn metadata(&self) -> ModelMetadata;
     fn status(&self) -> SemanticRuntimeStatus;
+    fn encode_text(&self, _queries: &[String]) -> Result<Vec<Vec<f32>>, SemanticError> {
+        Err(SemanticError::ModelUnavailable)
+    }
     fn classify_batch(
         &self,
         images: &[PathBuf],
@@ -291,6 +294,13 @@ pub fn semantic_catalog() -> Vec<SemanticLabelDescriptor> {
             is_primary_category: is_primary_category(label.id),
         })
         .collect()
+}
+
+pub fn known_display_name_for_label_id(label_id: &str) -> Option<&'static str> {
+    LABELS
+        .iter()
+        .find(|label| label.id == label_id)
+        .map(|label| label.display_name)
 }
 
 const PRIMARY_CATEGORY_IDS: [&str; 7] = [
@@ -468,6 +478,54 @@ impl SemanticClassifier for TinyClipClassifier {
         }
     }
 
+    fn encode_text(&self, queries: &[String]) -> Result<Vec<Vec<f32>>, SemanticError> {
+        if queries.is_empty() {
+            return Ok(Vec::new());
+        }
+        let prompts = queries
+            .iter()
+            .map(|query| format!("a photo of {query}"))
+            .collect::<Vec<_>>();
+        let (input_ids, attention_mask) = tokenize_texts(&self.tokenizer, &prompts)?;
+        let query_count = prompts.len();
+        let input_ids =
+            Tensor::from_array(([query_count, TOKEN_LENGTH], input_ids.into_boxed_slice()))
+                .map_err(inference_error)?;
+        let attention_mask = Tensor::from_array((
+            [query_count, TOKEN_LENGTH],
+            attention_mask.into_boxed_slice(),
+        ))
+        .map_err(inference_error)?;
+        // The exported graph has a combined image/text contract. Text output is
+        // independent from this placeholder image tensor, but the input remains
+        // required by ONNX Runtime.
+        let pixel_values = Tensor::from_array((
+            [1_usize, 3, IMAGE_SIZE, IMAGE_SIZE],
+            vec![0_f32; 3 * IMAGE_SIZE * IMAGE_SIZE].into_boxed_slice(),
+        ))
+        .map_err(inference_error)?;
+        let mut session = self.session.lock();
+        let outputs = session
+            .run(ort::inputs! {
+                "input_ids" => input_ids,
+                "pixel_values" => pixel_values,
+                "attention_mask" => attention_mask,
+            })
+            .map_err(inference_error)?;
+        let (shape, data) = outputs["text_embeds"]
+            .try_extract_tensor::<f32>()
+            .map_err(inference_error)?;
+        if shape.as_ref() != [query_count as i64, EMBEDDING_DIMENSIONS as i64] {
+            return Err(SemanticError::Inference(format!(
+                "unexpected text embedding shape: {shape:?}"
+            )));
+        }
+        Ok(data
+            .chunks_exact(EMBEDDING_DIMENSIONS)
+            .map(|embedding| embedding.to_vec())
+            .collect())
+    }
+
     fn classify_batch(
         &self,
         images: &[PathBuf],
@@ -621,11 +679,24 @@ fn verify_sha256(path: &Path, expected: &str) -> Result<(), SemanticError> {
 
 fn tokenize_prompts(tokenizer: &Tokenizer) -> Result<(Vec<i64>, Vec<i64>), SemanticError> {
     let prompts = LABELS.iter().map(|label| label.prompt).collect::<Vec<_>>();
+    tokenize_texts(tokenizer, &prompts)
+}
+
+fn tokenize_texts<S: AsRef<str>>(
+    tokenizer: &Tokenizer,
+    prompts: &[S],
+) -> Result<(Vec<i64>, Vec<i64>), SemanticError> {
     let encodings = tokenizer
-        .encode_batch(prompts, true)
+        .encode_batch(
+            prompts
+                .iter()
+                .map(|prompt| prompt.as_ref().to_string())
+                .collect::<Vec<_>>(),
+            true,
+        )
         .map_err(|error| SemanticError::Inference(format!("tokenization failed: {error}")))?;
-    let mut input_ids = Vec::with_capacity(LABELS.len() * TOKEN_LENGTH);
-    let mut attention_mask = Vec::with_capacity(LABELS.len() * TOKEN_LENGTH);
+    let mut input_ids = Vec::with_capacity(prompts.len() * TOKEN_LENGTH);
+    let mut attention_mask = Vec::with_capacity(prompts.len() * TOKEN_LENGTH);
     for encoding in encodings {
         if encoding.len() != TOKEN_LENGTH {
             return Err(SemanticError::Inference(format!(
@@ -1036,6 +1107,8 @@ mod tests {
         ids.sort_unstable();
         ids.dedup();
         assert_eq!(ids.len(), catalog.len());
+        assert_eq!(known_display_name_for_label_id("product"), Some("静物"));
+        assert_eq!(known_display_name_for_label_id("document"), Some("文档"));
         assert_eq!(
             catalog
                 .iter()

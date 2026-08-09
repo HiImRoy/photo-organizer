@@ -6,9 +6,9 @@ export const PRIMARY_CATEGORY_OPTIONS = [
   ["portrait", "人像"],
   ["landscape", "风景"],
   ["architecture", "建筑"],
-  ["product", "产品 / 静物"],
+  ["product", "静物"],
   ["animal", "动物"],
-  ["document", "文档 / 截图"],
+  ["document", "文档"],
   ["unknown", "未知"],
 ] as const;
 

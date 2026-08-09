@@ -7,17 +7,15 @@ import type {
   SemanticLabelDescriptor,
   SemanticRuntimeStatus,
 } from "../types";
-import { ChevronIcon, LibraryIcon, PanelIcon, ShieldIcon } from "./Icons";
+import { ChevronIcon, LibraryIcon, ShieldIcon } from "./Icons";
 
 interface SidebarProps {
-  collapsed: boolean;
   libraries: LibrarySummary[];
   selectedLibraryId: number | null;
   groups: SemanticGroupSummary[];
   catalog: SemanticLabelDescriptor[];
   filter: AssetFilter;
   semanticStatus: SemanticRuntimeStatus | null;
-  onToggle: () => void;
   onImportLibrary: () => void;
   onSelectLibrary: (id: number) => void;
   onRescanLibrary: (library: LibrarySummary) => void;
@@ -54,14 +52,12 @@ const saturationLevels = [
 
 export function Sidebar(props: SidebarProps) {
   const {
-    collapsed,
     libraries,
     selectedLibraryId,
     groups,
     catalog,
     filter,
     semanticStatus,
-    onToggle,
     onImportLibrary,
     onSelectLibrary,
     onRescanLibrary,
@@ -210,231 +206,220 @@ export function Sidebar(props: SidebarProps) {
     return () => document.removeEventListener("pointerdown", closeMenuOnOutsidePointer);
   }, [openLibraryMenuId]);
 
-  if (collapsed) {
-    return (
-      <aside className="left-panel is-collapsed" aria-label="图库与筛选">
-        <button className="panel-toggle" type="button" onClick={onToggle} aria-label="展开左侧面板">
-          <PanelIcon width="17" height="17" />
-        </button>
-        <LibraryIcon width="18" height="18" />
-      </aside>
-    );
-  }
-
   return (
     <aside className="left-panel" aria-label="图库与筛选">
-      <div className="panel-titlebar">
-        <strong>资料库</strong>
-        <button className="panel-toggle" type="button" onClick={onToggle} aria-label="折叠左侧面板">
-          <PanelIcon width="17" height="17" />
-        </button>
-      </div>
-
-      <PanelSection title="图库">
-        <div className="nav-list library-tree">
-          {libraryTree.map((node) => (
-            <LibraryTreeNode
-              key={node.library.id}
-              node={node}
-              draggingLibraryId={draggingLibraryId}
-              dropTargetId={dropTargetId}
-              assetDropTargetLibraryId={assetDropTargetLibraryId}
-              depth={0}
-              expanded={!collapsedLibraryIds.has(node.library.id)}
-              collapsedLibraryIds={collapsedLibraryIds}
-              selectedLibraryId={selectedLibraryId}
-              openLibraryMenuId={openLibraryMenuId}
-              onToggle={(id) =>
-                setCollapsedLibraryIds((current) => {
-                  const next = new Set(current);
-                  if (next.has(id)) next.delete(id);
-                  else next.add(id);
-                  return next;
-                })
-              }
-              onOpenMenu={setOpenLibraryMenuId}
-              onSelectLibrary={selectLibraryFromRow}
-              onRescanLibrary={onRescanLibrary}
-              onOpenLibrary={onOpenLibrary}
-              onShowLibraryInfo={onShowLibraryInfo}
-              onRemoveLibrary={onRemoveLibrary}
-              onChangeLibraryParent={onChangeLibraryParent}
-              onPointerDown={beginLibraryPointerDrag}
-            />
-          ))}
-          {libraryTree.length === 0 ? <span className="empty-nav-state">尚未导入图库</span> : null}
-          <div
-            className={
-              draggingLibraryId === null || dropTargetId !== "root"
-                ? "library-root-drop-target"
-                : "library-root-drop-target is-active is-drag-over"
-            }
-            data-library-root-drop="true"
-          >
-            拖到这里移出当前父图库
+      <section
+        className="sidebar-module sidebar-library-module"
+        aria-labelledby="sidebar-library-title"
+      >
+        <div className="panel-titlebar">
+          <strong id="sidebar-library-title">图库</strong>
+          <div className="panel-titlebar-actions">
+            <button
+              className="library-import-button"
+              type="button"
+              onClick={onImportLibrary}
+              aria-label="＋ 导入图库"
+            >
+              <LibraryIcon width="13" height="13" />
+              <span>＋ 导入图库</span>
+            </button>
           </div>
-          <button className="nav-row import-library-row" type="button" onClick={onImportLibrary}>
-            <LibraryIcon width="15" height="15" />
-            <span>＋ 导入图库</span>
-          </button>
         </div>
-      </PanelSection>
 
-      <PanelSection title="更多筛选">
-        <div className="nav-list compact">
-          <FilterRow
-            active={filter.analysisStatus === "not_analyzed"}
-            label="尚未语义分析"
-            onClick={() =>
-              onFilterChange({
-                ...filter,
-                analysisStatus: filter.analysisStatus === "not_analyzed" ? null : "not_analyzed",
-              })
-            }
-          />
-          <FilterRow
-            active={filter.analysisStatus === "failed"}
-            label="分析失败"
-            onClick={() =>
-              onFilterChange({
-                ...filter,
-                analysisStatus: filter.analysisStatus === "failed" ? null : "failed",
-              })
-            }
-          />
-        </div>
-      </PanelSection>
-
-      <SemanticFilterSection
-        title="主类别"
-        primary
-        labels={catalog.filter((label) => label.isPrimaryCategory)}
-        filter={filter}
-        groups={groups}
-        onFilterChange={onFilterChange}
-      />
-
-      <SemanticFilterSection
-        title="辅助标签"
-        labels={catalog.filter((label) => !label.isPrimaryCategory)}
-        filter={filter}
-        groups={groups}
-        onFilterChange={onFilterChange}
-      />
-
-      <PanelSection title="影调">
-        <div className="chip-grid three">
-          {tones.map(([id, label]) => (
-            <button
-              type="button"
-              className={filter.toneLabels.includes(id) ? "filter-chip is-active" : "filter-chip"}
-              key={id}
-              onClick={() =>
-                onFilterChange({ ...filter, toneLabels: toggleValue(filter.toneLabels, id) })
-              }
-            >
-              {label}
-            </button>
-          ))}
-        </div>
-      </PanelSection>
-
-      <PanelSection title="饱和度级别">
-        <div className="chip-grid three">
-          {saturationLevels.map(([id, label]) => (
-            <button
-              type="button"
+        <div className="sidebar-library-area">
+          <div className="nav-list library-tree">
+            {libraryTree.map((node) => (
+              <LibraryTreeNode
+                key={node.library.id}
+                node={node}
+                draggingLibraryId={draggingLibraryId}
+                dropTargetId={dropTargetId}
+                assetDropTargetLibraryId={assetDropTargetLibraryId}
+                depth={0}
+                expanded={!collapsedLibraryIds.has(node.library.id)}
+                collapsedLibraryIds={collapsedLibraryIds}
+                selectedLibraryId={selectedLibraryId}
+                openLibraryMenuId={openLibraryMenuId}
+                onToggle={(id) =>
+                  setCollapsedLibraryIds((current) => {
+                    const next = new Set(current);
+                    if (next.has(id)) next.delete(id);
+                    else next.add(id);
+                    return next;
+                  })
+                }
+                onOpenMenu={setOpenLibraryMenuId}
+                onSelectLibrary={selectLibraryFromRow}
+                onRescanLibrary={onRescanLibrary}
+                onOpenLibrary={onOpenLibrary}
+                onShowLibraryInfo={onShowLibraryInfo}
+                onRemoveLibrary={onRemoveLibrary}
+                onChangeLibraryParent={onChangeLibraryParent}
+                onPointerDown={beginLibraryPointerDrag}
+              />
+            ))}
+            {libraryTree.length === 0 ? (
+              <span className="empty-nav-state">尚未导入图库</span>
+            ) : null}
+            <div
               className={
-                filter.saturationLevels.includes(id) ? "filter-chip is-active" : "filter-chip"
+                draggingLibraryId === null || dropTargetId !== "root"
+                  ? "library-root-drop-target"
+                  : "library-root-drop-target is-active is-drag-over"
               }
-              key={id}
-              onClick={() =>
-                onFilterChange({
-                  ...filter,
-                  saturationLevels: toggleValue(filter.saturationLevels, id),
-                })
-              }
+              data-library-root-drop="true"
             >
-              {label}
-            </button>
-          ))}
+              拖到这里移出当前父图库
+            </div>
+          </div>
         </div>
-      </PanelSection>
+      </section>
 
-      <PanelSection title="主色">
-        <div className="color-filter-list">
-          {colors.map(([id, label]) => (
-            <button
-              type="button"
-              className={
-                filter.colorCategories.includes(id) ? "color-filter is-active" : "color-filter"
-              }
-              key={id}
-              onClick={() =>
-                onFilterChange({
-                  ...filter,
-                  colorCategories: toggleValue(filter.colorCategories, id),
-                })
-              }
-              aria-label={`${label}色`}
-              title={`${label}色`}
-            >
-              <i data-color={id} />
-            </button>
-          ))}
-        </div>
-      </PanelSection>
+      <section
+        className="sidebar-module sidebar-filter-module"
+        aria-labelledby="sidebar-filter-title"
+      >
+        <div className="sidebar-filter-area">
+          <div className="sidebar-area-heading">
+            <strong id="sidebar-filter-title">分类与筛选</strong>
+            <span>按内容属性整理图片</span>
+          </div>
 
-      <PanelSection title="数值与时间范围">
-        <div className="range-filters">
-          <RangePair
-            label="亮度"
-            min={filter.brightnessMin}
-            max={filter.brightnessMax}
-            onChange={(brightnessMin, brightnessMax) =>
-              onFilterChange({ ...filter, brightnessMin, brightnessMax })
-            }
+          <SemanticFilterSection
+            title="主类别"
+            primary
+            labels={catalog.filter((label) => label.isPrimaryCategory)}
+            filter={filter}
+            groups={groups}
+            onFilterChange={onFilterChange}
           />
-          <RangePair
-            label="饱和度"
-            min={filter.saturationMin}
-            max={filter.saturationMax}
-            onChange={(saturationMin, saturationMax) =>
-              onFilterChange({ ...filter, saturationMin, saturationMax })
-            }
-          />
-          <label className="date-filter">
-            <span>拍摄日期从</span>
-            <input
-              type="date"
-              value={filter.capturedFrom?.slice(0, 10) ?? ""}
-              onChange={(event) =>
-                onFilterChange({ ...filter, capturedFrom: event.target.value || null })
-              }
-            />
-          </label>
-          <label className="date-filter">
-            <span>至</span>
-            <input
-              type="date"
-              value={filter.capturedTo?.slice(0, 10) ?? ""}
-              onChange={(event) =>
-                onFilterChange({ ...filter, capturedTo: event.target.value || null })
-              }
-            />
-          </label>
-        </div>
-      </PanelSection>
 
-      <div className="left-panel-footer">
-        <ShieldIcon width="14" height="14" />
-        <span>
-          <strong>原图只读</strong> · 索引与模型数据保存在应用目录
-        </span>
-        <small className={semanticStatus?.status === "ready" ? "status-ready" : ""}>
-          {semanticStatus?.status === "ready" ? "本地语义模型 · 本地计算" : "语义模型未就绪"}
-        </small>
-      </div>
+          <SemanticFilterSection
+            title="辅助标签"
+            labels={catalog.filter((label) => !label.isPrimaryCategory)}
+            filter={filter}
+            groups={groups}
+            onFilterChange={onFilterChange}
+          />
+
+          <PanelSection title="影调">
+            <div className="chip-grid three">
+              {tones.map(([id, label]) => (
+                <button
+                  type="button"
+                  className={
+                    filter.toneLabels.includes(id) ? "filter-chip is-active" : "filter-chip"
+                  }
+                  key={id}
+                  onClick={() =>
+                    onFilterChange({ ...filter, toneLabels: toggleValue(filter.toneLabels, id) })
+                  }
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
+          </PanelSection>
+
+          <PanelSection title="饱和度级别">
+            <div className="chip-grid three">
+              {saturationLevels.map(([id, label]) => (
+                <button
+                  type="button"
+                  className={
+                    filter.saturationLevels.includes(id) ? "filter-chip is-active" : "filter-chip"
+                  }
+                  key={id}
+                  onClick={() =>
+                    onFilterChange({
+                      ...filter,
+                      saturationLevels: toggleValue(filter.saturationLevels, id),
+                    })
+                  }
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
+          </PanelSection>
+
+          <PanelSection title="主色">
+            <div className="color-filter-list">
+              {colors.map(([id, label]) => (
+                <button
+                  type="button"
+                  className={
+                    filter.colorCategories.includes(id) ? "color-filter is-active" : "color-filter"
+                  }
+                  key={id}
+                  onClick={() =>
+                    onFilterChange({
+                      ...filter,
+                      colorCategories: toggleValue(filter.colorCategories, id),
+                    })
+                  }
+                  aria-label={`${label}色`}
+                  title={`${label}色`}
+                >
+                  <i data-color={id} />
+                </button>
+              ))}
+            </div>
+          </PanelSection>
+
+          <PanelSection title="数值与时间范围">
+            <div className="range-filters">
+              <RangePair
+                label="亮度"
+                min={filter.brightnessMin}
+                max={filter.brightnessMax}
+                onChange={(brightnessMin, brightnessMax) =>
+                  onFilterChange({ ...filter, brightnessMin, brightnessMax })
+                }
+              />
+              <RangePair
+                label="饱和度"
+                min={filter.saturationMin}
+                max={filter.saturationMax}
+                onChange={(saturationMin, saturationMax) =>
+                  onFilterChange({ ...filter, saturationMin, saturationMax })
+                }
+              />
+              <label className="date-filter">
+                <span>拍摄日期从</span>
+                <input
+                  type="date"
+                  value={filter.capturedFrom?.slice(0, 10) ?? ""}
+                  onChange={(event) =>
+                    onFilterChange({ ...filter, capturedFrom: event.target.value || null })
+                  }
+                />
+              </label>
+              <label className="date-filter">
+                <span>至</span>
+                <input
+                  type="date"
+                  value={filter.capturedTo?.slice(0, 10) ?? ""}
+                  onChange={(event) =>
+                    onFilterChange({ ...filter, capturedTo: event.target.value || null })
+                  }
+                />
+              </label>
+            </div>
+          </PanelSection>
+
+          <div className="left-panel-footer">
+            <ShieldIcon width="14" height="14" />
+            <span>
+              <strong>原图只读</strong> · 索引与模型数据保存在应用目录
+            </span>
+            <small className={semanticStatus?.status === "ready" ? "status-ready" : ""}>
+              {semanticStatus?.status === "ready" ? "本地语义模型 · 本地计算" : "语义模型未就绪"}
+            </small>
+          </div>
+        </div>
+      </section>
     </aside>
   );
 }
@@ -630,7 +615,7 @@ function LibraryTreeNode({
                 onRemoveLibrary(library);
               }}
             >
-              从资料库移除
+              从图库移除
             </button>
           </div>
         ) : null}
@@ -761,24 +746,7 @@ function SemanticFilterSection({
   );
 }
 
-function FilterRow({
-  active,
-  label,
-  onClick,
-}: {
-  active: boolean;
-  label: string;
-  onClick: () => void;
-}) {
-  return (
-    <button type="button" className={active ? "nav-row is-active" : "nav-row"} onClick={onClick}>
-      <i className="quick-marker" aria-hidden="true" />
-      <span>{label}</span>
-    </button>
-  );
-}
-
-function toggleValue(values: string[], value: string) {
+function toggleValue<T>(values: T[], value: T) {
   return values.includes(value) ? values.filter((item) => item !== value) : [...values, value];
 }
 
