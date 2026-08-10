@@ -16,9 +16,11 @@ import {
   fetchSemanticGroups,
   fetchSemanticProgress,
   fetchSemanticStatus,
+  fetchSubjectStatus,
   openLibraryInExplorer,
   pauseSemanticAnalysis,
   prepareSemanticModel,
+  prepareSubjectModel,
   reanalyzeAsset,
   removeLibrary,
   rescanLibrary as requestLibraryRescan,
@@ -93,6 +95,7 @@ import {
   type SemanticLabelDescriptor,
   type SemanticProgress,
   type SemanticRuntimeStatus,
+  type SubjectRuntimeStatus,
   type SortDirection,
   type SortField,
   type ViewMode,
@@ -206,6 +209,7 @@ export default function App() {
   const [semanticProgress, setSemanticProgress] = useState<SemanticProgress | null>(null);
   const [cancellingScan, setCancellingScan] = useState(false);
   const [semanticStatus, setSemanticStatus] = useState<SemanticRuntimeStatus | null>(null);
+  const [subjectStatus, setSubjectStatus] = useState<SubjectRuntimeStatus | null>(null);
   const [refreshKey, setRefreshKey] = useState(0);
   const [workspaceMode, setWorkspaceMode] = useState<"library" | "organization" | "workflows">(
     visualOrganizationMode ? "organization" : "library",
@@ -484,9 +488,10 @@ export default function App() {
     void Promise.allSettled([
       fetchLibraries(),
       fetchSemanticStatus(),
+      fetchSubjectStatus(),
       fetchSemanticCatalog(),
       fetchClassificationRegistry(),
-    ]).then(([libraryResult, statusResult, catalogResult, registryResult]) => {
+    ]).then(([libraryResult, statusResult, subjectResult, catalogResult, registryResult]) => {
       if (!active) return;
       if (libraryResult.status === "fulfilled") {
         setLibraries(libraryResult.value);
@@ -499,6 +504,7 @@ export default function App() {
         setError(messageFrom(libraryResult.reason));
       }
       if (statusResult.status === "fulfilled") setSemanticStatus(statusResult.value);
+      if (subjectResult.status === "fulfilled") setSubjectStatus(subjectResult.value);
       if (catalogResult.status === "fulfilled") setSemanticCatalog(catalogResult.value);
       if (registryResult.status === "fulfilled") setClassificationRegistry(registryResult.value);
       setLoading(false);
@@ -696,14 +702,31 @@ export default function App() {
   async function prepareOrAnalyze() {
     setError(null);
     try {
-      if (semanticStatus?.status !== "ready") {
-        const status = await prepareSemanticModel();
-        setSemanticStatus(status);
+      let nextSemanticStatus = semanticStatus;
+      let nextSubjectStatus = subjectStatus;
+      if (nextSemanticStatus?.status !== "ready") {
+        nextSemanticStatus = await prepareSemanticModel();
+        setSemanticStatus(nextSemanticStatus);
+      }
+      if (
+        nextSubjectStatus &&
+        !nextSubjectStatus.model.installed &&
+        nextSubjectStatus.status !== "model_unavailable"
+      ) {
+        try {
+          nextSubjectStatus = await prepareSubjectModel();
+          setSubjectStatus(nextSubjectStatus);
+        } catch {
+          // Subject analysis is optional; the scene workflow remains usable
+          // when the optional detector cannot be prepared.
+        }
+      }
+      if (nextSemanticStatus?.status !== "ready") {
         return;
       }
       if (currentLibraryId === null) return;
       const { jobId } = await startSemanticAnalysis(currentLibraryId);
-      setSemanticProgress(pendingSemanticProgress(jobId, currentLibraryId, semanticStatus));
+      setSemanticProgress(pendingSemanticProgress(jobId, currentLibraryId, nextSemanticStatus));
     } catch (reason) {
       setError(messageFrom(reason));
     }
@@ -1423,6 +1446,7 @@ export default function App() {
               catalog={semanticCatalog}
               filter={filter}
               semanticStatus={semanticStatus}
+              subjectStatus={subjectStatus}
               assetDropTargetLibraryId={assetDropTargetLibraryId}
               onImportLibrary={() => void importFolder()}
               onSelectLibrary={selectLibrary}
@@ -1598,6 +1622,7 @@ export default function App() {
             <DetailPanel
               asset={detailPanelAsset}
               semanticStatus={semanticStatus}
+              subjectStatus={subjectStatus}
               previewNavigator={previewController.navigator}
               onReanalyze={(asset) => void analyzeOne(asset)}
               classificationRegistry={classificationRegistry}

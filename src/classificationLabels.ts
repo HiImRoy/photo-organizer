@@ -21,8 +21,13 @@ export const AUXILIARY_TAG_OPTIONS = [
   ["indoor", "室内"],
   ["outdoor", "室外"],
   ["group", "多人"],
+  ["person", "人物"],
+  ["portrait", "人像"],
   ["vehicle", "车辆"],
   ["food", "食品"],
+  ["animal", "动物"],
+  ["pet", "宠物"],
+  ["plant", "植物"],
   ["night", "夜景"],
   ["flower", "花卉"],
   ["abstract", "抽象"],
@@ -149,11 +154,17 @@ export function primaryCategoryOptions(
   catalog: SemanticLabelDescriptor[],
   selectedValue?: string | null,
 ) {
-  const selectedCompatibilityOption = selectedValue &&
+  const selectedCompatibilityOption =
+    selectedValue &&
     !catalog.some((item) => item.id === selectedValue) &&
     selectedValue !== "unknown"
-    ? [{ value: selectedValue, label: classificationValueLabel(selectedValue, "primary", catalog) }]
-    : [];
+      ? [
+          {
+            value: selectedValue,
+            label: classificationValueLabel(selectedValue, "primary", catalog),
+          },
+        ]
+      : [];
   return mergeOptions(
     catalog
       .filter((item) => item.isPrimaryCategory)

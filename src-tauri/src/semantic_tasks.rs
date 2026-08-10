@@ -5,13 +5,16 @@ use crate::db::{Repository, SemanticAssetCandidate};
 use crate::error::{AppError, AppResult};
 use crate::models::SemanticProgress;
 use crate::semantic::{ExecutionBackend, SemanticAnalysisOutput, SemanticClassifier};
+use crate::subject::{SubjectAnalysisOutput, SubjectClassifier};
 use crate::tasks::{SemanticControlSignal, SemanticTaskRegistry};
 
 const SEMANTIC_BATCH_SIZE: usize = 32;
 
+#[allow(clippy::too_many_arguments)]
 pub fn spawn_semantic_job<F>(
     repository: Repository,
     classifier: Arc<dyn SemanticClassifier>,
+    subject_classifier: Option<Arc<dyn SubjectClassifier>>,
     registry: Arc<SemanticTaskRegistry>,
     job_id: String,
     library_id: i64,
@@ -118,6 +121,13 @@ where
                         .collect::<Vec<_>>();
                     let outputs =
                         classify_batch_with_fallback(classifier.as_ref(), &cache_ready, &paths);
+                    let subject_outputs = subject_classifier.as_ref().map(|subject_classifier| {
+                        classify_subject_batch_with_fallback(
+                            subject_classifier.as_ref(),
+                            &cache_ready,
+                            &paths,
+                        )
+                    });
                     let mut successful = Vec::with_capacity(cache_ready.len());
 
                     for ((candidate, path), output) in cache_ready.iter().zip(paths).zip(outputs) {
@@ -144,6 +154,34 @@ where
                         Ok((completed, skipped)) => {
                             progress.completed += completed as u64;
                             progress.skipped += skipped as u64;
+                            if let Some(subject_outputs) = subject_outputs {
+                                let mut subject_successful = Vec::with_capacity(cache_ready.len());
+                                for (candidate, output) in
+                                    cache_ready.iter().zip(subject_outputs)
+                                {
+                                    match output {
+                                        Ok(output) => {
+                                            subject_successful.push((*candidate, output));
+                                        }
+                                        Err(error) => {
+                                            let _ = repository.save_subject_failure(candidate, &error);
+                                            progress.error = Some(error);
+                                        }
+                                    }
+                                }
+                                let subject_entries = subject_successful
+                                    .iter()
+                                    .map(|(candidate, output)| (*candidate, output))
+                                    .collect::<Vec<_>>();
+                                if let Err(error) =
+                                    repository.save_subject_results(&subject_entries)
+                                {
+                                    progress.error = Some(error.to_string());
+                                    log::warn!(
+                                        "could not save subject results for {thread_job_id}: {error}"
+                                    );
+                                }
+                            }
                         }
                         Err(error) => {
                             progress.failed += successful.len() as u64;
@@ -177,6 +215,58 @@ where
         })
         .map_err(AppError::Io)?;
     Ok(())
+}
+
+fn classify_subject_batch_with_fallback(
+    classifier: &dyn SubjectClassifier,
+    candidates: &[&SemanticAssetCandidate],
+    paths: &[PathBuf],
+) -> Vec<Result<SubjectAnalysisOutput, String>> {
+    match classifier.classify_batch(paths, ExecutionBackend::Cpu) {
+        Ok(outputs) if outputs.len() == paths.len() => outputs.into_iter().map(Ok).collect(),
+        Ok(outputs) => {
+            let error = format!(
+                "subject model returned {} results for {} images",
+                outputs.len(),
+                paths.len()
+            );
+            candidates
+                .iter()
+                .map(|candidate| Err(format!("{}: {error}", candidate.absolute_path.display())))
+                .collect()
+        }
+        Err(batch_error) => {
+            let batch_error = batch_error.to_string();
+            candidates
+                .iter()
+                .zip(paths)
+                .map(|(candidate, path)| {
+                    classify_subject_single_with_fallback(classifier, candidate, path, &batch_error)
+                })
+                .collect()
+        }
+    }
+}
+
+fn classify_subject_single_with_fallback(
+    classifier: &dyn SubjectClassifier,
+    candidate: &SemanticAssetCandidate,
+    path: &Path,
+    batch_error: &str,
+) -> Result<SubjectAnalysisOutput, String> {
+    let retry_paths = [path.to_path_buf()];
+    let last_error = match classifier.classify_batch(&retry_paths, ExecutionBackend::Cpu) {
+        Ok(mut outputs) if outputs.len() == 1 => return Ok(outputs.remove(0)),
+        Ok(outputs) => format!(
+            "subject model returned {} results for one image",
+            outputs.len()
+        ),
+        Err(error) => error.to_string(),
+    };
+    Err(format!(
+        "{batch_error}; single-thumbnail subject retry failed for {}: {last_error}",
+        candidate.absolute_path.display()
+    ))
 }
 
 fn analysis_path(candidate: &SemanticAssetCandidate) -> PathBuf {
@@ -249,6 +339,7 @@ mod tests {
 
     use super::*;
     use crate::semantic::{ModelMetadata, SemanticError, SemanticRuntimeStatus};
+    use crate::subject::SubjectRuntimeStatus;
 
     struct RecordingClassifier {
         calls: Mutex<Vec<Vec<PathBuf>>>,
@@ -287,6 +378,48 @@ mod tests {
         }
     }
 
+    struct RecordingSubjectClassifier {
+        calls: Mutex<Vec<Vec<PathBuf>>>,
+    }
+
+    impl SubjectClassifier for RecordingSubjectClassifier {
+        fn metadata(&self) -> ModelMetadata {
+            ModelMetadata {
+                name: "test-subject-model".into(),
+                version: "test-version".into(),
+                analysis_version: "test-analysis".into(),
+                license: Some("test".into()),
+                installed: true,
+                model_size_bytes: None,
+                model_sha256: None,
+                supported_backends: vec![ExecutionBackend::Cpu],
+            }
+        }
+
+        fn face_metadata(&self) -> ModelMetadata {
+            self.metadata()
+        }
+
+        fn status(&self) -> SubjectRuntimeStatus {
+            SubjectRuntimeStatus {
+                status: "ready".into(),
+                message: "test".into(),
+                model: self.metadata(),
+                face_model: self.face_metadata(),
+                selected_backend: Some(ExecutionBackend::Cpu),
+            }
+        }
+
+        fn classify_batch(
+            &self,
+            images: &[PathBuf],
+            _backend: ExecutionBackend,
+        ) -> Result<Vec<SubjectAnalysisOutput>, SemanticError> {
+            self.calls.lock().push(images.to_vec());
+            Err(SemanticError::Inference("test subject failure".into()))
+        }
+    }
+
     #[test]
     fn failed_batch_retry_never_reopens_original_source() {
         let source = PathBuf::from("source/original.jpg");
@@ -306,5 +439,32 @@ mod tests {
 
         assert!(result.is_err());
         assert_eq!(classifier.calls.lock().as_slice(), &[vec![thumbnail]]);
+    }
+
+    #[test]
+    fn subject_retry_never_reopens_original_source() {
+        let source = PathBuf::from("source/original.jpg");
+        let thumbnail = PathBuf::from("cache/grid-640-v1.jpg");
+        let candidate = SemanticAssetCandidate {
+            id: 1,
+            absolute_path: source,
+            analysis_path: thumbnail.clone(),
+            fingerprint: "fingerprint".into(),
+        };
+        let classifier = RecordingSubjectClassifier {
+            calls: Mutex::new(Vec::new()),
+        };
+
+        let result = classify_subject_batch_with_fallback(
+            &classifier,
+            &[&candidate],
+            std::slice::from_ref(&thumbnail),
+        );
+
+        assert!(result[0].is_err());
+        assert_eq!(
+            classifier.calls.lock().as_slice(),
+            &[vec![thumbnail.clone()], vec![thumbnail]]
+        );
     }
 }

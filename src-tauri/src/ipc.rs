@@ -27,6 +27,7 @@ use crate::semantic::{
     semantic_catalog,
 };
 use crate::semantic_tasks::spawn_semantic_job;
+use crate::subject::{SubjectClassifier, SubjectModel, SubjectRuntimeStatus};
 use crate::tasks::{SemanticTaskRegistry, SourceScanGuard, SourceScanRegistry, TaskRegistry};
 use crate::workflow;
 use crate::workflow::{
@@ -42,6 +43,7 @@ pub struct AppState {
     pub source_scans: Arc<SourceScanRegistry>,
     pub semantic_tasks: Arc<SemanticTaskRegistry>,
     pub semantic: Arc<RwLock<Arc<dyn SemanticClassifier>>>,
+    pub subject: Arc<RwLock<Arc<dyn SubjectClassifier>>>,
 }
 
 impl AppState {
@@ -49,6 +51,7 @@ impl AppState {
         repository: Repository,
         paths: AppPaths,
         semantic: Arc<dyn SemanticClassifier>,
+        subject: Arc<dyn SubjectClassifier>,
     ) -> Self {
         Self {
             repository,
@@ -57,6 +60,7 @@ impl AppState {
             source_scans: Arc::new(SourceScanRegistry::default()),
             semantic_tasks: Arc::new(SemanticTaskRegistry::default()),
             semantic: Arc::new(RwLock::new(semantic)),
+            subject: Arc::new(RwLock::new(subject)),
         }
     }
 }
@@ -518,6 +522,30 @@ pub fn prepare_semantic_model(state: State<'_, AppState>) -> Result<SemanticRunt
 }
 
 #[tauri::command]
+pub fn get_subject_status(state: State<'_, AppState>) -> Result<SubjectRuntimeStatus, String> {
+    Ok(state.subject.read().status())
+}
+
+#[tauri::command]
+pub fn prepare_subject_model(state: State<'_, AppState>) -> Result<SubjectRuntimeStatus, String> {
+    let classifier = SubjectModel::load(
+        &state.paths.subject_model_dir,
+        &state.paths.face_model_dir,
+        &state.paths.onnx_runtime_path,
+    )
+    .map_err(|error| error.to_string())?;
+    let classifier: Arc<dyn SubjectClassifier> = Arc::new(classifier);
+    let status = classifier.status();
+    *state.subject.write() = classifier;
+    Ok(status)
+}
+
+#[tauri::command]
+pub fn clear_subject_data(state: State<'_, AppState>) -> Result<u64, String> {
+    state.repository.clear_subject_data().map_err(ipc_error)
+}
+
+#[tauri::command]
 pub fn get_semantic_catalog() -> Vec<SemanticLabelDescriptor> {
     semantic_catalog()
 }
@@ -580,9 +608,16 @@ pub fn start_semantic_analysis_selected(
         return Err("本地语义模型尚未就绪，请先准备模型。".into());
     }
     let job_id = uuid::Uuid::new_v4().to_string();
+    let subject_model = state.subject.read().metadata();
+    let subject_model = subject_model.installed.then_some(subject_model);
     let candidates = state
         .repository
-        .create_semantic_job_for_assets(&job_id, library_id, &asset_ids)
+        .create_semantic_job_for_assets_with_model(
+            &job_id,
+            library_id,
+            &asset_ids,
+            subject_model.as_ref(),
+        )
         .map_err(ipc_error)?;
     spawn_with_app(&state, app, job_id.clone(), library_id, candidates)?;
     Ok(StartSemanticResponse { job_id })
@@ -1039,9 +1074,17 @@ fn start_semantic_job(
         return Err("本地语义模型尚未就绪，请先准备模型。".into());
     }
     let job_id = uuid::Uuid::new_v4().to_string();
+    let subject_model = state.subject.read().metadata();
+    let subject_model = subject_model.installed.then_some(subject_model);
     let candidates = state
         .repository
-        .create_semantic_job(&job_id, library_id, force, only_asset_id)
+        .create_semantic_job_with_models(
+            &job_id,
+            library_id,
+            force,
+            only_asset_id,
+            subject_model.as_ref(),
+        )
         .map_err(ipc_error)?;
     spawn_with_app(state, app, job_id.clone(), library_id, candidates)?;
     Ok(StartSemanticResponse { job_id })
@@ -1055,9 +1098,14 @@ fn spawn_with_app(
     candidates: Vec<crate::db::SemanticAssetCandidate>,
 ) -> Result<(), String> {
     let classifier = state.semantic.read().clone();
+    let subject_classifier = {
+        let subject = state.subject.read().clone();
+        subject.metadata().installed.then_some(subject)
+    };
     spawn_semantic_job(
         state.repository.clone(),
         classifier,
+        subject_classifier,
         state.semantic_tasks.clone(),
         job_id,
         library_id,

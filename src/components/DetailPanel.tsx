@@ -17,6 +17,7 @@ import type {
   ManualColorLabel,
   SemanticLabelDescriptor,
   SemanticRuntimeStatus,
+  SubjectRuntimeStatus,
 } from "../types";
 import { ColorSwatches } from "./ColorSwatches";
 import { ImageHistogram } from "./ImageHistogram";
@@ -27,6 +28,7 @@ import { Thumbnail } from "./Thumbnail";
 interface DetailPanelProps {
   asset: AssetListItem | null;
   semanticStatus: SemanticRuntimeStatus | null;
+  subjectStatus?: SubjectRuntimeStatus | null;
   previewNavigator: PreviewNavigatorProps | null;
   onReanalyze: (asset: AssetListItem) => void;
   classificationRegistry?: ClassificationFieldDescriptor[];
@@ -41,6 +43,7 @@ interface DetailPanelProps {
 export function DetailPanel({
   asset,
   semanticStatus,
+  subjectStatus,
   previewNavigator,
   onReanalyze,
   classificationRegistry,
@@ -198,6 +201,13 @@ export function DetailPanel({
                   label="后端"
                   value={semanticStatus?.selectedBackend ? "本地计算" : "未启用"}
                 />
+                <Property label="主体模型" value={subjectStatus?.model.name ?? "—"} />
+                <Property
+                  label="人像辅助"
+                  value={
+                    subjectStatus?.faceModel.installed ? subjectStatus.faceModel.name : "未启用"
+                  }
+                />
               </dl>
               <button
                 className="secondary-action full"
@@ -317,10 +327,7 @@ function ClassificationEditor({
   );
   const [saturation, setSaturation] = useState(classification.saturationLevel.effective ?? "");
   const [tagChoice, setTagChoice] = useState("");
-  const primaryOptions = primaryCategoryOptions(
-    catalog,
-    classification.primaryCategory.effective,
-  );
+  const primaryOptions = primaryCategoryOptions(catalog, classification.primaryCategory.effective);
   const tagOptions = auxiliaryTagOptions(catalog, classification.auxiliaryTags.effective);
 
   const save = (field: string, value: string | string[]) => {

@@ -23,6 +23,7 @@ export interface VisualFixture {
   progress: ScanProgress | null;
   semanticProgress: SemanticProgress | null;
   semanticStatus: SemanticRuntimeStatus;
+  subjectStatus?: import("../types").SubjectRuntimeStatus;
   semanticCatalog: SemanticLabelDescriptor[];
   semanticGroups: SemanticGroupSummary[];
   folders: FolderSummary[];
@@ -45,15 +46,28 @@ const semanticCatalog: SemanticLabelDescriptor[] = [
   ["photo_documentary", "纪实与工业"],
   ["indoor", "室内"],
   ["outdoor", "室外"],
+  ["person", "人物"],
+  ["group", "多人"],
+  ["portrait", "人像"],
+  ["animal", "动物"],
+  ["pet", "宠物"],
+  ["vehicle", "车辆"],
+  ["food", "食品"],
+  ["plant", "植物"],
 ].map(([id, displayName]) => ({
   id,
   displayName,
   categoryGroup: id.startsWith("photo_")
     ? "scene"
-    : "context",
-  threshold: 0.16,
+    : ["person", "group", "portrait", "animal", "pet", "vehicle", "food", "plant"].includes(id)
+      ? "subject"
+      : "context",
+  threshold: id === "portrait" ? 0.65 : 0.16,
   isPrimaryCategory: id.startsWith("photo_"),
-  taxonomyVersion: "photo-organizer-photography-topics-v1",
+  taxonomyVersion:
+    id.startsWith("photo_") || id === "indoor" || id === "outdoor"
+      ? "photo-organizer-photography-topics-v1"
+      : "photo-organizer-subject-tags-v1",
 }));
 
 const library: LibrarySummary = {
@@ -208,7 +222,8 @@ export function visualFixtureFromSearch(search: string): VisualFixture | null {
         : null,
     semanticStatus: {
       status: "ready",
-      message: "Places365 ResNet-18 已就绪；拍摄题材使用本地 365 类模型，向量搜索使用本地 TinyCLIP。",
+      message:
+        "Places365 ResNet-18 已就绪；拍摄题材使用本地 365 类模型，向量搜索使用本地 TinyCLIP。",
       model: {
         name: "Places365-ResNet18",
         version: "onnx-2026-08-10",
@@ -217,6 +232,31 @@ export function visualFixtureFromSearch(search: string): VisualFixture | null {
         installed: true,
         modelSizeBytes: 45_575_731,
         modelSha256: "3c3cd0d42693e2957fcaa0bc365ce78e169a2e1162356742adfbd11077e8f7bf",
+        supportedBackends: ["cpu"],
+      },
+      selectedBackend: "cpu",
+    },
+    subjectStatus: {
+      status: "ready",
+      message: "PicoDet 主体检测与 YuNet 人像辅助模型均已就绪。",
+      model: {
+        name: "PicoDet-S-COCO",
+        version: "onnx-2026-08-10",
+        analysisVersion: "photo-organizer-subject-picodet-yunet-v1",
+        license: "Apache-2.0",
+        installed: true,
+        modelSizeBytes: 4_792_914,
+        modelSha256: "09fc88131be8ad224f13739a5cf8fc838600d76a77539af7f0400fa90506c5f3",
+        supportedBackends: ["cpu"],
+      },
+      faceModel: {
+        name: "YuNet-FaceDetector",
+        version: "onnx-2023mar",
+        analysisVersion: "photo-organizer-subject-picodet-yunet-v1",
+        license: "MIT",
+        installed: true,
+        modelSizeBytes: 232_589,
+        modelSha256: "8f2383e4dd3cfbb4553ea8718107fc0423210dc964f9f4280604804ed2552fa4",
         supportedBackends: ["cpu"],
       },
       selectedBackend: "cpu",
@@ -297,9 +337,7 @@ function semanticLabelsFor(index: number) {
       analyzedAt: "2026-08-07T03:12:00Z",
       isManual: false,
       isPrimary: rank === 0,
-      categoryGroup: labelId.startsWith("photo_")
-        ? "scene"
-        : "context",
+      categoryGroup: labelId.startsWith("photo_") ? "scene" : "context",
     }));
 }
 

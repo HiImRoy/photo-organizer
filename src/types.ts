@@ -297,6 +297,14 @@ export interface SemanticRuntimeStatus {
   selectedBackend: string | null;
 }
 
+export interface SubjectRuntimeStatus {
+  status: string;
+  message: string;
+  model: ModelMetadata;
+  faceModel: ModelMetadata;
+  selectedBackend: string | null;
+}
+
 export interface SemanticLabelDescriptor {
   id: string;
   displayName: string;

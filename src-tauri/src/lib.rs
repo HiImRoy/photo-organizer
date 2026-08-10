@@ -12,6 +12,7 @@ pub mod scanner;
 pub mod semantic;
 pub mod semantic_tasks;
 pub mod source_identity;
+pub mod subject;
 pub mod tasks;
 pub mod workflow;
 
@@ -57,11 +58,25 @@ pub fn run() {
                         ))
                     }
                 };
+            let subject: std::sync::Arc<dyn subject::SubjectClassifier> =
+                match subject::SubjectModel::load(
+                    &paths.subject_model_dir,
+                    &paths.face_model_dir,
+                    &paths.onnx_runtime_path,
+                ) {
+                    Ok(classifier) => std::sync::Arc::new(classifier),
+                    Err(error) => {
+                        log::warn!("subject model unavailable: {error}");
+                        std::sync::Arc::new(subject::UnavailableSubjectClassifier::with_message(
+                            error.to_string(),
+                        ))
+                    }
+                };
             log::info!(
                 "PhotoOrganizer data directory: {}",
                 paths.data_dir.display()
             );
-            let state = ipc::AppState::new(repository, paths, semantic);
+            let state = ipc::AppState::new(repository, paths, semantic, subject);
             ipc::resume_pending_semantic_jobs(app.handle().clone(), &state);
             app.manage(state);
             Ok(())
@@ -89,6 +104,9 @@ pub fn run() {
             ipc::get_semantic_status,
             ipc::prepare_semantic_model,
             ipc::get_semantic_catalog,
+            ipc::get_subject_status,
+            ipc::prepare_subject_model,
+            ipc::clear_subject_data,
             ipc::list_library_folders,
             ipc::list_semantic_groups,
             ipc::get_semantic_progress,

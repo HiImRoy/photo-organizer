@@ -35,6 +35,16 @@
 
 `asset_id`、稳定英文 `label`、中文 `display_name`、原始 `similarity`、使用的 `threshold`、`model_name`、`model_version`、`analysis_version`、`source_fingerprint`、`generated_at`、`is_manual`、`is_excluded`、`is_primary`。相似度不命名为 probability/accuracy。
 
+### `subject_analysis_runs`
+
+按 `asset_id + source_fingerprint + model_name + model_version + analysis_version + taxonomy_version` 唯一记录主体模型是否完成。保存 `completed/failed` 状态、错误和时间；空结果也写入 `completed`，避免每次浏览都重复检测。该表只保存派生分析状态，不保存原图路径副本、人脸框或身份信息。
+
+### `subject_labels`
+
+保存主体模型聚合出的稳定英文 `label`、中文 `display_name`、检测分数 `similarity`、阈值、模型/分析/分类法版本、来源 fingerprint 和生成时间。主体标签与 `semantic_labels` 分表，查询时只在读取层合并；表中没有 `is_primary`，因此主体标签不能成为主类别。
+
+当前主体模型链为 PicoDet-S COCO 80 类检测器和 YuNet 人脸辅助检测器。应用只保存聚合后的 `人物`、`多人`、`人像`、`动物`、`宠物`、`车辆`、`食品`、`植物`，不保存检测框、关键点、脸部裁剪、embedding 或身份簇。
+
 ### `semantic_models`
 
 记录模型/分析版本、许可证、来源、模型/tokenizer SHA-256 与路径、实际 execution backend、安装时间和 active 状态。UI backend 来自实际加载状态，不从枚举推断。
@@ -74,7 +84,7 @@
 ## 增量规则
 
 - 稳定身份由 `library_id + absolute_path` 保证；相同路径的大小或修改时间变化会更新 fingerprint 并使缩略图/分析失效。
-- fingerprint 起步使用内容摘要；语义查询只有在 `source_fingerprint = assets.fingerprint` 且模型/分析版本为当前值时才采用结果。
+- fingerprint 起步使用内容摘要；语义和主体查询只有在 `source_fingerprint = assets.fingerprint` 且模型/分析/分类法版本为当前值时才采用结果。
 - 每次扫描生成 `scan_started_at`，成功发现的记录更新 `last_seen_at`；扫描自然完成后，本轮未见记录标为 missing。取消扫描不批量标 missing，避免把未遍历部分误判为缺失。
 - 重启时 semantic running/cancelling 任务和 running item 恢复为 queued 并自动继续；paused 保持暂停，已完成 item 不重复执行。
 

@@ -26,6 +26,7 @@ import type {
   SemanticLabelDescriptor,
   SemanticProgress,
   SemanticRuntimeStatus,
+  SubjectRuntimeStatus,
   SimilarAsset,
   SimilarityClusterResponse,
   WorkflowAsset,
@@ -350,6 +351,43 @@ export async function fetchSemanticStatus(): Promise<SemanticRuntimeStatus> {
 export async function prepareSemanticModel(): Promise<SemanticRuntimeStatus> {
   if (!desktopRuntime) throw new Error("模型准备仅在桌面应用中可用。");
   return invoke<SemanticRuntimeStatus>("prepare_semantic_model");
+}
+
+function browserSubjectStatus(): SubjectRuntimeStatus {
+  const unavailable = {
+    name: "none",
+    version: "0",
+    analysisVersion: "subject-interface-v1",
+    license: null,
+    installed: false,
+    modelSizeBytes: null,
+    modelSha256: null,
+    supportedBackends: ["cpu"],
+  };
+  return {
+    status: "model_unavailable",
+    message: "浏览器预览不加载本地主体模型。",
+    model: unavailable,
+    faceModel: { ...unavailable, name: "none-face" },
+    selectedBackend: null,
+  };
+}
+
+export async function fetchSubjectStatus(): Promise<SubjectRuntimeStatus> {
+  const visual = await getVisualFixture();
+  if (visual) return visual.fixture.subjectStatus ?? browserSubjectStatus();
+  if (!desktopRuntime) return browserSubjectStatus();
+  return invoke<SubjectRuntimeStatus>("get_subject_status");
+}
+
+export async function prepareSubjectModel(): Promise<SubjectRuntimeStatus> {
+  if (!desktopRuntime) throw new Error("主体模型准备仅在桌面应用中可用。");
+  return invoke<SubjectRuntimeStatus>("prepare_subject_model");
+}
+
+export async function clearSubjectData(): Promise<number> {
+  if (!desktopRuntime) return 0;
+  return invoke<number>("clear_subject_data");
 }
 
 export async function fetchSemanticCatalog(): Promise<SemanticLabelDescriptor[]> {

@@ -255,7 +255,7 @@ pub trait SemanticClassifier: Send + Sync {
 }
 
 pub fn semantic_catalog() -> Vec<SemanticLabelDescriptor> {
-    LABELS
+    let mut catalog = LABELS
         .iter()
         .map(|label| SemanticLabelDescriptor {
             id: label.id.into(),
@@ -265,7 +265,9 @@ pub fn semantic_catalog() -> Vec<SemanticLabelDescriptor> {
             is_primary_category: is_primary_category(label.id),
             taxonomy_version: TAXONOMY_VERSION.into(),
         })
-        .collect()
+        .collect::<Vec<_>>();
+    catalog.extend(crate::subject::subject_catalog());
+    catalog
 }
 
 pub fn known_display_name_for_label_id(label_id: &str) -> Option<&'static str> {
@@ -273,6 +275,7 @@ pub fn known_display_name_for_label_id(label_id: &str) -> Option<&'static str> {
         return Some("未知");
     }
     let legacy_name = match label_id {
+        "person" => Some("人物"),
         "portrait" => Some("人像"),
         "group" => Some("多人"),
         "landscape" => Some("风景"),
@@ -285,6 +288,8 @@ pub fn known_display_name_for_label_id(label_id: &str) -> Option<&'static str> {
         "document" => Some("文档"),
         "abstract" => Some("抽象"),
         "vehicle" => Some("车辆"),
+        "pet" => Some("宠物"),
+        "plant" => Some("植物"),
         "flower" => Some("花卉"),
         "mountain" => Some("山"),
         "water" => Some("水体"),
@@ -308,9 +313,10 @@ pub fn category_group_for_label_id(label_id: &str) -> Option<&'static str> {
         return Some("scene");
     }
     let legacy_group = match label_id {
-        "portrait" | "group" | "landscape" | "architecture" | "product" | "still_life" | "food"
-        | "animal" | "screenshot" | "document" | "abstract" => Some("scene"),
-        "vehicle" | "flower" | "mountain" | "water" | "forest" => Some("subject"),
+        "person" | "portrait" | "group" | "animal" | "pet" | "vehicle" | "plant" => Some("subject"),
+        "landscape" | "architecture" | "product" | "still_life" | "food" | "screenshot"
+        | "document" | "abstract" => Some("scene"),
+        "flower" | "mountain" | "water" | "forest" => Some("subject"),
         "street" | "night" | "sunset" | "indoor" | "outdoor" => Some("context"),
         _ => None,
     };
@@ -1070,7 +1076,7 @@ fn places365_raw_similarities(
         .collect()
 }
 
-fn initialize_ort(runtime_path: &Path) -> Result<(), SemanticError> {
+pub(crate) fn initialize_ort(runtime_path: &Path) -> Result<(), SemanticError> {
     let canonical = runtime_path.canonicalize().map_err(|error| {
         SemanticError::Inference(format!("could not locate ONNX Runtime: {error}"))
     })?;
@@ -1119,7 +1125,7 @@ fn validate_model_contract(session: &Session) -> Result<(), SemanticError> {
     Ok(())
 }
 
-fn verify_sha256(path: &Path, expected: &str) -> Result<(), SemanticError> {
+pub(crate) fn verify_sha256(path: &Path, expected: &str) -> Result<(), SemanticError> {
     let mut file = File::open(path)
         .map_err(|error| SemanticError::Integrity(format!("{}: {error}", path.display())))?;
     let mut hasher = Sha256::new();
@@ -1328,13 +1334,13 @@ fn candidates_for_group(scores: &[f32], group: &str) -> Vec<(usize, f32)> {
         .collect()
 }
 
-fn cpu_thread_count() -> usize {
+pub(crate) fn cpu_thread_count() -> usize {
     std::thread::available_parallelism()
         .map(|value| value.get().clamp(1, 8))
         .unwrap_or(1)
 }
 
-fn inference_error(error: impl std::fmt::Display) -> SemanticError {
+pub(crate) fn inference_error(error: impl std::fmt::Display) -> SemanticError {
     SemanticError::Inference(error.to_string())
 }
 
@@ -1541,7 +1547,7 @@ mod tests {
     #[test]
     fn catalog_has_stable_unique_ids_and_group_metadata() {
         let catalog = semantic_catalog();
-        assert_eq!(catalog.len(), 13);
+        assert_eq!(catalog.len(), 21);
         let mut ids = catalog
             .iter()
             .map(|label| label.id.as_str())
@@ -1561,11 +1567,17 @@ mod tests {
                 .count(),
             11
         );
-        assert!(
+        assert_eq!(
             catalog
                 .iter()
-                .all(|label| label.taxonomy_version == TAXONOMY_VERSION)
+                .filter(|label| label.category_group == "subject")
+                .count(),
+            8
         );
+        assert!(catalog
+            .iter()
+            .filter(|label| label.category_group == "scene" || label.category_group == "context")
+            .all(|label| label.taxonomy_version == TAXONOMY_VERSION));
         assert!(
             catalog
                 .iter()

@@ -6,6 +6,7 @@ import type {
   SemanticGroupSummary,
   SemanticLabelDescriptor,
   SemanticRuntimeStatus,
+  SubjectRuntimeStatus,
 } from "../types";
 import { UNKNOWN_SEMANTIC_LABEL } from "../classificationLabels";
 import { ChevronIcon, LibraryIcon, ShieldIcon } from "./Icons";
@@ -17,6 +18,7 @@ interface SidebarProps {
   catalog: SemanticLabelDescriptor[];
   filter: AssetFilter;
   semanticStatus: SemanticRuntimeStatus | null;
+  subjectStatus?: SubjectRuntimeStatus | null;
   onImportLibrary: () => void;
   onSelectLibrary: (id: number) => void;
   onRescanLibrary: (library: LibrarySummary) => void;
@@ -59,6 +61,7 @@ export function Sidebar(props: SidebarProps) {
     catalog,
     filter,
     semanticStatus,
+    subjectStatus,
     onImportLibrary,
     onSelectLibrary,
     onRescanLibrary,
@@ -430,6 +433,19 @@ export function Sidebar(props: SidebarProps) {
             </span>
             <small className={semanticStatus?.status === "ready" ? "status-ready" : ""}>
               {semanticStatus?.status === "ready" ? "本地语义模型 · 本地计算" : "语义模型未就绪"}
+            </small>
+            <small
+              className={
+                subjectStatus?.status === "ready" || subjectStatus?.status === "partial"
+                  ? "status-ready"
+                  : ""
+              }
+            >
+              {subjectStatus?.status === "ready"
+                ? "主体模型 · PicoDet + YuNet"
+                : subjectStatus?.status === "partial"
+                  ? "主体模型 · 人像辅助不可用"
+                  : "主体模型未就绪"}
             </small>
           </div>
         </div>
