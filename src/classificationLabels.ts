@@ -3,20 +3,24 @@ import type { SemanticLabelDescriptor } from "./types";
 export type ClassificationValueKind = "primary" | "tag" | "tone" | "color" | "saturation";
 
 export const PRIMARY_CATEGORY_OPTIONS = [
-  ["portrait", "人像"],
-  ["landscape", "风景"],
-  ["architecture", "建筑"],
-  ["product", "静物"],
-  ["animal", "动物"],
-  ["document", "文档"],
-  ["other", "其他"],
+  ["photo_landscape", "风光自然"],
+  ["photo_urban", "城市街拍"],
+  ["photo_architecture", "建筑与空间"],
+  ["photo_food", "美食餐饮"],
+  ["photo_commercial", "商业与静物"],
+  ["photo_indoor", "室内与生活"],
+  ["photo_travel", "旅行人文"],
+  ["photo_event", "活动与运动"],
+  ["photo_transport", "交通与汽车"],
+  ["photo_plant", "植物与园艺"],
+  ["photo_documentary", "纪实与工业"],
   ["unknown", "未知"],
 ] as const;
 
 export const AUXILIARY_TAG_OPTIONS = [
-  ["group", "多人"],
   ["indoor", "室内"],
-  ["street", "街道"],
+  ["outdoor", "室外"],
+  ["group", "多人"],
   ["vehicle", "车辆"],
   ["food", "食品"],
   ["night", "夜景"],
@@ -54,6 +58,18 @@ const FALLBACK_LABELS = new Map<string, string>([
   ...COLOR_OPTIONS,
   ...SATURATION_OPTIONS,
   ...AUXILIARY_TAG_OPTIONS,
+  // Compatibility labels for databases created before the photography-topic
+  // taxonomy. They remain readable but are not offered as new choices.
+  ["scene_nature", "自然风景与地貌"],
+  ["scene_urban", "城市街道与社区"],
+  ["scene_architecture", "建筑、地标与宗教"],
+  ["scene_commerce", "餐饮与商业"],
+  ["scene_residential", "居住与生活空间"],
+  ["scene_public", "工作、教育、医疗与公共室内"],
+  ["scene_transport", "交通、旅行与交通设施"],
+  ["scene_sports", "运动、娱乐与活动"],
+  ["scene_industrial", "工业、施工、能源与军事"],
+  ["scene_agriculture", "农业、园林与户外休闲"],
   ["still_life", "静物"],
   ["screenshot", "截图"],
   ["mountain", "山"],
@@ -61,6 +77,12 @@ const FALLBACK_LABELS = new Map<string, string>([
   ["forest", "森林"],
   ["sunset", "日落"],
   ["other", "其他"],
+  ["portrait", "人像"],
+  ["landscape", "风景"],
+  ["architecture", "建筑"],
+  ["product", "产品"],
+  ["animal", "动物"],
+  ["document", "文档"],
 ]);
 
 export const UNKNOWN_SEMANTIC_LABEL: SemanticLabelDescriptor = {
@@ -69,13 +91,13 @@ export const UNKNOWN_SEMANTIC_LABEL: SemanticLabelDescriptor = {
   categoryGroup: "scene",
   threshold: 0,
   isPrimaryCategory: true,
-  taxonomyVersion: "photo-organizer-taxonomy-v2",
+  taxonomyVersion: "photo-organizer-photography-topics-v1",
 };
 
 export function classificationFieldLabel(field: string): string {
   switch (field) {
     case "primary_category":
-      return "场景分类";
+      return "拍摄题材";
     case "auxiliary_tags":
       return "辅助标签";
     case "tone":
@@ -123,10 +145,23 @@ export function classificationValuesLabel(
   return values.map((value) => classificationValueLabel(value, kind, catalog)).join("、");
 }
 
-export function primaryCategoryOptions(catalog: SemanticLabelDescriptor[]) {
+export function primaryCategoryOptions(
+  catalog: SemanticLabelDescriptor[],
+  selectedValue?: string | null,
+) {
+  const selectedCompatibilityOption = selectedValue &&
+    !catalog.some((item) => item.id === selectedValue) &&
+    selectedValue !== "unknown"
+    ? [{ value: selectedValue, label: classificationValueLabel(selectedValue, "primary", catalog) }]
+    : [];
   return mergeOptions(
-    PRIMARY_CATEGORY_OPTIONS.map(([value, label]) => ({ value, label })),
-    catalog.filter((item) => item.isPrimaryCategory),
+    catalog
+      .filter((item) => item.isPrimaryCategory)
+      .map((item) => ({ value: item.id, label: item.displayName })),
+    [
+      ...PRIMARY_CATEGORY_OPTIONS.map(([value, label]) => ({ value, label })),
+      ...selectedCompatibilityOption,
+    ],
   );
 }
 

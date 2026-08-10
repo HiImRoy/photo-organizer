@@ -11,6 +11,7 @@ pub struct AppPaths {
     pub preview_dir: PathBuf,
     pub log_dir: PathBuf,
     pub semantic_model_dir: PathBuf,
+    pub tinyclip_model_dir: PathBuf,
     pub onnx_runtime_path: PathBuf,
 }
 
@@ -39,9 +40,14 @@ impl AppPaths {
         let development_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("resources");
         let resource_root = if packaged_root
             .join("models")
-            .join("tinyclip-vit-8m-16-text-3m-yfcc15m")
+            .join("places365-resnet18")
             .join(crate::semantic::MODEL_FILE)
             .is_file()
+            || packaged_root
+                .join("models")
+                .join("tinyclip-vit-8m-16-text-3m-yfcc15m")
+                .join(crate::semantic::TINYCLIP_MODEL_FILE)
+                .is_file()
         {
             packaged_root
         } else {
@@ -58,7 +64,8 @@ impl AppPaths {
             thumbnail_dir,
             preview_dir,
             log_dir,
-            semantic_model_dir: resource_root
+            semantic_model_dir: resource_root.join("models").join("places365-resnet18"),
+            tinyclip_model_dir: resource_root
                 .join("models")
                 .join("tinyclip-vit-8m-16-text-3m-yfcc15m"),
             onnx_runtime_path: resource_root.join("runtime").join("onnxruntime.dll"),

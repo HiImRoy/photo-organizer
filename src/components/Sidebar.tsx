@@ -288,7 +288,7 @@ export function Sidebar(props: SidebarProps) {
 
         <div className="sidebar-filter-area">
           <SemanticFilterSection
-            title="场景分类"
+            title="拍摄题材"
             categoryGroup="scene"
             labels={[
               ...catalog.filter((label) => label.categoryGroup === "scene"),
@@ -726,7 +726,10 @@ function SemanticFilterSection({
                 onFilterChange({
                   ...filter,
                   ...(primary
-                    ? { primaryCategories: toggleValue(filter.primaryCategories, label.id) }
+                    ? {
+                        primaryCategories:
+                          filter.primaryCategories[0] === label.id ? [] : [label.id],
+                      }
                     : { auxiliaryTags: toggleValue(filter.auxiliaryTags, label.id) }),
                 })
               }

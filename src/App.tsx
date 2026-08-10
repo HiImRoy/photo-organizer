@@ -1314,7 +1314,7 @@ export default function App() {
               setBatchValue([]);
             }}
           >
-            <option value="primary_category">场景分类</option>
+            <option value="primary_category">拍摄题材</option>
             <option value="tone">影调</option>
             <option value="dominant_color_category">主色</option>
             <option value="saturation_level">饱和度级别</option>
@@ -1324,7 +1324,7 @@ export default function App() {
               value={batchValue[0] ?? ""}
               onChange={(event) => setBatchValue(event.target.value ? [event.target.value] : [])}
             >
-              <option value="">请选择场景分类</option>
+              <option value="">请选择拍摄题材</option>
               {primaryCategoryOptions(semanticCatalog).map((option) => (
                 <option value={option.value} key={option.value}>
                   {option.label}
@@ -1502,7 +1502,7 @@ export default function App() {
                             checked={groupBySemantic}
                             onChange={(event) => setGroupBySemantic(event.target.checked)}
                           />
-                          按场景分类分组
+                          按拍摄题材分组
                         </label>
                       </div>
                     </div>
@@ -2183,7 +2183,7 @@ function buildFilterConditions(
     conditions,
     filter,
     "primaryCategories",
-    "场景分类",
+    "拍摄题材",
     "primary",
     catalog,
   );

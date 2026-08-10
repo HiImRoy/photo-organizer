@@ -23,7 +23,7 @@ use crate::scanner::{
     discover_import_source_roots, scan_library, scan_library_tree, validate_scan_root_with_app_data,
 };
 use crate::semantic::{
-    SemanticClassifier, SemanticLabelDescriptor, SemanticRuntimeStatus, TinyClipClassifier,
+    Places365Classifier, SemanticClassifier, SemanticLabelDescriptor, SemanticRuntimeStatus,
     semantic_catalog,
 };
 use crate::semantic_tasks::spawn_semantic_job;
@@ -492,8 +492,9 @@ pub fn get_semantic_status(state: State<'_, AppState>) -> Result<SemanticRuntime
 
 #[tauri::command]
 pub fn prepare_semantic_model(state: State<'_, AppState>) -> Result<SemanticRuntimeStatus, String> {
-    let classifier = TinyClipClassifier::load(
+    let classifier = Places365Classifier::load(
         &state.paths.semantic_model_dir,
+        &state.paths.tinyclip_model_dir,
         &state.paths.onnx_runtime_path,
     )
     .map_err(|error| error.to_string())?;

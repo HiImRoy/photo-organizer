@@ -262,7 +262,7 @@ describe("PhotoOrganizer application shell", () => {
     render(<App />);
 
     const categoryButton = await screen.findByRole("button", { name: "人像" });
-    const categorySection = screen.getByText("场景分类").closest(".panel-section");
+    const categorySection = screen.getByText("拍摄题材").closest(".panel-section");
     const countBadge = categorySection?.querySelector(".panel-section-heading small");
 
     expect(countBadge).toHaveClass("is-placeholder");
@@ -429,7 +429,7 @@ describe("PhotoOrganizer application shell", () => {
     api.fetchClassificationRegistry.mockResolvedValue([
       {
         id: "primary_category",
-        displayName: "场景分类",
+        displayName: "拍摄题材",
         kind: "single",
         filterable: true,
         supportsManualOverride: true,

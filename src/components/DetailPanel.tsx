@@ -157,7 +157,7 @@ export function DetailPanel({
                         <small>拒识状态</small>
                       </span>
                       <strong>—</strong>
-                      <p>没有任何模型相似度分数达到可靠场景分类条件。</p>
+                      <p>没有任何模型相似度分数达到可靠拍摄题材条件。</p>
                     </div>
                   ) : null}
                   {asset.semanticLabels.map((label) => (
@@ -317,7 +317,10 @@ function ClassificationEditor({
   );
   const [saturation, setSaturation] = useState(classification.saturationLevel.effective ?? "");
   const [tagChoice, setTagChoice] = useState("");
-  const primaryOptions = primaryCategoryOptions(catalog);
+  const primaryOptions = primaryCategoryOptions(
+    catalog,
+    classification.primaryCategory.effective,
+  );
   const tagOptions = auxiliaryTagOptions(catalog, classification.auxiliaryTags.effective);
 
   const save = (field: string, value: string | string[]) => {
@@ -331,7 +334,7 @@ function ClassificationEditor({
   };
 
   const summary = [
-    `场景分类：${classificationValueLabel(classification.primaryCategory.effective, "primary", catalog)}`,
+    `拍摄题材：${classificationValueLabel(classification.primaryCategory.effective, "primary", catalog)}`,
     `影调：${classificationValueLabel(classification.tone.effective, "tone", catalog)}`,
     `主色：${classificationValuesLabel(
       classification.dominantColorCategories.effective,
@@ -367,7 +370,7 @@ function ClassificationEditor({
         <div className="classification-editor">
           {registryIds.has("primary_category") ? (
             <ClassificationRow
-              label="场景分类"
+              label="拍摄题材"
               auto={classificationValueLabel(
                 classification.primaryCategory.auto,
                 "primary",
@@ -386,7 +389,7 @@ function ClassificationEditor({
               source={classification.primaryCategory.source}
               control={
                 <select value={primary} onChange={(event) => setPrimary(event.target.value)}>
-                  <option value="">请选择场景分类</option>
+                  <option value="">请选择拍摄题材</option>
                   {primaryOptions.map((option) => (
                     <option value={option.value} key={option.value}>
                       {option.label}
@@ -627,7 +630,7 @@ function semanticStateLabel(status: string) {
 function semanticGroupLabel(group: string) {
   switch (group) {
     case "scene":
-      return "场景分类";
+      return "拍摄题材";
     case "subject":
       return "主体标签";
     case "context":

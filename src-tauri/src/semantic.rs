@@ -13,26 +13,43 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tokenizers::{PaddingParams, PaddingStrategy, Tokenizer, TruncationParams};
 
-pub const MODEL_NAME: &str = "TinyCLIP-ViT-8M-16-Text-3M-YFCC15M";
-pub const MODEL_VERSION: &str = "onnx-int8-2025-08-06";
-pub const ANALYSIS_VERSION: &str = "photo-organizer-semantic-v2";
-pub const TAXONOMY_VERSION: &str = "photo-organizer-taxonomy-v2";
-pub const MODEL_FILE: &str = "model-int8.onnx";
-pub const TOKENIZER_FILE: &str = "tokenizer.json";
-pub const MODEL_SHA256: &str = "10921310ddef06557ec1598d1260470a0a4db53f70ffe0deb60b946dcad6d27a";
+use crate::places365;
+
+pub const MODEL_NAME: &str = "Places365-ResNet18";
+pub const MODEL_VERSION: &str = "onnx-2026-08-10";
+pub const ANALYSIS_VERSION: &str = "photo-organizer-semantic-places365-photography-v1";
+pub const TAXONOMY_VERSION: &str = places365::TAXONOMY_VERSION;
+pub const MODEL_FILE: &str = "resnet18_places365.onnx";
+pub const TOKENIZER_FILE: &str = "categories_places365.txt";
+pub const IO_FILE: &str = "IO_places365.txt";
+pub const MODEL_SHA256: &str = "3c3cd0d42693e2957fcaa0bc365ce78e169a2e1162356742adfbd11077e8f7bf";
 pub const TOKENIZER_SHA256: &str =
+    "6cc3f1f8eae85b7016dc634e2d333cdcce5fd16cfada4afd87977fff5f8b12ba";
+pub const IO_SHA256: &str = "d7e6abfeb228d789720326e630bedd231a7eaedcae8fd13d6d9dcd8eca95f59e";
+pub const TINYCLIP_MODEL_NAME: &str = "TinyCLIP-ViT-8M-16-Text-3M-YFCC15M";
+pub const TINYCLIP_MODEL_VERSION: &str = "onnx-int8-2025-08-06";
+pub const TINYCLIP_MODEL_FILE: &str = "model-int8.onnx";
+pub const TINYCLIP_TOKENIZER_FILE: &str = "tokenizer.json";
+pub const TINYCLIP_MODEL_SHA256: &str =
+    "10921310ddef06557ec1598d1260470a0a4db53f70ffe0deb60b946dcad6d27a";
+pub const TINYCLIP_TOKENIZER_SHA256: &str =
     "6d9109cc838977f3ca94a379eec36aecc7c807e1785cd729660ca2fc0171fb35";
 pub const RUNTIME_SHA256: &str = "8a1aad8d59d02a5337d4e3f5bbd1158c3f7bf84fe3b3f0052f957dd3e75a91cb";
 pub const EMBEDDING_DIMENSIONS: usize = 512;
 
 const IMAGE_SIZE: usize = 224;
+const PLACES365_IMAGE_SIZE: usize = 224;
 const TOKEN_LENGTH: usize = 77;
 const PAD_TOKEN_ID: u32 = 49_407;
 const MAX_LABELS: usize = 8;
 const TOP_SCORE_WINDOW: f32 = 0.055;
 const SCENE_SCORE_MARGIN: f32 = 0.025;
+const PLACES365_SCENE_MIN_PROBABILITY: f32 = 0.24;
+const PLACES365_SCENE_MIN_MARGIN: f32 = 0.045;
 const IMAGE_MEAN: [f32; 3] = [0.481_454_66, 0.457_827_5, 0.408_210_73];
 const IMAGE_STD: [f32; 3] = [0.268_629_54, 0.261_302_6, 0.275_777_1];
+const PLACES365_IMAGE_MEAN: [f32; 3] = [0.485, 0.456, 0.406];
+const PLACES365_IMAGE_STD: [f32; 3] = [0.229, 0.224, 0.225];
 
 static ORT_RUNTIME: OnceLock<Result<PathBuf, String>> = OnceLock::new();
 
@@ -118,178 +135,98 @@ struct LabelDefinition {
     threshold: f32,
 }
 
-const LABELS: [LabelDefinition; 21] = [
+const LABELS: [LabelDefinition; 13] = [
     LabelDefinition {
-        id: "portrait",
-        display_name: "人像",
-        prompt: "a portrait photograph of one person",
+        id: "photo_landscape",
+        display_name: "风光自然",
+        prompt: "a landscape or nature photograph with mountains, water, forest, coast, or other landform",
         category_group: "scene",
         threshold: 0.16,
     },
     LabelDefinition {
-        id: "group",
-        display_name: "多人",
-        prompt: "a photograph of a group of people",
+        id: "photo_urban",
+        display_name: "城市街拍",
+        prompt: "a street photography scene in a city, town, neighborhood, village, or public outdoor area",
         category_group: "scene",
         threshold: 0.16,
     },
     LabelDefinition {
-        id: "landscape",
-        display_name: "风景",
-        prompt: "a landscape photography scene",
+        id: "photo_architecture",
+        display_name: "建筑与空间",
+        prompt: "an architectural photograph of a building, landmark, historical site, bridge, castle, temple, or religious space",
         category_group: "scene",
         threshold: 0.16,
     },
     LabelDefinition {
-        id: "architecture",
-        display_name: "建筑",
-        prompt: "an architectural photograph of a building",
+        id: "photo_food",
+        display_name: "美食餐饮",
+        prompt: "a food or dining photograph showing a dish, restaurant, cafe, market, kitchen, or dining space",
         category_group: "scene",
         threshold: 0.16,
     },
     LabelDefinition {
-        id: "product",
-        display_name: "产品",
-        prompt: "a commercial product photograph isolated for a catalog",
+        id: "photo_commercial",
+        display_name: "商业与静物",
+        prompt: "a commercial, product, shop, market, salon, or still life photograph",
         category_group: "scene",
         threshold: 0.16,
     },
     LabelDefinition {
-        id: "still_life",
-        display_name: "静物",
-        prompt: "a still life photograph of arranged objects",
+        id: "photo_indoor",
+        display_name: "室内与生活",
+        prompt: "an interior or everyday life photograph inside a home, office, school, library, laboratory, hospital, or public room",
         category_group: "scene",
         threshold: 0.16,
     },
     LabelDefinition {
-        id: "food",
-        display_name: "食品",
-        prompt: "a food photography image",
+        id: "photo_travel",
+        display_name: "旅行人文",
+        prompt: "a travel or cultural documentary photograph showing a destination, museum, hotel, airport, station, harbor, or local experience",
         category_group: "scene",
         threshold: 0.16,
     },
     LabelDefinition {
-        id: "animal",
-        display_name: "动物",
-        prompt: "a photograph of an animal",
+        id: "photo_event",
+        display_name: "活动与运动",
+        prompt: "an event, sports, performance, entertainment, stadium, theater, amusement park, or pool photograph",
         category_group: "scene",
         threshold: 0.16,
     },
     LabelDefinition {
-        id: "screenshot",
-        display_name: "截图",
-        prompt: "a computer or phone screenshot of a user interface",
-        category_group: "scene",
-        threshold: 0.17,
-    },
-    LabelDefinition {
-        id: "document",
-        display_name: "文档",
-        prompt: "a scanned document or a photographed page with text",
-        category_group: "scene",
-        threshold: 0.17,
-    },
-    LabelDefinition {
-        id: "abstract",
-        display_name: "抽象",
-        prompt: "an abstract image with shapes, patterns, or textures",
+        id: "photo_transport",
+        display_name: "交通与汽车",
+        prompt: "a transportation or automobile photograph showing a vehicle, road, garage, parking area, rail track, or transport facility",
         category_group: "scene",
         threshold: 0.16,
     },
     LabelDefinition {
-        id: "other",
-        display_name: "其他",
-        prompt: "a recognizable photograph outside the listed scene categories",
+        id: "photo_plant",
+        display_name: "植物与园艺",
+        prompt: "a plant, garden, orchard, greenhouse, cultivated field, park, or horticulture photograph",
         category_group: "scene",
         threshold: 0.16,
     },
     LabelDefinition {
-        id: "vehicle",
-        display_name: "车辆",
-        prompt: "a photograph of a car, truck, train, or other vehicle",
-        category_group: "subject",
-        threshold: 0.16,
-    },
-    LabelDefinition {
-        id: "flower",
-        display_name: "花卉",
-        prompt: "a close photograph of flowers or blossoms",
-        category_group: "subject",
-        threshold: 0.16,
-    },
-    LabelDefinition {
-        id: "mountain",
-        display_name: "山",
-        prompt: "a mountain landscape photograph",
-        category_group: "subject",
-        threshold: 0.16,
-    },
-    LabelDefinition {
-        id: "water",
-        display_name: "水体",
-        prompt: "a photograph of the ocean, a lake, river, or other water",
-        category_group: "subject",
-        threshold: 0.16,
-    },
-    LabelDefinition {
-        id: "forest",
-        display_name: "森林",
-        prompt: "a forest or woodland photograph",
-        category_group: "subject",
+        id: "photo_documentary",
+        display_name: "纪实与工业",
+        prompt: "an industrial, construction, worksite, utility, repair, military, or documentary photograph",
+        category_group: "scene",
         threshold: 0.16,
     },
     LabelDefinition {
         id: "indoor",
         display_name: "室内",
-        prompt: "an indoor room or interior photograph",
+        prompt: "an indoor scene inside a room or building",
         category_group: "context",
         threshold: 0.16,
     },
     LabelDefinition {
-        id: "street",
-        display_name: "街道",
-        prompt: "a street photography scene",
+        id: "outdoor",
+        display_name: "室外",
+        prompt: "an outdoor scene under the open sky",
         category_group: "context",
         threshold: 0.16,
     },
-    LabelDefinition {
-        id: "night",
-        display_name: "夜景",
-        prompt: "a night photography scene after dark",
-        category_group: "context",
-        threshold: 0.16,
-    },
-    LabelDefinition {
-        id: "sunset",
-        display_name: "日落",
-        prompt: "a sunset or sunrise photograph",
-        category_group: "context",
-        threshold: 0.16,
-    },
-];
-
-const ACTIVE_LABEL_IDS: [&str; 21] = [
-    "portrait",
-    "group",
-    "landscape",
-    "architecture",
-    "product",
-    "still_life",
-    "food",
-    "animal",
-    "screenshot",
-    "document",
-    "abstract",
-    "other",
-    "vehicle",
-    "flower",
-    "mountain",
-    "water",
-    "forest",
-    "indoor",
-    "street",
-    "night",
-    "sunset",
 ];
 
 #[derive(Debug, thiserror::Error)]
@@ -320,7 +257,6 @@ pub trait SemanticClassifier: Send + Sync {
 pub fn semantic_catalog() -> Vec<SemanticLabelDescriptor> {
     LABELS
         .iter()
-        .filter(|label| is_active_label(label.id))
         .map(|label| SemanticLabelDescriptor {
             id: label.id.into(),
             display_name: label.display_name.into(),
@@ -336,6 +272,31 @@ pub fn known_display_name_for_label_id(label_id: &str) -> Option<&'static str> {
     if label_id == "unknown" {
         return Some("未知");
     }
+    let legacy_name = match label_id {
+        "portrait" => Some("人像"),
+        "group" => Some("多人"),
+        "landscape" => Some("风景"),
+        "architecture" => Some("建筑"),
+        "product" => Some("产品"),
+        "still_life" => Some("静物"),
+        "food" => Some("食品"),
+        "animal" => Some("动物"),
+        "screenshot" => Some("截图"),
+        "document" => Some("文档"),
+        "abstract" => Some("抽象"),
+        "vehicle" => Some("车辆"),
+        "flower" => Some("花卉"),
+        "mountain" => Some("山"),
+        "water" => Some("水体"),
+        "forest" => Some("森林"),
+        "street" => Some("街道"),
+        "night" => Some("夜景"),
+        "sunset" => Some("日落"),
+        _ => None,
+    };
+    if legacy_name.is_some() {
+        return legacy_name;
+    }
     LABELS
         .iter()
         .find(|label| label.id == label_id)
@@ -345,6 +306,16 @@ pub fn known_display_name_for_label_id(label_id: &str) -> Option<&'static str> {
 pub fn category_group_for_label_id(label_id: &str) -> Option<&'static str> {
     if label_id == "unknown" {
         return Some("scene");
+    }
+    let legacy_group = match label_id {
+        "portrait" | "group" | "landscape" | "architecture" | "product" | "still_life" | "food"
+        | "animal" | "screenshot" | "document" | "abstract" => Some("scene"),
+        "vehicle" | "flower" | "mountain" | "water" | "forest" => Some("subject"),
+        "street" | "night" | "sunset" | "indoor" | "outdoor" => Some("context"),
+        _ => None,
+    };
+    if legacy_group.is_some() {
+        return legacy_group;
     }
     LABELS
         .iter()
@@ -360,7 +331,7 @@ fn is_primary_category(label_id: &str) -> bool {
 }
 
 fn is_active_label(label_id: &str) -> bool {
-    ACTIVE_LABEL_IDS.contains(&label_id)
+    LABELS.iter().any(|label| label.id == label_id)
 }
 
 #[derive(Debug, Default)]
@@ -410,6 +381,260 @@ impl SemanticClassifier for UnavailableClassifier {
     }
 }
 
+pub struct Places365Classifier {
+    session: Mutex<Session>,
+    input_name: String,
+    output_name: String,
+    categories: Vec<String>,
+    leaf_cluster_indexes: Vec<usize>,
+    outdoor_by_leaf: Vec<bool>,
+    model_size_bytes: u64,
+    embedding_classifier: Option<TinyClipClassifier>,
+}
+
+impl std::fmt::Debug for Places365Classifier {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("Places365Classifier")
+            .field("model", &MODEL_NAME)
+            .field("version", &MODEL_VERSION)
+            .field("categories", &self.categories.len())
+            .field(
+                "has_embedding_classifier",
+                &self.embedding_classifier.is_some(),
+            )
+            .finish_non_exhaustive()
+    }
+}
+
+impl Places365Classifier {
+    pub fn load(
+        model_dir: &Path,
+        embedding_model_dir: &Path,
+        runtime_path: &Path,
+    ) -> Result<Self, SemanticError> {
+        let model_path = model_dir.join(MODEL_FILE);
+        let categories_path = model_dir.join(TOKENIZER_FILE);
+        let io_path = model_dir.join(IO_FILE);
+        verify_sha256(&model_path, MODEL_SHA256)?;
+        verify_sha256(&categories_path, TOKENIZER_SHA256)?;
+        verify_sha256(&io_path, IO_SHA256)?;
+        verify_sha256(runtime_path, RUNTIME_SHA256)?;
+        initialize_ort(runtime_path)?;
+
+        let builder = Session::builder().map_err(|error| {
+            SemanticError::Inference(format!("could not create ONNX session: {error}"))
+        })?;
+        let builder = builder
+            .with_optimization_level(GraphOptimizationLevel::Level3)
+            .map_err(|error| {
+                SemanticError::Inference(format!("could not optimize ONNX graph: {error}"))
+            })?;
+        let mut builder = builder
+            .with_intra_threads(cpu_thread_count())
+            .map_err(|error| {
+                SemanticError::Inference(format!("could not configure ONNX threads: {error}"))
+            })?;
+        let session = builder.commit_from_file(&model_path).map_err(|error| {
+            SemanticError::Inference(format!("could not load Places365 ONNX graph: {error}"))
+        })?;
+        let (input_name, output_name) = validate_places365_model_contract(&session)?;
+        let categories = load_places365_categories(&categories_path)?;
+        let outdoor_by_leaf = load_places365_io(&io_path)?;
+        if categories.len() != places365::PLACES365_LEAF_COUNT
+            || outdoor_by_leaf.len() != categories.len()
+        {
+            return Err(SemanticError::Inference(format!(
+                "Places365 resource contract mismatch: categories={}, indoor/outdoor={}",
+                categories.len(),
+                outdoor_by_leaf.len()
+            )));
+        }
+        let leaf_cluster_indexes = categories
+            .iter()
+            .map(|label| {
+                places365::scene_cluster_index_for_leaf(label).ok_or_else(|| {
+                    SemanticError::Inference(format!(
+                        "Places365 leaf is not mapped to a product scene cluster: {label}"
+                    ))
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+
+        let embedding_classifier = match TinyClipClassifier::load(embedding_model_dir, runtime_path)
+        {
+            Ok(classifier) => Some(classifier),
+            Err(error) => {
+                log::warn!("TinyCLIP embedding adapter unavailable: {error}");
+                None
+            }
+        };
+
+        Ok(Self {
+            session: Mutex::new(session),
+            input_name,
+            output_name,
+            categories,
+            leaf_cluster_indexes,
+            outdoor_by_leaf,
+            model_size_bytes: std::fs::metadata(model_path)
+                .map_err(|error| SemanticError::Inference(error.to_string()))?
+                .len(),
+            embedding_classifier,
+        })
+    }
+
+    pub fn model_contract(&self) -> (String, String) {
+        (self.input_name.clone(), self.output_name.clone())
+    }
+}
+
+impl SemanticClassifier for Places365Classifier {
+    fn metadata(&self) -> ModelMetadata {
+        ModelMetadata {
+            name: MODEL_NAME.into(),
+            version: MODEL_VERSION.into(),
+            analysis_version: ANALYSIS_VERSION.into(),
+            license: Some("MIT".into()),
+            installed: true,
+            model_size_bytes: Some(self.model_size_bytes),
+            model_sha256: Some(MODEL_SHA256.into()),
+            supported_backends: vec![ExecutionBackend::Cpu],
+        }
+    }
+
+    fn status(&self) -> SemanticRuntimeStatus {
+        let message = if self.embedding_classifier.is_some() {
+            "Places365 ResNet-18 已就绪；场景分类使用本地 365 类模型，向量搜索使用本地 TinyCLIP。"
+        } else {
+            "Places365 ResNet-18 已就绪；场景分类可用，但本地文本与相似搜索向量模型未就绪。"
+        };
+        SemanticRuntimeStatus {
+            status: "ready".into(),
+            message: message.into(),
+            model: self.metadata(),
+            selected_backend: Some(ExecutionBackend::Cpu),
+        }
+    }
+
+    fn encode_text(&self, queries: &[String]) -> Result<Vec<Vec<f32>>, SemanticError> {
+        self.embedding_classifier
+            .as_ref()
+            .ok_or(SemanticError::ModelUnavailable)?
+            .encode_text(queries)
+    }
+
+    fn classify_batch(
+        &self,
+        images: &[PathBuf],
+        backend: ExecutionBackend,
+    ) -> Result<Vec<SemanticAnalysisOutput>, SemanticError> {
+        if !matches!(backend, ExecutionBackend::Auto | ExecutionBackend::Cpu) {
+            return Err(SemanticError::BackendUnavailable(backend));
+        }
+        if images.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let image_count = images.len();
+        let mut session = self.session.lock();
+        let leaf_count = self.categories.len();
+        let mut probability_rows = Vec::with_capacity(image_count);
+        for image in images {
+            let pixel_values = preprocess_places365_images(std::slice::from_ref(image))?;
+            let pixel_values = Tensor::from_array((
+                [1_usize, 3, PLACES365_IMAGE_SIZE, PLACES365_IMAGE_SIZE],
+                pixel_values.into_boxed_slice(),
+            ))
+            .map_err(inference_error)?;
+            let outputs = session
+                .run(ort::inputs![self.input_name.as_str() => pixel_values])
+                .map_err(inference_error)?;
+            let (shape, data) = outputs[self.output_name.as_str()]
+                .try_extract_tensor::<f32>()
+                .map_err(inference_error)?;
+            let shape_description = format!("{shape:?}");
+            let data = data.to_vec();
+            if data.len() != leaf_count {
+                return Err(SemanticError::Inference(format!(
+                    "unexpected Places365 logits shape: {shape_description}; values={}",
+                    data.len()
+                )));
+            }
+            probability_rows.push(softmax(&data));
+        }
+        drop(session);
+
+        let embedding_outputs = self.embedding_classifier.as_ref().and_then(|classifier| {
+            match classifier.classify_batch(images, ExecutionBackend::Cpu) {
+                Ok(outputs) if outputs.len() == image_count => Some(outputs),
+                Ok(outputs) => {
+                    log::warn!(
+                        "TinyCLIP returned {} embeddings for {} images",
+                        outputs.len(),
+                        image_count
+                    );
+                    None
+                }
+                Err(error) => {
+                    log::warn!("TinyCLIP embedding batch failed: {error}");
+                    None
+                }
+            }
+        });
+        let mut results = Vec::with_capacity(image_count);
+        for (image_index, probabilities) in probability_rows.into_iter().enumerate() {
+            let primary = select_places365_primary(
+                &probabilities,
+                &self.leaf_cluster_indexes,
+                places365::SCENE_CLUSTERS.len(),
+            );
+            let mut predictions = Vec::with_capacity(2);
+            if let Some((cluster_index, score)) = primary {
+                let cluster = &places365::SCENE_CLUSTERS[cluster_index];
+                predictions.push(SemanticPrediction {
+                    label_id: cluster.id.into(),
+                    display_name: cluster.display_name.into(),
+                    category_group: "scene".into(),
+                    similarity: score,
+                    threshold: PLACES365_SCENE_MIN_PROBABILITY,
+                    is_primary: true,
+                });
+            }
+            if let Some((label_id, score)) =
+                select_places365_environment(&probabilities, &self.outdoor_by_leaf)
+            {
+                predictions.push(SemanticPrediction {
+                    label_id: label_id.into(),
+                    display_name: known_display_name_for_label_id(label_id)
+                        .unwrap_or("环境")
+                        .into(),
+                    category_group: "context".into(),
+                    similarity: score,
+                    threshold: 0.55,
+                    is_primary: false,
+                });
+            }
+            let raw_similarities = places365_raw_similarities(
+                &probabilities,
+                &self.categories,
+                &self.leaf_cluster_indexes,
+            );
+            let embedding = embedding_outputs
+                .as_ref()
+                .and_then(|outputs| outputs.get(image_index))
+                .map(|output| output.embedding.clone())
+                .unwrap_or_default();
+            results.push(SemanticAnalysisOutput {
+                predictions,
+                embedding,
+                raw_similarities,
+            });
+        }
+        Ok(results)
+    }
+}
+
 pub struct TinyClipClassifier {
     session: Mutex<Session>,
     tokenizer: Tokenizer,
@@ -422,18 +647,18 @@ impl std::fmt::Debug for TinyClipClassifier {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
             .debug_struct("TinyClipClassifier")
-            .field("model", &MODEL_NAME)
-            .field("version", &MODEL_VERSION)
+            .field("model", &TINYCLIP_MODEL_NAME)
+            .field("version", &TINYCLIP_MODEL_VERSION)
             .finish_non_exhaustive()
     }
 }
 
 impl TinyClipClassifier {
     pub fn load(model_dir: &Path, runtime_path: &Path) -> Result<Self, SemanticError> {
-        let model_path = model_dir.join(MODEL_FILE);
-        let tokenizer_path = model_dir.join(TOKENIZER_FILE);
-        verify_sha256(&model_path, MODEL_SHA256)?;
-        verify_sha256(&tokenizer_path, TOKENIZER_SHA256)?;
+        let model_path = model_dir.join(TINYCLIP_MODEL_FILE);
+        let tokenizer_path = model_dir.join(TINYCLIP_TOKENIZER_FILE);
+        verify_sha256(&model_path, TINYCLIP_MODEL_SHA256)?;
+        verify_sha256(&tokenizer_path, TINYCLIP_TOKENIZER_SHA256)?;
         verify_sha256(runtime_path, RUNTIME_SHA256)?;
         initialize_ort(runtime_path)?;
 
@@ -505,13 +730,13 @@ impl TinyClipClassifier {
 impl SemanticClassifier for TinyClipClassifier {
     fn metadata(&self) -> ModelMetadata {
         ModelMetadata {
-            name: MODEL_NAME.into(),
-            version: MODEL_VERSION.into(),
+            name: TINYCLIP_MODEL_NAME.into(),
+            version: TINYCLIP_MODEL_VERSION.into(),
             analysis_version: ANALYSIS_VERSION.into(),
             license: Some("MIT".into()),
             installed: true,
             model_size_bytes: Some(self.model_size_bytes),
-            model_sha256: Some(MODEL_SHA256.into()),
+            model_sha256: Some(TINYCLIP_MODEL_SHA256.into()),
             supported_backends: vec![ExecutionBackend::Cpu],
         }
     }
@@ -519,7 +744,7 @@ impl SemanticClassifier for TinyClipClassifier {
     fn status(&self) -> SemanticRuntimeStatus {
         SemanticRuntimeStatus {
             status: "ready".into(),
-            message: "TinyCLIP INT8 已通过完整性校验，CPU 执行后端可用。".into(),
+            message: "TinyCLIP INT8 向量模型已通过完整性校验，可用于本地文本与相似搜索。".into(),
             model: self.metadata(),
             selected_backend: Some(ExecutionBackend::Cpu),
         }
@@ -652,6 +877,197 @@ impl SemanticClassifier for TinyClipClassifier {
         }
         Ok(results)
     }
+}
+
+fn validate_places365_model_contract(session: &Session) -> Result<(String, String), SemanticError> {
+    let input_name = session
+        .inputs()
+        .first()
+        .map(|input| input.name().to_owned())
+        .ok_or_else(|| SemanticError::Inference("Places365 model has no input".into()))?;
+    let output_name = session
+        .outputs()
+        .first()
+        .map(|output| output.name().to_owned())
+        .ok_or_else(|| SemanticError::Inference("Places365 model has no output".into()))?;
+    Ok((input_name, output_name))
+}
+
+fn load_places365_categories(path: &Path) -> Result<Vec<String>, SemanticError> {
+    let content = std::fs::read_to_string(path)
+        .map_err(|error| SemanticError::Integrity(format!("{}: {error}", path.display())))?;
+    let categories = content
+        .lines()
+        .filter_map(|line| line.split_whitespace().next())
+        .map(|label| {
+            label
+                .strip_prefix('/')
+                .and_then(|value| value.split_once('/').map(|(_, leaf)| leaf))
+                .unwrap_or(label)
+                .to_owned()
+        })
+        .collect::<Vec<_>>();
+    if categories.len() != places365::PLACES365_LEAF_COUNT {
+        return Err(SemanticError::Integrity(format!(
+            "{} contains {} categories; expected {}",
+            path.display(),
+            categories.len(),
+            places365::PLACES365_LEAF_COUNT
+        )));
+    }
+    Ok(categories)
+}
+
+fn load_places365_io(path: &Path) -> Result<Vec<bool>, SemanticError> {
+    let content = std::fs::read_to_string(path)
+        .map_err(|error| SemanticError::Integrity(format!("{}: {error}", path.display())))?;
+    content
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| {
+            let value = line
+                .split_whitespace()
+                .last()
+                .ok_or_else(|| SemanticError::Integrity(format!("invalid IO label: {line}")))?
+                .parse::<u8>()
+                .map_err(|error| {
+                    SemanticError::Integrity(format!("invalid IO label {line}: {error}"))
+                })?;
+            match value {
+                1 => Ok(false),
+                2 => Ok(true),
+                _ => Err(SemanticError::Integrity(format!(
+                    "IO label must be 1 (indoor) or 2 (outdoor): {line}"
+                ))),
+            }
+        })
+        .collect()
+}
+
+fn preprocess_places365_images(images: &[PathBuf]) -> Result<Vec<f32>, SemanticError> {
+    let mut values =
+        Vec::with_capacity(images.len() * 3 * PLACES365_IMAGE_SIZE * PLACES365_IMAGE_SIZE);
+    for path in images {
+        let image = image::open(path)
+            .map_err(|error| SemanticError::Inference(format!("{}: {error}", path.display())))?
+            .to_rgb8();
+        if image.width() == 0 || image.height() == 0 {
+            return Err(SemanticError::Inference(format!(
+                "image has zero dimensions: {}",
+                path.display()
+            )));
+        }
+        // The official ResNet-18 Places365 preprocessing resizes to 256x256
+        // and takes the centered 224x224 crop.
+        let resized = image::imageops::resize(&image, 256, 256, FilterType::CatmullRom);
+        let offset = ((256 - PLACES365_IMAGE_SIZE) / 2) as u32;
+        let cropped = image::imageops::crop_imm(
+            &resized,
+            offset,
+            offset,
+            PLACES365_IMAGE_SIZE as u32,
+            PLACES365_IMAGE_SIZE as u32,
+        )
+        .to_image();
+        for channel in 0..3 {
+            for pixel in cropped.pixels() {
+                let normalized = (f32::from(pixel[channel]) / 255.0
+                    - PLACES365_IMAGE_MEAN[channel])
+                    / PLACES365_IMAGE_STD[channel];
+                values.push(normalized);
+            }
+        }
+    }
+    Ok(values)
+}
+
+fn softmax(values: &[f32]) -> Vec<f32> {
+    let maximum = values.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+    let mut probabilities = values
+        .iter()
+        .map(|value| (*value - maximum).exp())
+        .collect::<Vec<_>>();
+    let total = probabilities.iter().sum::<f32>();
+    if total > f32::EPSILON {
+        for probability in &mut probabilities {
+            *probability /= total;
+        }
+    }
+    probabilities
+}
+
+fn select_places365_primary(
+    probabilities: &[f32],
+    leaf_cluster_indexes: &[usize],
+    cluster_count: usize,
+) -> Option<(usize, f32)> {
+    let mut scores = vec![0.0_f32; cluster_count];
+    for (probability, cluster_index) in probabilities.iter().zip(leaf_cluster_indexes) {
+        if let Some(score) = scores.get_mut(*cluster_index) {
+            *score += probability;
+        }
+    }
+    let mut ranked = scores.into_iter().enumerate().collect::<Vec<_>>();
+    ranked.sort_by(|left, right| right.1.total_cmp(&left.1).then(left.0.cmp(&right.0)));
+    let (top_index, top_score) = ranked.first().copied()?;
+    let second_score = ranked.get(1).map(|(_, score)| *score).unwrap_or(0.0);
+    (top_score >= PLACES365_SCENE_MIN_PROBABILITY
+        && top_score - second_score >= PLACES365_SCENE_MIN_MARGIN)
+        .then_some((top_index, top_score))
+}
+
+fn select_places365_environment(
+    probabilities: &[f32],
+    outdoor_by_leaf: &[bool],
+) -> Option<(&'static str, f32)> {
+    let mut ranked = probabilities.iter().enumerate().collect::<Vec<_>>();
+    ranked.sort_by(|left, right| right.1.total_cmp(left.1).then(left.0.cmp(&right.0)));
+    let mut indoor = 0.0_f32;
+    let mut outdoor = 0.0_f32;
+    for (index, probability) in ranked.into_iter().take(10) {
+        if outdoor_by_leaf.get(index).copied().unwrap_or(false) {
+            outdoor += probability;
+        } else {
+            indoor += probability;
+        }
+    }
+    let total = indoor + outdoor;
+    if total <= f32::EPSILON {
+        return None;
+    }
+    let outdoor_ratio = outdoor / total;
+    if outdoor_ratio >= 0.65 {
+        Some(("outdoor", outdoor_ratio))
+    } else if outdoor_ratio <= 0.35 {
+        Some(("indoor", 1.0 - outdoor_ratio))
+    } else {
+        None
+    }
+}
+
+fn places365_raw_similarities(
+    probabilities: &[f32],
+    categories: &[String],
+    leaf_cluster_indexes: &[usize],
+) -> Vec<SemanticSimilarity> {
+    let mut ranked = probabilities.iter().enumerate().collect::<Vec<_>>();
+    ranked.sort_by(|left, right| right.1.total_cmp(left.1).then(left.0.cmp(&right.0)));
+    ranked
+        .into_iter()
+        .take(MAX_LABELS)
+        .filter_map(|(index, probability)| {
+            let cluster = places365::SCENE_CLUSTERS.get(*leaf_cluster_indexes.get(index)?)?;
+            Some(SemanticSimilarity {
+                label_id: categories.get(index)?.clone(),
+                // Raw leaf IDs stay internal.  The visible explanation uses
+                // the Chinese product cluster name instead of an English ID.
+                display_name: cluster.display_name.into(),
+                category_group: "places365_leaf".into(),
+                similarity: *probability,
+                threshold: 0.0,
+            })
+        })
+        .collect()
 }
 
 fn initialize_ort(runtime_path: &Path) -> Result<(), SemanticError> {
@@ -1125,7 +1541,7 @@ mod tests {
     #[test]
     fn catalog_has_stable_unique_ids_and_group_metadata() {
         let catalog = semantic_catalog();
-        assert_eq!(catalog.len(), 21);
+        assert_eq!(catalog.len(), 13);
         let mut ids = catalog
             .iter()
             .map(|label| label.id.as_str())
@@ -1133,15 +1549,17 @@ mod tests {
         ids.sort_unstable();
         ids.dedup();
         assert_eq!(ids.len(), catalog.len());
-        assert_eq!(known_display_name_for_label_id("product"), Some("产品"));
-        assert_eq!(known_display_name_for_label_id("document"), Some("文档"));
+        assert_eq!(
+            known_display_name_for_label_id("photo_landscape"),
+            Some("风光自然")
+        );
         assert_eq!(known_display_name_for_label_id("unknown"), Some("未知"));
         assert_eq!(
             catalog
                 .iter()
                 .filter(|label| label.is_primary_category)
                 .count(),
-            12
+            11
         );
         assert!(
             catalog
@@ -1157,7 +1575,7 @@ mod tests {
         assert!(
             !catalog
                 .iter()
-                .find(|label| label.id == "night")
+                .find(|label| label.id == "outdoor")
                 .unwrap()
                 .is_primary_category
         );
@@ -1169,12 +1587,16 @@ mod tests {
         let mut scores = vec![0.05; LABELS.len()];
         scores[LABELS
             .iter()
-            .position(|label| label.id == "portrait")
+            .position(|label| label.id == "photo_landscape")
             .unwrap()] = 0.30;
 
         let predictions = select_predictions(&scores);
 
-        assert!(predictions.iter().any(|label| label.label_id == "portrait"));
+        assert!(
+            predictions
+                .iter()
+                .any(|label| label.label_id == "photo_landscape")
+        );
         assert!(!predictions.iter().any(|label| label.label_id == "unknown"));
     }
 
@@ -1183,21 +1605,24 @@ mod tests {
         let mut scores = vec![0.10; LABELS.len()];
         scores[LABELS
             .iter()
-            .position(|label| label.id == "portrait")
+            .position(|label| label.id == "photo_landscape")
             .unwrap()] = 0.21;
         scores[LABELS
             .iter()
-            .position(|label| label.id == "landscape")
+            .position(|label| label.id == "photo_food")
             .unwrap()] = 0.24;
-        scores[LABELS.iter().position(|label| label.id == "night").unwrap()] = 0.24;
+        scores[LABELS
+            .iter()
+            .position(|label| label.id == "outdoor")
+            .unwrap()] = 0.24;
         let predictions = select_predictions(&scores);
-        assert_eq!(predictions[0].label_id, "landscape");
+        assert_eq!(predictions[0].label_id, "photo_food");
         assert!(predictions[0].is_primary);
         assert_eq!(
             predictions.iter().filter(|label| label.is_primary).count(),
             1
         );
-        assert!(predictions.iter().any(|label| label.label_id == "night"));
+        assert!(predictions.iter().any(|label| label.label_id == "outdoor"));
     }
 
     #[test]

@@ -32,50 +32,28 @@ export interface VisualFixture {
 const rootPath = "C:\\test-data\\专业界面验收图库";
 
 const semanticCatalog: SemanticLabelDescriptor[] = [
-  ["portrait", "人像"],
-  ["group", "多人"],
-  ["landscape", "风景"],
-  ["architecture", "建筑"],
+  ["photo_landscape", "风光自然"],
+  ["photo_urban", "城市街拍"],
+  ["photo_architecture", "建筑与空间"],
+  ["photo_food", "美食餐饮"],
+  ["photo_commercial", "商业与静物"],
+  ["photo_indoor", "室内与生活"],
+  ["photo_travel", "旅行人文"],
+  ["photo_event", "活动与运动"],
+  ["photo_transport", "交通与汽车"],
+  ["photo_plant", "植物与园艺"],
+  ["photo_documentary", "纪实与工业"],
   ["indoor", "室内"],
-  ["street", "街道"],
-  ["vehicle", "车辆"],
-  ["product", "静物"],
-  ["food", "食品"],
-  ["animal", "动物"],
-  ["document", "文档"],
-  ["night", "夜景"],
-  ["flower", "花卉"],
-  ["abstract", "抽象"],
+  ["outdoor", "室外"],
 ].map(([id, displayName]) => ({
   id,
   displayName,
-  categoryGroup: [
-    "portrait",
-    "group",
-    "landscape",
-    "architecture",
-    "product",
-    "food",
-    "animal",
-    "abstract",
-  ].includes(id)
+  categoryGroup: id.startsWith("photo_")
     ? "scene"
-    : ["vehicle", "flower", "mountain", "water", "forest"].includes(id)
-      ? "subject"
-      : "context",
+    : "context",
   threshold: 0.16,
-  isPrimaryCategory: [
-    "portrait",
-    "group",
-    "landscape",
-    "architecture",
-    "product",
-    "food",
-    "animal",
-    "document",
-    "abstract",
-  ].includes(id),
-  taxonomyVersion: "photo-organizer-taxonomy-v2",
+  isPrimaryCategory: id.startsWith("photo_"),
+  taxonomyVersion: "photo-organizer-photography-topics-v1",
 }));
 
 const library: LibrarySummary = {
@@ -223,32 +201,42 @@ export function visualFixtureFromSearch(search: string): VisualFixture | null {
             currentAssetId: 9211,
             currentPath: `${rootPath}\\工作室布光测试_012.png`,
             executionBackend: "cpu",
-            modelName: "TinyCLIP-ViT-8M-16-Text-3M-YFCC15M",
-            modelVersion: "onnx-int8-2025-08-06",
+            modelName: "Places365-ResNet18",
+            modelVersion: "onnx-2026-08-10",
             error: null,
           }
         : null,
     semanticStatus: {
       status: "ready",
-      message: "TinyCLIP INT8 已通过完整性校验，CPU 执行后端可用。",
+      message: "Places365 ResNet-18 已就绪；拍摄题材使用本地 365 类模型，向量搜索使用本地 TinyCLIP。",
       model: {
-        name: "TinyCLIP-ViT-8M-16-Text-3M-YFCC15M",
-        version: "onnx-int8-2025-08-06",
-        analysisVersion: "photo-organizer-semantic-v1",
+        name: "Places365-ResNet18",
+        version: "onnx-2026-08-10",
+        analysisVersion: "photo-organizer-semantic-places365-photography-v1",
         license: "MIT",
         installed: true,
-        modelSizeBytes: 24_281_512,
-        modelSha256: "10921310ddef06557ec1598d1260470a0a4db53f70ffe0deb60b946dcad6d27a",
+        modelSizeBytes: 45_575_731,
+        modelSha256: "3c3cd0d42693e2957fcaa0bc365ce78e169a2e1162356742adfbd11077e8f7bf",
         supportedBackends: ["cpu"],
       },
       selectedBackend: "cpu",
     },
     semanticCatalog,
     semanticGroups: [
-      { labelId: "landscape", displayName: "风景", categoryGroup: "scene", assetCount: 7 },
-      { labelId: "architecture", displayName: "建筑", categoryGroup: "scene", assetCount: 4 },
-      { labelId: "product", displayName: "产品", categoryGroup: "scene", assetCount: 4 },
-      { labelId: "night", displayName: "夜景", categoryGroup: "context", assetCount: 3 },
+      {
+        labelId: "photo_landscape",
+        displayName: "风光自然",
+        categoryGroup: "scene",
+        assetCount: 7,
+      },
+      {
+        labelId: "photo_architecture",
+        displayName: "建筑与空间",
+        categoryGroup: "scene",
+        assetCount: 4,
+      },
+      { labelId: "photo_food", displayName: "美食餐饮", categoryGroup: "scene", assetCount: 4 },
+      { labelId: "outdoor", displayName: "室外", categoryGroup: "context", assetCount: 11 },
     ],
     folders: [
       { relativePath: "", assetCount: 18 },
@@ -285,35 +273,33 @@ export function fixtureAssetPage(
 }
 
 function semanticLabelsFor(index: number) {
-  const ids = [
-    ["landscape", "风景"],
-    ["architecture", "建筑"],
-    ["product", "静物"],
-    ["mountain", "山"],
-    ["night", "夜景"],
-    ["forest", "森林"],
-  ] as const;
+  const ids: ReadonlyArray<readonly [string, string]> = [
+    ["photo_landscape", "风光自然"],
+    ["photo_architecture", "建筑与空间"],
+    ["photo_food", "美食餐饮"],
+    ["photo_plant", "植物与园艺"],
+    ["photo_urban", "城市街拍"],
+    ["photo_indoor", "室内与生活"],
+  ];
   const primary = ids[index % ids.length];
-  const secondary = index % 4 === 0 && primary[0] !== "night" ? (["night", "夜景"] as const) : null;
+  const secondary = index % 4 === 0 ? (["outdoor", "室外"] as const) : null;
   return [primary, secondary]
-    .filter((label): label is (typeof ids)[number] => label !== null)
+    .filter((label): label is readonly [string, string] => label !== null)
     .map(([labelId, displayName], rank) => ({
       labelId,
       displayName,
       similarity: 0.29 - rank * 0.04,
       threshold: 0.16,
-      modelName: "TinyCLIP-ViT-8M-16-Text-3M-YFCC15M",
-      modelVersion: "onnx-int8-2025-08-06",
-      analysisVersion: "photo-organizer-semantic-v2",
-      taxonomyVersion: "photo-organizer-taxonomy-v2",
+      modelName: "Places365-ResNet18",
+      modelVersion: "onnx-2026-08-10",
+      analysisVersion: "photo-organizer-semantic-places365-photography-v1",
+      taxonomyVersion: "photo-organizer-photography-topics-v1",
       analyzedAt: "2026-08-07T03:12:00Z",
       isManual: false,
       isPrimary: rank === 0,
-      categoryGroup: ["landscape", "architecture", "product"].includes(labelId)
+      categoryGroup: labelId.startsWith("photo_")
         ? "scene"
-        : ["mountain", "forest"].includes(labelId)
-          ? "subject"
-          : "context",
+        : "context",
     }));
 }
 

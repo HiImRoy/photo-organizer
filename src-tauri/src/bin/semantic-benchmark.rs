@@ -5,7 +5,7 @@ use std::process::ExitCode;
 
 use clap::{Parser, ValueEnum};
 use photo_organizer_lib::semantic::{
-    BenchmarkReport, ExecutionBackend, SemanticClassifier, TinyClipClassifier,
+    BenchmarkReport, ExecutionBackend, Places365Classifier, SemanticClassifier, TinyClipClassifier,
     UnavailableClassifier, benchmark_classifier, discover_benchmark_images,
 };
 
@@ -13,17 +13,20 @@ use photo_organizer_lib::semantic::{
 #[command(
     name = "semantic-benchmark",
     about = "Benchmark a PhotoOrganizer semantic classifier adapter",
-    long_about = "Runs the bundled TinyCLIP ONNX adapter against an explicit fixture directory and records real CPU predictions and timing. The unavailable adapter remains available to verify the no-fake-label fallback."
+    long_about = "Runs the bundled Places365 or TinyCLIP ONNX adapter against an explicit fixture directory and records real CPU predictions and timing. The unavailable adapter remains available to verify the no-fake-label fallback."
 )]
 struct Arguments {
     #[arg(long, value_name = "DIR")]
     images: PathBuf,
 
-    #[arg(long, default_value = "tinyclip")]
+    #[arg(long, default_value = "places365")]
     model: String,
 
     #[arg(long, value_name = "DIR")]
     model_dir: Option<PathBuf>,
+
+    #[arg(long, value_name = "DIR")]
+    embedding_model_dir: Option<PathBuf>,
 
     #[arg(long, value_name = "onnxruntime.dll")]
     runtime: Option<PathBuf>,
@@ -86,6 +89,31 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
     let images = discover_benchmark_images(&arguments.images);
     let classifier: Box<dyn SemanticClassifier> = if arguments.model == "unavailable" {
         Box::new(UnavailableClassifier::default())
+    } else if arguments.model == "places365" {
+        let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let model_dir = arguments.model_dir.unwrap_or_else(|| {
+            manifest_dir
+                .join("resources")
+                .join("models")
+                .join("places365-resnet18")
+        });
+        let embedding_model_dir = arguments.embedding_model_dir.unwrap_or_else(|| {
+            manifest_dir
+                .join("resources")
+                .join("models")
+                .join("tinyclip-vit-8m-16-text-3m-yfcc15m")
+        });
+        let runtime = arguments.runtime.unwrap_or_else(|| {
+            manifest_dir
+                .join("resources")
+                .join("runtime")
+                .join("onnxruntime.dll")
+        });
+        Box::new(Places365Classifier::load(
+            &model_dir,
+            &embedding_model_dir,
+            &runtime,
+        )?)
     } else if arguments.model == "tinyclip" {
         let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         let model_dir = arguments.model_dir.unwrap_or_else(|| {
@@ -102,7 +130,7 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
         });
         Box::new(TinyClipClassifier::load(&model_dir, &runtime)?)
     } else {
-        return Err("--model must be tinyclip or unavailable".into());
+        return Err("--model must be places365, tinyclip or unavailable".into());
     };
     let report = benchmark_classifier(
         classifier.as_ref(),

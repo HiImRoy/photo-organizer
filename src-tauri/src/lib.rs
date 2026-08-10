@@ -7,6 +7,7 @@ pub mod ipc;
 pub mod models;
 pub mod organization;
 pub mod paths;
+pub mod places365;
 pub mod scanner;
 pub mod semantic;
 pub mod semantic_tasks;
@@ -37,8 +38,9 @@ pub fn run() {
             let repository = db::Repository::new(&paths.database_path);
             repository.initialize()?;
             let semantic: std::sync::Arc<dyn semantic::SemanticClassifier> =
-                match semantic::TinyClipClassifier::load(
+                match semantic::Places365Classifier::load(
                     &paths.semantic_model_dir,
+                    &paths.tinyclip_model_dir,
                     &paths.onnx_runtime_path,
                 ) {
                     Ok(classifier) => {

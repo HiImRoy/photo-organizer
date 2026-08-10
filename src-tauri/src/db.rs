@@ -43,6 +43,8 @@ const MANUAL_ASSET_MARKS_MIGRATION: &str =
 const PHOTO_WORKFLOW_MVP_MIGRATION: &str =
     include_str!("../migrations/0011_photo_workflow_mvp.sql");
 const SEMANTIC_TAXONOMY_MIGRATION: &str = include_str!("../migrations/0012_semantic_taxonomy.sql");
+const PLACES365_EVIDENCE_MIGRATION: &str =
+    include_str!("../migrations/0013_places365_evidence.sql");
 
 #[derive(Debug, Clone)]
 pub struct Repository {
@@ -117,6 +119,7 @@ impl Repository {
             (10_i64, MANUAL_ASSET_MARKS_MIGRATION),
             (11_i64, PHOTO_WORKFLOW_MVP_MIGRATION),
             (12_i64, SEMANTIC_TAXONOMY_MIGRATION),
+            (13_i64, PLACES365_EVIDENCE_MIGRATION),
         ] {
             if current < version {
                 let transaction = connection.transaction()?;
@@ -1753,7 +1756,7 @@ impl Repository {
                 MODEL_NAME,
                 MODEL_VERSION,
                 SEMANTIC_ANALYSIS_VERSION,
-                "https://huggingface.co/onnx-community/TinyCLIP-ViT-8M-16-Text-3M-YFCC15M-ONNX",
+                "https://github.com/CSAILVision/places365",
                 crate::semantic::MODEL_SHA256,
                 crate::semantic::TOKENIZER_SHA256,
                 model_path.to_string_lossy().into_owned(),
@@ -2005,6 +2008,16 @@ impl Repository {
                     SEMANTIC_ANALYSIS_VERSION
                 ],
             )?;
+            transaction.execute(
+                "DELETE FROM semantic_evidence
+                 WHERE asset_id=?1 AND model_name=?2 AND model_version=?3 AND analysis_version=?4",
+                params![
+                    candidate.id,
+                    MODEL_NAME,
+                    MODEL_VERSION,
+                    SEMANTIC_ANALYSIS_VERSION
+                ],
+            )?;
             let timestamp = now();
             for prediction in &output.predictions {
                 transaction.execute(
@@ -2026,6 +2039,29 @@ impl Repository {
                         prediction.category_group,
                         candidate.fingerprint,
                         if prediction.is_primary { 1_i64 } else { 0_i64 },
+                        timestamp,
+                    ],
+                )?;
+            }
+            for (rank, evidence) in output.raw_similarities.iter().enumerate() {
+                transaction.execute(
+                    "INSERT INTO semantic_evidence(
+                        asset_id, model_name, model_version, analysis_version, taxonomy_version,
+                        source_fingerprint, rank, label, display_name, similarity, category_group,
+                        generated_at
+                     ) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+                    params![
+                        candidate.id,
+                        MODEL_NAME,
+                        MODEL_VERSION,
+                        SEMANTIC_ANALYSIS_VERSION,
+                        TAXONOMY_VERSION,
+                        candidate.fingerprint,
+                        rank as i64,
+                        evidence.label_id,
+                        evidence.display_name,
+                        evidence.similarity,
+                        evidence.category_group,
                         timestamp,
                     ],
                 )?;
@@ -2082,6 +2118,16 @@ impl Repository {
         )?;
         transaction.execute(
             "DELETE FROM semantic_labels
+             WHERE asset_id=?1 AND model_name=?2 AND model_version=?3 AND analysis_version=?4",
+            params![
+                asset_id,
+                MODEL_NAME,
+                MODEL_VERSION,
+                SEMANTIC_ANALYSIS_VERSION
+            ],
+        )?;
+        transaction.execute(
+            "DELETE FROM semantic_evidence
              WHERE asset_id=?1 AND model_name=?2 AND model_version=?3 AND analysis_version=?4",
             params![
                 asset_id,
@@ -3568,7 +3614,7 @@ mod tests {
         let repository = Repository::new(temp.path().join("database.sqlite3"));
         repository.initialize().expect("first initialization");
         repository.initialize().expect("second initialization");
-        assert_eq!(repository.migration_version().expect("version"), 12);
+        assert_eq!(repository.migration_version().expect("version"), 13);
         let connection = repository.open().expect("connection");
         for table in [
             "organization_plans",
@@ -3577,6 +3623,7 @@ mod tests {
             "asset_library_assignments",
             "manual_classification_overrides",
             "manual_tag_overrides",
+            "semantic_evidence",
         ] {
             let exists: i64 = connection
                 .query_row(
