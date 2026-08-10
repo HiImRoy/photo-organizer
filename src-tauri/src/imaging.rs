@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::fs::{self, File, OpenOptions};
-use std::io::{BufRead, BufReader, Cursor, Seek, Write};
+use std::io::{BufRead, BufReader, Cursor, Read, Seek, Write};
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
@@ -30,23 +30,39 @@ pub fn process_image_with_source_bytes(
     source_bytes: Option<&[u8]>,
 ) -> AppResult<ProcessedImage> {
     let exif_started = Instant::now();
-    let exif = source_bytes
-        .map(read_exif_bytes)
-        .unwrap_or_else(|| read_exif(source_path));
+    let source_metadata = source_bytes
+        .map(read_source_metadata_bytes)
+        .unwrap_or_else(|| read_source_metadata(source_path));
+    let exif = source_metadata.exif.clone();
     let exif_us = elapsed_us(exif_started);
 
     let decode_started = Instant::now();
-    let decoded = match source_bytes {
-        Some(bytes) => image::load_from_memory(bytes)?,
-        None => image::ImageReader::open(source_path)?
-            .with_guessed_format()?
-            .decode()?,
+    let (decoded, used_embedded_thumbnail) = match source_metadata.embedded_thumbnail.as_deref() {
+        Some(bytes) => match image::load_from_memory(bytes) {
+            Ok(image) => (image, true),
+            Err(_) => (decode_source_image(source_path, source_bytes)?, false),
+        },
+        None => (decode_source_image(source_path, source_bytes)?, false),
     };
     let decode_us = elapsed_us(decode_started);
+    let source_decode_us = if used_embedded_thumbnail {
+        0
+    } else {
+        decode_us
+    };
+    let thumbnail_decode_us = if used_embedded_thumbnail {
+        decode_us
+    } else {
+        0
+    };
 
     let resize_started = Instant::now();
     let oriented = apply_orientation(decoded, exif.orientation);
-    let (width, height) = oriented.dimensions();
+    let (width, height) = if used_embedded_thumbnail {
+        source_dimensions(source_path, source_bytes, exif.orientation)?
+    } else {
+        oriented.dimensions()
+    };
     let thumbnail = bounded_thumbnail(&oriented, 640, 640).to_rgba8();
     let resize_us = elapsed_us(resize_started);
 
@@ -73,12 +89,173 @@ pub fn process_image_with_source_bytes(
         features,
         timings: ImageProcessingTimings {
             exif_us,
+            source_dimension_us: 0,
             decode_us,
+            source_decode_us,
+            thumbnail_decode_us,
             resize_us,
             feature_analysis_us,
             thumbnail_write_us,
         },
     })
+}
+
+/// Re-analyze an existing current cache without decoding source pixels.
+///
+/// The source is consulted only for EXIF and dimensions. All pixel work comes
+/// from the application-owned `grid-640-v1` thumbnail. This path is used when
+/// the basic feature algorithm changes or an interrupted import left a valid
+/// thumbnail behind.
+pub fn process_image_from_cached_thumbnail(
+    source_path: &Path,
+    thumbnail_path: &Path,
+) -> AppResult<ProcessedImage> {
+    let exif_started = Instant::now();
+    let exif = read_source_metadata(source_path).exif;
+    let exif_us = elapsed_us(exif_started);
+
+    let dimension_started = Instant::now();
+    let (width, height) = source_dimensions(source_path, None, exif.orientation)?;
+    let source_dimension_us = elapsed_us(dimension_started);
+
+    let decode_started = Instant::now();
+    let thumbnail = image::ImageReader::open(thumbnail_path)?
+        .with_guessed_format()?
+        .decode()?
+        .to_rgba8();
+    let thumbnail_decode_us = elapsed_us(decode_started);
+
+    let analysis_step = if thumbnail.width() > 320 || thumbnail.height() > 320 {
+        2
+    } else {
+        1
+    };
+    let analysis_started = Instant::now();
+    let features = analyze_rgba_with_step(&thumbnail, analysis_step);
+    let feature_analysis_us = elapsed_us(analysis_started);
+
+    Ok(ProcessedImage {
+        width,
+        height,
+        exif,
+        thumbnail_path: path_to_string(thumbnail_path),
+        features,
+        timings: ImageProcessingTimings {
+            exif_us,
+            source_dimension_us,
+            decode_us: thumbnail_decode_us,
+            source_decode_us: 0,
+            thumbnail_decode_us,
+            resize_us: 0,
+            feature_analysis_us,
+            thumbnail_write_us: 0,
+        },
+    })
+}
+
+fn decode_source_image(source_path: &Path, source_bytes: Option<&[u8]>) -> AppResult<DynamicImage> {
+    match source_bytes {
+        Some(bytes) => Ok(image::load_from_memory(bytes)?),
+        None => Ok(image::ImageReader::open(source_path)?
+            .with_guessed_format()?
+            .decode()?),
+    }
+}
+
+fn source_dimensions(
+    source_path: &Path,
+    source_bytes: Option<&[u8]>,
+    orientation: u32,
+) -> AppResult<(u32, u32)> {
+    let is_jpeg = source_path
+        .extension()
+        .and_then(|value| value.to_str())
+        .is_some_and(|value| matches!(value.to_ascii_lowercase().as_str(), "jpg" | "jpeg"));
+
+    let raw_dimensions = if is_jpeg {
+        source_bytes
+            .and_then(jpeg_dimensions)
+            .or_else(|| jpeg_dimensions_from_path(source_path))
+    } else {
+        None
+    };
+
+    let raw_dimensions = match raw_dimensions {
+        Some(dimensions) => dimensions,
+        None => match source_bytes {
+            Some(bytes) => image::ImageReader::new(Cursor::new(bytes))
+                .with_guessed_format()?
+                .into_dimensions()?,
+            None => image::ImageReader::open(source_path)?
+                .with_guessed_format()?
+                .into_dimensions()?,
+        },
+    };
+    Ok(oriented_dimensions(raw_dimensions, orientation))
+}
+
+fn jpeg_dimensions_from_path(path: &Path) -> Option<(u32, u32)> {
+    let file = File::open(path).ok()?;
+    let mut bytes = Vec::new();
+    BufReader::new(file)
+        .take(1024 * 1024)
+        .read_to_end(&mut bytes)
+        .ok()?;
+    jpeg_dimensions(&bytes)
+}
+
+fn jpeg_dimensions(bytes: &[u8]) -> Option<(u32, u32)> {
+    if !bytes.starts_with(&[0xff, 0xd8]) {
+        return None;
+    }
+
+    let mut offset = 2_usize;
+    while offset + 1 < bytes.len() {
+        while offset < bytes.len() && bytes[offset] != 0xff {
+            offset += 1;
+        }
+        while offset < bytes.len() && bytes[offset] == 0xff {
+            offset += 1;
+        }
+        let marker = *bytes.get(offset)?;
+        offset += 1;
+        if matches!(marker, 0xd8 | 0xd9 | 0x01 | 0xd0..=0xd7) {
+            continue;
+        }
+        let length = usize::from(u16::from_be_bytes([
+            *bytes.get(offset)?,
+            *bytes.get(offset + 1)?,
+        ]));
+        if length < 2 || offset + length > bytes.len() {
+            return None;
+        }
+        if is_jpeg_start_of_frame(marker) {
+            let data_start = offset + 2;
+            let height = u32::from(u16::from_be_bytes([
+                *bytes.get(data_start + 1)?,
+                *bytes.get(data_start + 2)?,
+            ]));
+            let width = u32::from(u16::from_be_bytes([
+                *bytes.get(data_start + 3)?,
+                *bytes.get(data_start + 4)?,
+            ]));
+            return (width > 0 && height > 0).then_some((width, height));
+        }
+        offset += length;
+    }
+    None
+}
+
+fn is_jpeg_start_of_frame(marker: u8) -> bool {
+    matches!(marker, 0xc0..=0xc3 | 0xc5..=0xc7 | 0xc9..=0xcb | 0xcd..=0xcf)
+}
+
+fn oriented_dimensions((width, height): (u32, u32), orientation: u32) -> (u32, u32) {
+    if matches!(orientation, 5..=8) {
+        (height, width)
+    } else {
+        (width, height)
+    }
 }
 
 fn elapsed_us(started: Instant) -> u64 {
@@ -497,25 +674,41 @@ fn standard_deviation(values: &[f64], mean: f64) -> f64 {
         .sqrt()
 }
 
+#[derive(Debug, Default)]
+struct SourceMetadata {
+    exif: ExifMetadata,
+    embedded_thumbnail: Option<Vec<u8>>,
+}
+
 fn read_exif(path: &Path) -> ExifMetadata {
+    read_source_metadata(path).exif
+}
+
+fn read_source_metadata(path: &Path) -> SourceMetadata {
     let Ok(file) = File::open(path) else {
-        return ExifMetadata {
-            orientation: 1,
-            ..ExifMetadata::default()
+        return SourceMetadata {
+            exif: ExifMetadata {
+                orientation: 1,
+                ..ExifMetadata::default()
+            },
+            embedded_thumbnail: None,
         };
     };
     read_exif_reader(&mut BufReader::new(file))
 }
 
-fn read_exif_bytes(bytes: &[u8]) -> ExifMetadata {
+fn read_source_metadata_bytes(bytes: &[u8]) -> SourceMetadata {
     read_exif_reader(&mut Cursor::new(bytes))
 }
 
-fn read_exif_reader<R: BufRead + Seek>(reader: &mut R) -> ExifMetadata {
+fn read_exif_reader<R: BufRead + Seek>(reader: &mut R) -> SourceMetadata {
     let Ok(exif) = exif::Reader::new().read_from_container(reader) else {
-        return ExifMetadata {
-            orientation: 1,
-            ..ExifMetadata::default()
+        return SourceMetadata {
+            exif: ExifMetadata {
+                orientation: 1,
+                ..ExifMetadata::default()
+            },
+            embedded_thumbnail: None,
         };
     };
 
@@ -526,21 +719,35 @@ fn read_exif_reader<R: BufRead + Seek>(reader: &mut R) -> ExifMetadata {
         .map(normalize_exif_datetime);
     let exposure_time = field(Tag::ExposureTime).map(|value| value.display_value().to_string());
 
-    ExifMetadata {
-        orientation: field(Tag::Orientation)
-            .and_then(|value| value.value.get_uint(0))
-            .unwrap_or(1),
-        capture_time,
-        camera_make: field(Tag::Make).and_then(ascii_value),
-        camera_model: field(Tag::Model).and_then(ascii_value),
-        lens_model: field(Tag::LensModel).and_then(ascii_value),
-        exposure_time,
-        aperture: field(Tag::FNumber).and_then(rational_value),
-        iso: field(Tag::PhotographicSensitivity)
-            .and_then(|value| value.value.get_uint(0))
-            .map(i64::from),
-        focal_length: field(Tag::FocalLength).and_then(rational_value),
+    SourceMetadata {
+        exif: ExifMetadata {
+            orientation: field(Tag::Orientation)
+                .and_then(|value| value.value.get_uint(0))
+                .unwrap_or(1),
+            capture_time,
+            camera_make: field(Tag::Make).and_then(ascii_value),
+            camera_model: field(Tag::Model).and_then(ascii_value),
+            lens_model: field(Tag::LensModel).and_then(ascii_value),
+            exposure_time,
+            aperture: field(Tag::FNumber).and_then(rational_value),
+            iso: field(Tag::PhotographicSensitivity)
+                .and_then(|value| value.value.get_uint(0))
+                .map(i64::from),
+            focal_length: field(Tag::FocalLength).and_then(rational_value),
+        },
+        embedded_thumbnail: embedded_thumbnail(&exif),
     }
+}
+
+fn embedded_thumbnail(exif: &exif::Exif) -> Option<Vec<u8>> {
+    let offset = exif
+        .get_field(Tag::JPEGInterchangeFormat, In::THUMBNAIL)
+        .and_then(|field| field.value.get_uint(0))? as usize;
+    let length = exif
+        .get_field(Tag::JPEGInterchangeFormatLength, In::THUMBNAIL)
+        .and_then(|field| field.value.get_uint(0))? as usize;
+    let bytes = exif.buf().get(offset..offset.checked_add(length)?)?;
+    (bytes.starts_with(&[0xff, 0xd8]) && bytes.ends_with(&[0xff, 0xd9])).then(|| bytes.to_vec())
 }
 
 fn ascii_value(field: &exif::Field) -> Option<String> {
@@ -741,5 +948,99 @@ mod tests {
 
         assert_eq!(dimensions, (640, 320));
         assert_eq!(processed.features.algorithm_version, ANALYSIS_VERSION);
+    }
+
+    #[test]
+    fn cached_thumbnail_reanalysis_never_decodes_source_pixels() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let source = temp.path().join("source.png");
+        let cache_dir = temp.path().join("cache");
+        DynamicImage::ImageRgba8(RgbaImage::from_pixel(1600, 900, Rgba([30, 120, 210, 255])))
+            .save(&source)
+            .expect("save source");
+
+        let first = process_image(&source, &cache_dir, "cache-reuse").expect("cold process");
+        let reused = process_image_from_cached_thumbnail(&source, Path::new(&first.thumbnail_path))
+            .expect("cached process");
+
+        assert_eq!(reused.width, 1600);
+        assert_eq!(reused.height, 900);
+        assert_eq!(reused.timings.source_decode_us, 0);
+        assert!(reused.timings.thumbnail_decode_us > 0);
+        assert!(reused.timings.source_dimension_us > 0);
+        assert_eq!(reused.timings.resize_us, 0);
+        assert_eq!(reused.features.algorithm_version, ANALYSIS_VERSION);
+    }
+
+    #[test]
+    fn embedded_jpeg_thumbnail_avoids_primary_pixel_decode() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let source = temp.path().join("embedded.jpg");
+        let cache_dir = temp.path().join("cache");
+        let primary = RgbaImage::from_pixel(1600, 900, Rgba([20, 80, 200, 255]));
+        let embedded = RgbaImage::from_pixel(320, 180, Rgba([220, 40, 30, 255]));
+        let source_bytes = jpeg_with_embedded_thumbnail(&primary, &embedded);
+        fs::write(&source, &source_bytes).expect("write source");
+
+        let processed = process_image_with_source_bytes(
+            &source,
+            &cache_dir,
+            "embedded-cache",
+            Some(&source_bytes),
+        )
+        .expect("process embedded preview");
+        let thumbnail_dimensions = image::ImageReader::open(&processed.thumbnail_path)
+            .expect("open generated thumbnail")
+            .decode()
+            .expect("decode generated thumbnail")
+            .dimensions();
+
+        assert_eq!((processed.width, processed.height), (900, 1600));
+        assert_eq!(thumbnail_dimensions, (180, 320));
+        assert_eq!(processed.timings.source_decode_us, 0);
+        assert!(processed.timings.thumbnail_decode_us > 0);
+    }
+
+    fn jpeg_with_embedded_thumbnail(primary: &RgbaImage, thumbnail: &RgbaImage) -> Vec<u8> {
+        let mut primary_bytes = Vec::new();
+        JpegEncoder::new_with_quality(&mut primary_bytes, 92)
+            .encode_image(primary)
+            .expect("encode primary");
+        let mut thumbnail_bytes = Vec::new();
+        JpegEncoder::new_with_quality(&mut thumbnail_bytes, 84)
+            .encode_image(thumbnail)
+            .expect("encode thumbnail");
+
+        let thumbnail_offset = 56_u32;
+        let mut tiff = Vec::new();
+        tiff.extend_from_slice(b"II");
+        tiff.extend_from_slice(&42_u16.to_le_bytes());
+        tiff.extend_from_slice(&8_u32.to_le_bytes());
+        tiff.extend_from_slice(&1_u16.to_le_bytes());
+        tiff.extend_from_slice(&0x0112_u16.to_le_bytes());
+        tiff.extend_from_slice(&3_u16.to_le_bytes());
+        tiff.extend_from_slice(&1_u32.to_le_bytes());
+        tiff.extend_from_slice(&[6, 0, 0, 0]);
+        tiff.extend_from_slice(&26_u32.to_le_bytes());
+        tiff.extend_from_slice(&2_u16.to_le_bytes());
+        tiff.extend_from_slice(&0x0201_u16.to_le_bytes());
+        tiff.extend_from_slice(&4_u16.to_le_bytes());
+        tiff.extend_from_slice(&1_u32.to_le_bytes());
+        tiff.extend_from_slice(&thumbnail_offset.to_le_bytes());
+        tiff.extend_from_slice(&0x0202_u16.to_le_bytes());
+        tiff.extend_from_slice(&4_u16.to_le_bytes());
+        tiff.extend_from_slice(&1_u32.to_le_bytes());
+        tiff.extend_from_slice(&(thumbnail_bytes.len() as u32).to_le_bytes());
+        tiff.extend_from_slice(&0_u32.to_le_bytes());
+        assert_eq!(tiff.len(), thumbnail_offset as usize);
+        tiff.extend_from_slice(&thumbnail_bytes);
+
+        let app1_length = u16::try_from(2 + 6 + tiff.len()).expect("APP1 length");
+        let mut output = vec![0xff, 0xd8, 0xff, 0xe1];
+        output.extend_from_slice(&app1_length.to_be_bytes());
+        output.extend_from_slice(b"Exif\0\0");
+        output.extend_from_slice(&tiff);
+        output.extend_from_slice(&primary_bytes[2..]);
+        output
     }
 }

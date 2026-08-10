@@ -1,36 +1,13 @@
-import { useEffect, useState } from "react";
-
-import { fetchThumbnail } from "../api";
 import type { AssetListItem } from "../types";
 import { ImageIcon } from "./Icons";
-
-const thumbnailCache = new Map<number, string>();
+import { useThumbnailSource } from "./thumbnailSource";
 
 interface ThumbnailProps {
   asset: AssetListItem;
 }
 
 export function Thumbnail({ asset }: ThumbnailProps) {
-  const [source, setSource] = useState<string | null>(() => thumbnailCache.get(asset.id) ?? null);
-  const [failed, setFailed] = useState(false);
-
-  useEffect(() => {
-    let active = true;
-    if (!asset.thumbnailAvailable || source) return undefined;
-
-    void fetchThumbnail(asset.id)
-      .then((value) => {
-        if (!active) return;
-        thumbnailCache.set(asset.id, value);
-        setSource(value);
-      })
-      .catch(() => {
-        if (active) setFailed(true);
-      });
-    return () => {
-      active = false;
-    };
-  }, [asset.id, asset.thumbnailAvailable, source]);
+  const { source, failed } = useThumbnailSource(asset);
 
   if (!asset.thumbnailAvailable || failed) {
     return (

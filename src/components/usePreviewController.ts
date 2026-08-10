@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 
 import { fetchPreview } from "../api";
 import type { AssetListItem } from "../types";
@@ -6,6 +6,42 @@ import { formatZoomPercent, smoothZoomLevel } from "./previewZoom";
 import type { NavigatorFrame, PreviewNavigatorProps } from "./PreviewNavigator";
 
 const PREVIEW_TIMEOUT_MS = 15_000;
+const ORIGINAL_PREFETCH_DELAY_MS = 300;
+const MAX_ORIGINAL_CACHE_ENTRIES = 3;
+const MAX_ORIGINAL_CACHE_BYTES = 96 * 1024 * 1024;
+
+type CachedOriginal = {
+  version: string;
+  source: string;
+  estimatedBytes: number;
+};
+
+function previewAssetVersion(asset: AssetListItem) {
+  return `${asset.absolutePath}\u0000${asset.fileSize}\u0000${asset.modifiedAt}`;
+}
+
+function calculateFitScale(
+  rect: { width: number; height: number } | null,
+  size: { width: number; height: number },
+) {
+  if (
+    !rect ||
+    !Number.isFinite(rect.width) ||
+    !Number.isFinite(rect.height) ||
+    rect.width <= 0 ||
+    rect.height <= 0 ||
+    !Number.isFinite(size.width) ||
+    !Number.isFinite(size.height) ||
+    size.width <= 0 ||
+    size.height <= 0
+  ) {
+    return null;
+  }
+  return Math.max(
+    0.05,
+    Math.min(1, (rect.width - 32) / size.width, (rect.height - 32) / size.height),
+  );
+}
 
 export interface PreviewController {
   asset: AssetListItem | null;
@@ -35,6 +71,7 @@ export interface PreviewController {
 export function usePreviewController(
   asset: AssetListItem | null,
   active: boolean,
+  prefetchAssets: AssetListItem[] = [],
 ): PreviewController {
   const stageRef = useRef<HTMLDivElement | null>(null);
   const [screenSource, setScreenSource] = useState<string | null>(null);
@@ -51,11 +88,69 @@ export function usePreviewController(
   const [dragging, setDragging] = useState(false);
   const [dragStart, setDragStart] = useState({ x: 0, y: 0 });
   const generation = useRef(0);
+  const assetRef = useRef<AssetListItem | null>(asset);
+  const currentAssetIdRef = useRef<number | null>(null);
+  const originalCacheRef = useRef(new Map<number, CachedOriginal>());
+  const originalCacheBytesRef = useRef(0);
+  const originalInFlightRef = useRef(new Map<string, Promise<string>>());
   const assetId = asset?.id ?? null;
-  const assetWidth = asset?.width ?? 1;
-  const assetHeight = asset?.height ?? 1;
+  const assetWidth = asset?.width && asset.width > 0 ? asset.width : 1;
+  const assetHeight = asset?.height && asset.height > 0 ? asset.height : 1;
+  const assetVersionKey = asset ? previewAssetVersion(asset) : "";
+  assetRef.current = asset;
+  currentAssetIdRef.current = assetId;
 
-  useEffect(() => {
+  const loadOriginalForAsset = useCallback((target: AssetListItem): Promise<string> => {
+    const version = previewAssetVersion(target);
+    const cached = originalCacheRef.current.get(target.id);
+    if (cached?.version === version) {
+      originalCacheRef.current.delete(target.id);
+      originalCacheRef.current.set(target.id, cached);
+      return Promise.resolve(cached.source);
+    }
+    if (cached) {
+      originalCacheRef.current.delete(target.id);
+      originalCacheBytesRef.current -= cached.estimatedBytes;
+    }
+
+    const requestKey = `${target.id}:${version}`;
+    const inFlight = originalInFlightRef.current.get(requestKey);
+    if (inFlight) return inFlight;
+
+    const request = fetchPreview(target.id, "original")
+      .then((source) => {
+        const estimatedBytes = source.length * 2;
+        if (estimatedBytes <= MAX_ORIGINAL_CACHE_BYTES) {
+          const previous = originalCacheRef.current.get(target.id);
+          if (previous) originalCacheBytesRef.current -= previous.estimatedBytes;
+          originalCacheRef.current.delete(target.id);
+          originalCacheRef.current.set(target.id, { version, source, estimatedBytes });
+          originalCacheBytesRef.current += estimatedBytes;
+
+          while (
+            originalCacheRef.current.size > MAX_ORIGINAL_CACHE_ENTRIES ||
+            originalCacheBytesRef.current > MAX_ORIGINAL_CACHE_BYTES
+          ) {
+            const oldestId = Array.from(originalCacheRef.current.keys()).find(
+              (id) => id !== currentAssetIdRef.current,
+            );
+            const idToRemove = oldestId ?? originalCacheRef.current.keys().next().value;
+            if (idToRemove === undefined) break;
+            const removed = originalCacheRef.current.get(idToRemove);
+            if (removed) originalCacheBytesRef.current -= removed.estimatedBytes;
+            originalCacheRef.current.delete(idToRemove);
+          }
+        }
+        return source;
+      })
+      .finally(() => {
+        originalInFlightRef.current.delete(requestKey);
+      });
+    originalInFlightRef.current.set(requestKey, request);
+    return request;
+  }, []);
+
+  useLayoutEffect(() => {
     const requestGeneration = ++generation.current;
     // The preview source is an async resource; clear it when the asset identity changes.
     // eslint-disable-next-line react-hooks/set-state-in-effect
@@ -64,7 +159,11 @@ export function usePreviewController(
     setLoadState(assetId !== null ? "loading" : "loaded");
     setOriginalState("idle");
     setNaturalSize({ width: assetWidth, height: assetHeight });
-    setFitScale(1);
+    const measuredFitScale = calculateFitScale(stageRef.current?.getBoundingClientRect() ?? null, {
+      width: assetWidth,
+      height: assetHeight,
+    });
+    if (measuredFitScale !== null) setFitScale(measuredFitScale);
     setZoom("fit");
     setOffset({ x: 0, y: 0 });
     setDragging(false);
@@ -78,7 +177,9 @@ export function usePreviewController(
     }, PREVIEW_TIMEOUT_MS);
     void (async () => {
       try {
-        const original = await fetchPreview(assetId, "original");
+        const requestAsset = assetRef.current;
+        if (!requestAsset) return;
+        const original = await loadOriginalForAsset(requestAsset);
         if (generation.current !== requestGeneration) return;
         setOriginalSource(original);
         setScreenSource(original);
@@ -103,32 +204,44 @@ export function usePreviewController(
       window.clearTimeout(timeout);
       generation.current += 1;
     };
-  }, [assetHeight, assetId, assetWidth]);
+  }, [assetHeight, assetId, assetVersionKey, assetWidth, loadOriginalForAsset]);
+
+  useEffect(() => {
+    const targets = active ? prefetchAssets.slice(1, 3) : prefetchAssets.slice(0, 1);
+    if (targets.length === 0) return undefined;
+    const timer = window.setTimeout(() => {
+      targets.forEach((target) => {
+        void loadOriginalForAsset(target).catch(() => undefined);
+      });
+    }, ORIGINAL_PREFETCH_DELAY_MS);
+    return () => window.clearTimeout(timer);
+  }, [active, assetId, loadOriginalForAsset, prefetchAssets]);
 
   useEffect(() => {
     if (!active) return undefined;
     const stage = stageRef.current;
     if (!stage) return undefined;
+    const naturalWidth = naturalSize.width;
+    const naturalHeight = naturalSize.height;
     const updateFit = () => {
       const rect = stage.getBoundingClientRect();
+      const nextFitScale = calculateFitScale(rect, {
+        width: naturalWidth,
+        height: naturalHeight,
+      });
+      if (nextFitScale === null) return;
       setStageSize({ width: rect.width, height: rect.height });
-      setFitScale(
-        Math.max(
-          0.05,
-          Math.min(
-            1,
-            (rect.width - 32) / naturalSize.width,
-            (rect.height - 32) / naturalSize.height,
-          ),
-        ),
-      );
+      setFitScale(nextFitScale);
       if (zoom === "fit") setOffset({ x: 0, y: 0 });
     };
     updateFit();
-    if (typeof ResizeObserver === "undefined") return undefined;
-    const observer = new ResizeObserver(updateFit);
-    observer.observe(stage);
-    return () => observer.disconnect();
+    window.addEventListener("resize", updateFit);
+    const observer = typeof ResizeObserver === "undefined" ? null : new ResizeObserver(updateFit);
+    observer?.observe(stage);
+    return () => {
+      window.removeEventListener("resize", updateFit);
+      observer?.disconnect();
+    };
   }, [active, naturalSize.height, naturalSize.width, zoom]);
 
   function currentScale() {
@@ -151,7 +264,7 @@ export function usePreviewController(
       return;
     const requestGeneration = generation.current;
     setOriginalState("loading");
-    void fetchPreview(asset.id, "original")
+    void loadOriginalForAsset(asset)
       .then((value) => {
         if (generation.current !== requestGeneration) return;
         setOriginalSource(value);
@@ -166,6 +279,7 @@ export function usePreviewController(
     if (next === "fit") {
       setZoom("fit");
       setOffset({ x: 0, y: 0 });
+      updateFitMeasurement();
       return;
     }
     const previousScale = currentScale();
@@ -212,11 +326,30 @@ export function usePreviewController(
   }
 
   function onDoubleClick() {
-    if (zoom !== "fit" && typeof zoom === "number" && zoom >= 1) {
+    if (zoom === "fit") {
+      zoomAround(1);
+    } else {
       zoomAround("fit");
-      return;
     }
-    zoomAround(1);
+  }
+
+  function updateFitMeasurement(size = naturalSize) {
+    const rect = stageRef.current?.getBoundingClientRect();
+    const nextFitScale = calculateFitScale(rect ?? null, size);
+    if (nextFitScale === null) return;
+    setStageSize({ width: rect!.width, height: rect!.height });
+    setFitScale(nextFitScale);
+    if (zoom === "fit") setOffset({ x: 0, y: 0 });
+  }
+
+  function onImageLoad(size: { width: number; height: number }) {
+    if (!Number.isFinite(size.width) || !Number.isFinite(size.height)) return;
+    const nextSize = {
+      width: Math.max(1, size.width),
+      height: Math.max(1, size.height),
+    };
+    setNaturalSize(nextSize);
+    updateFitMeasurement(nextSize);
   }
 
   function centerNavigatorAt(point: { x: number; y: number }) {
@@ -280,7 +413,7 @@ export function usePreviewController(
     zoomLabel,
     navigatorFrame,
     navigator,
-    onImageLoad: setNaturalSize,
+    onImageLoad,
     onWheel,
     onPointerDown,
     onPointerMove,

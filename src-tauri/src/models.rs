@@ -158,11 +158,13 @@ pub struct AssetDetail {
 pub struct SemanticLabelResult {
     pub label_id: String,
     pub display_name: String,
+    pub category_group: String,
     pub similarity: f64,
     pub threshold: f64,
     pub model_name: String,
     pub model_version: String,
     pub analysis_version: String,
+    pub taxonomy_version: String,
     pub analyzed_at: String,
     pub is_manual: bool,
     pub is_primary: bool,
@@ -234,6 +236,7 @@ pub struct FolderSummary {
 pub struct SemanticGroupSummary {
     pub label_id: String,
     pub display_name: String,
+    pub category_group: String,
     pub asset_count: i64,
 }
 
@@ -356,7 +359,10 @@ pub struct ScanPerformance {
     pub fingerprint_us: u64,
     pub image_processing_us: u64,
     pub exif_us: u64,
+    pub source_dimension_us: u64,
     pub decode_us: u64,
+    pub source_decode_us: u64,
+    pub thumbnail_decode_us: u64,
     pub resize_us: u64,
     pub feature_analysis_us: u64,
     pub thumbnail_write_us: u64,
@@ -496,7 +502,10 @@ pub struct ProcessedImage {
 #[derive(Debug, Clone, Default)]
 pub struct ImageProcessingTimings {
     pub exif_us: u64,
+    pub source_dimension_us: u64,
     pub decode_us: u64,
+    pub source_decode_us: u64,
+    pub thumbnail_decode_us: u64,
     pub resize_us: u64,
     pub feature_analysis_us: u64,
     pub thumbnail_write_us: u64,

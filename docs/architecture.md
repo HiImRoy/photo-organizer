@@ -34,14 +34,14 @@ User-selected source directory: read-only during scan and analysis
 - `src/`：React 工作区、类型化 Tauri client、确定性视觉夹具和组件测试。
 - `src-tauri/src/db.rs`：连接、事务、迁移、任务持久化、参数化筛选和分组统计。
 - `scanner.rs`：只读目录遍历、fingerprint、增量判定、基础分析和缺失标记。
-- `imaging.rs`：解码、方向处理、应用私有缩略图、连续影调/色彩特征；主色使用有彩色像素加权，单独保存中性色比例和主色覆盖率。
+- `imaging.rs`：解码、方向处理、应用私有缩略图、连续影调/色彩特征；优先使用 JPEG EXIF 内嵌预览，已有当前缓存时只从缩略图重算特征；主色使用有彩色像素加权，单独保存中性色比例和主色覆盖率。
 - `semantic.rs`：TinyCLIP 预处理、tokenizer、ONNX Runtime、余弦相似度、catalog 与 benchmark。
-- `semantic_tasks.rs`：单 worker 后台分析、单项失败隔离、进度和终态。
+- `semantic_tasks.rs`：单 worker 的有界批处理、缩略图路径门禁、批量 SQLite 持久化、单项失败隔离、进度和终态。
 - `workflow.rs`：收藏/集合、精确重复、本地文本与以图检索、相似聚类、人物隐私门禁，以及编辑预览/另存副本的安全执行器。
 - `tasks.rs`：扫描取消 token 与语义暂停/继续/取消控制器。
 - `ipc.rs`：唯一暴露给 UI 的命令；模型状态只报告实际启用的 provider。
 - 高清预览通过 `get_preview_data_url(asset_id, tier)` 受控读取：screen tier 以 EXIF 方向解码并缓存约 2560px JPEG，original tier 只为当前查看器临时读取原图；两者都不写入源目录。
-- `remove_library(library_id)` 先取消该图库的活动任务，再用 SQLite 外键事务清理索引、分析、任务和计划，并按数据库登记路径清理应用 cache；它不调用源目录删除、移动或重命名。
+- `remove_library(library_id)` 先取消该图库的活动任务，再用 SQLite 外键事务清理索引、分析、任务和计划，并只清理没有其他资产引用的应用 cache；它不调用源目录删除、移动或重命名。
 - `migrations/`：只增不改、随二进制嵌入的 SQLite schema。
 
 ## 增强工作流数据流
@@ -50,16 +50,16 @@ User-selected source directory: read-only during scan and analysis
 2. 精确重复查询复用扫描生成的完整 BLAKE3，不重新读取源图；结果只用于审阅或生成虚拟“重复待处理”集合。
 3. 文本查询调用 TinyCLIP 的文本输出，图片搜索和聚类只读取与当前模型、分析版本和源 fingerprint 一致的 `semantic_embeddings`。
 4. 相似聚类用向量主维度建立有界候选窗口，再做精确余弦与 complete-link 拆分；当前 5000 个 embedding 上限会明确报告截断。
-5. 编辑预览与导出都调用同一个 Rust `EditRecipe`。导出先持久化 `edit_export_plans`，确认时重验源 fingerprint 和目标边界，并在写文件前记录 `file_operation_jobs/file_operations`；回滚同样先预览并重验生成副本哈希，只删除未变化的应用生成副本。
+5. 编辑预览与导出都调用同一个 Rust `EditRecipe`。导出先持久化 `edit_export_plans`，确认时重验源 fingerprint 和目标边界（目标父目录先 canonicalize，避免 junction/symlink 绕过），并在写文件前记录 `file_operation_jobs/file_operations`；回滚同样先预览并重验生成副本哈希，只删除未变化的应用生成副本。
 6. 人脸表和 clear-all 边界已迁移，但模型未安装时状态固定为 `model_unavailable`，不产生检测框、身份向量或聚类。
 
 ## 扫描与语义数据流
 
 1. 用户通过系统目录选择器明确选择根目录。
-2. 扫描任务只读遍历 JPEG/PNG/WebP，生成 fingerprint、应用私有缩略图、EXIF 和传统特征；单文件失败不终止任务。
+2. 扫描任务只读遍历 JPEG/PNG/WebP，生成 fingerprint、应用私有缩略图、EXIF 和传统特征；有当前缓存时基础特征重算只解码缩略图，单文件失败不终止任务。
 3. UI 可在扫描时继续读取已提交资产。自然完成后才把本轮未见资产标为 missing；取消不会误标未遍历资产。
 4. 语义任务只选取基础分析已完成且当前 fingerprint/模型/分析版本没有有效结果的图片。
-5. 单 worker 在 CPU 上逐图执行真实 TinyCLIP；每项开始、成功、失败或跳过都持久化，失败后继续下一张。
+5. 单 worker 在 CPU 上以不超过 32 张的批次执行真实 TinyCLIP；语义输入只能是当前 `grid-640-v1` 缓存，批次结果合并事务写入，每项仍有成功、失败或跳过状态。
 6. 应用退出时已完成结果保持；重启把运行中的任务项恢复为 queued 并自动继续。用户暂停的任务保留 paused，可手动继续；取消将剩余资产还原为未分析。
 7. 图片 fingerprint 变化后旧标签和 embedding 仍可审计，但查询通过 fingerprint 与版本约束排除；重新分析写入当前结果。
 
@@ -77,7 +77,7 @@ User-selected source directory: read-only during scan and analysis
 - 预览读取只能通过 asset id 找到数据库登记的源路径；screen 预览缓存位于应用数据目录，图片切换用 generation token 忽略旧请求。
 - “从图库移除”只删除应用索引和 cache，源目录、原始图片和 EXIF/XMP 保持不变。
 - 模型缺失、哈希失败或 session 初始化失败只禁用语义分析；不会产生占位标签。
-- 扫描和语义任务使用独立注册器；语义保持单 worker，避免阻塞浏览和占满 CPU。
+- 扫描和语义任务使用独立注册器；语义保持单 worker 和有界批次，避免阻塞浏览和占满 CPU。
 - 测试只使用仓库夹具或临时目录，并对源文件做前后哈希验证。
 
 ## 架构变更规则

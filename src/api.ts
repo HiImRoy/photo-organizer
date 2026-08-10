@@ -5,7 +5,7 @@ import { open, save } from "@tauri-apps/plugin-dialog";
 import type {
   AssetDetail,
   AssetPage,
-  AssetFilter,
+  AssetQueryV1,
   CollectionDetail,
   CollectionSummary,
   ClassificationFieldDescriptor,
@@ -28,8 +28,6 @@ import type {
   SemanticRuntimeStatus,
   SimilarAsset,
   SimilarityClusterResponse,
-  SortDirection,
-  SortField,
   WorkflowAsset,
 } from "./types";
 import type { VisualFixture } from "./test/visual-fixture";
@@ -158,34 +156,28 @@ export async function fetchLibraries(): Promise<LibrarySummary[]> {
   return invoke<LibrarySummary[]>("list_libraries");
 }
 
-export async function fetchAssets(options: {
-  libraryId: number;
-  sort: SortField;
-  direction: SortDirection;
-  page: number;
-  pageSize?: number;
-  filter: AssetFilter;
-}): Promise<AssetPage> {
+export async function fetchAssets(query: AssetQueryV1): Promise<AssetPage> {
+  const pageSize = query.pageSize;
   const visual = await getVisualFixture();
   if (visual) {
     return visual.tools.fixtureAssetPage(visual.fixture, {
-      sort: options.sort,
-      direction: options.direction,
-      page: options.page,
-      pageSize: options.pageSize ?? 200,
-      filter: options.filter,
+      sort: query.sort,
+      direction: query.direction,
+      page: query.page,
+      pageSize,
+      filter: query.filter,
     });
   }
   if (!desktopRuntime) {
-    return { items: [], total: 0, page: options.page, pageSize: options.pageSize ?? 200 };
+    return { items: [], total: 0, page: query.page, pageSize };
   }
   return invoke<AssetPage>("list_assets", {
-    libraryId: options.libraryId,
-    sort: options.sort,
-    direction: options.direction,
-    page: options.page,
-    pageSize: options.pageSize ?? 200,
-    filter: options.filter,
+    libraryId: query.libraryId,
+    sort: query.sort,
+    direction: query.direction,
+    page: query.page,
+    pageSize,
+    filter: query.filter,
   });
 }
 

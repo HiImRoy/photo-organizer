@@ -19,6 +19,7 @@ import type {
   SemanticRuntimeStatus,
 } from "../types";
 import { ColorSwatches } from "./ColorSwatches";
+import { ImageHistogram } from "./ImageHistogram";
 import { PanelIcon, PlayIcon } from "./Icons";
 import { PreviewNavigator, type PreviewNavigatorProps } from "./PreviewNavigator";
 import { Thumbnail } from "./Thumbnail";
@@ -88,6 +89,10 @@ export function DetailPanel({
               </dl>
             </DetailSection>
 
+            <DetailSection title="直方图" trailing="缩略图">
+              <ImageHistogram key={asset.id} asset={asset} />
+            </DetailSection>
+
             <DetailSection title="拍摄信息">
               <dl className="property-list">
                 <Property
@@ -145,11 +150,21 @@ export function DetailPanel({
             <DetailSection title="语义标签" trailing={semanticStateLabel(asset.semanticStatus)}>
               {asset.semanticLabels.length ? (
                 <div className="semantic-detail-list">
+                  {isVirtualUnknown(asset) ? (
+                    <div className="semantic-rejection-state">
+                      <span>
+                        未知
+                        <small>拒识状态</small>
+                      </span>
+                      <strong>—</strong>
+                      <p>没有任何模型相似度分数达到可靠场景分类条件。</p>
+                    </div>
+                  ) : null}
                   {asset.semanticLabels.map((label) => (
                     <div key={label.labelId}>
                       <span>
                         {label.displayName}
-                        <small>{label.isPrimary ? "一级分类" : "辅助标签"}</small>
+                        <small>{semanticGroupLabel(label.categoryGroup)}</small>
                       </span>
                       <strong>{label.similarity.toFixed(3)}</strong>
                       <i
@@ -161,7 +176,11 @@ export function DetailPanel({
                 </div>
               ) : (
                 <div className="semantic-empty">
-                  {asset.semanticStatus === "failed" ? asset.semanticError : "尚无真实语义分析结果"}
+                  {asset.semanticStatus === "failed"
+                    ? asset.semanticError
+                    : isVirtualUnknown(asset)
+                      ? "分析完成，但没有达到可靠置信度；未知不是模型标签。"
+                      : "尚无真实语义分析结果"}
                 </div>
               )}
               <dl className="property-list model-properties">
@@ -312,7 +331,7 @@ function ClassificationEditor({
   };
 
   const summary = [
-    `主类别：${classificationValueLabel(classification.primaryCategory.effective, "primary", catalog)}`,
+    `场景分类：${classificationValueLabel(classification.primaryCategory.effective, "primary", catalog)}`,
     `影调：${classificationValueLabel(classification.tone.effective, "tone", catalog)}`,
     `主色：${classificationValuesLabel(
       classification.dominantColorCategories.effective,
@@ -348,7 +367,7 @@ function ClassificationEditor({
         <div className="classification-editor">
           {registryIds.has("primary_category") ? (
             <ClassificationRow
-              label="主类别"
+              label="场景分类"
               auto={classificationValueLabel(
                 classification.primaryCategory.auto,
                 "primary",
@@ -367,7 +386,7 @@ function ClassificationEditor({
               source={classification.primaryCategory.source}
               control={
                 <select value={primary} onChange={(event) => setPrimary(event.target.value)}>
-                  <option value="">请选择主类别</option>
+                  <option value="">请选择场景分类</option>
                   {primaryOptions.map((option) => (
                     <option value={option.value} key={option.value}>
                       {option.label}
@@ -603,4 +622,25 @@ function semanticStateLabel(status: string) {
   if (status === "running" || status === "queued") return "分析中";
   if (status === "failed") return "失败";
   return "未分析";
+}
+
+function semanticGroupLabel(group: string) {
+  switch (group) {
+    case "scene":
+      return "场景分类";
+    case "subject":
+      return "主体标签";
+    case "context":
+      return "环境属性";
+    default:
+      return "语义标签";
+  }
+}
+
+function isVirtualUnknown(asset: AssetListItem) {
+  return (
+    asset.semanticStatus === "completed" &&
+    asset.classification.primaryCategory.effective === "unknown" &&
+    !asset.semanticLabels.some((label) => label.isPrimary)
+  );
 }

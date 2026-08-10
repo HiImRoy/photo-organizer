@@ -2136,6 +2136,14 @@ select:disabled {
   color: #bcd3e9;
   letter-spacing: 0.04em;
 }
+.organization-scope-chip {
+  padding: 4px 7px;
+  color: #bcd3e9;
+  font-size: 10px;
+  border: 1px solid rgba(188, 211, 233, 0.24);
+  border-radius: 999px;
+  background: rgba(188, 211, 233, 0.08);
+}
 .organization-safety-banner button {
   margin-left: auto;
   padding: 5px 9px;
@@ -5385,6 +5393,10 @@ button:disabled {
   background: #e7f1ff;
 }
 
+.filmstrip button {
+  position: relative;
+}
+
 .filmstrip button.is-selected:not(.is-active) {
   border-color: rgba(134, 167, 204, 0.82);
   box-shadow: inset 0 0 0 1px rgba(134, 167, 204, 0.3);
@@ -5606,6 +5618,17 @@ button:disabled {
     width: 100%;
     justify-content: flex-end;
   }
+}
+
+/* Lightroom-style current-image cue: keep the indicator attached to the
+   selected thumbnail instead of placing a fixed label over the canvas. */
+.filmstrip button.is-active {
+  border-color: var(--focus) !important;
+  outline: none;
+  outline-offset: 0;
+  box-shadow:
+    inset 0 0 0 2px var(--focus),
+    var(--shadow-pressed) !important;
 }
 
 /* Keep the single-library sidebar direct: the titlebar owns the import action,
@@ -6415,6 +6438,8 @@ button.primary-action:active:not(:disabled) {
 }
 
 .sidebar-filter-module {
+  display: flex;
+  flex-direction: column;
   min-height: 0;
   flex: 1 1 0;
 }
@@ -6452,20 +6477,23 @@ button.primary-action:active:not(:disabled) {
 }
 
 .sidebar-filter-area {
-  height: 100%;
+  height: auto;
   min-height: 0;
+  flex: 1 1 0;
   overflow-y: auto;
   padding: 0 12px 14px;
   background: transparent;
 }
 
 .sidebar-filter-module .sidebar-area-heading {
-  position: sticky;
-  z-index: 2;
-  top: 0;
+  position: relative;
+  z-index: 1;
+  top: auto;
+  flex: 0 0 54px;
   min-height: 54px;
-  margin: 0 -12px 10px;
-  padding: 16px 16px 12px;
+  margin: 0 0 6px;
+  padding: 0 16px;
+  align-items: center;
   border-radius: var(--neu-sidebar-module-radius) var(--neu-sidebar-module-radius) 0 0;
   background: linear-gradient(180deg, #3b3b3b 0%, #303030 100%);
   box-shadow:
@@ -7661,6 +7689,27 @@ button.primary-action:active:not(:disabled) {
   line-height: 1.55;
 }
 
+.workflow-scope-summary {
+  display: grid;
+  gap: 3px;
+  margin: 0 8px 12px;
+  padding: 9px 10px;
+  border: 1px solid var(--border-soft);
+  border-radius: 9px;
+  background: var(--panel-inset);
+}
+
+.workflow-scope-summary strong {
+  color: var(--text);
+  font-size: 12px;
+}
+
+.workflow-scope-summary span,
+.workflow-scope-summary small {
+  color: var(--text-muted);
+  font-size: 9px;
+}
+
 .workflow-nav nav {
   display: grid;
   gap: 4px;
@@ -7727,6 +7776,21 @@ button.primary-action:active:not(:disabled) {
 .workflow-selection-note small {
   color: var(--text-muted);
   font-size: 9px;
+}
+
+.workflow-back-button {
+  margin: 10px 8px 0;
+  padding: 8px 10px;
+  color: var(--text-secondary);
+  border: 1px solid var(--border-soft);
+  border-radius: 8px;
+  background: transparent;
+  cursor: pointer;
+}
+
+.workflow-back-button:hover {
+  color: var(--text);
+  background: var(--accent-soft);
 }
 
 .workflow-content {
@@ -8851,4 +8915,132 @@ button.primary-action:active:not(:disabled) {
   .analysis-status-filter-controls {
     flex-wrap: wrap;
   }
+}
+
+/* The histogram follows the same compact inner-well language as the
+   navigator map and keeps its source explicit: it is calculated from the
+   cached thumbnail, never from the original preview. */
+.right-panel .image-histogram {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+}
+
+.right-panel .histogram-toolbar,
+.right-panel .histogram-channel-controls,
+.right-panel .histogram-scale {
+  display: flex;
+  align-items: center;
+}
+
+.right-panel .histogram-toolbar {
+  justify-content: space-between;
+  gap: 8px;
+  color: var(--text-muted);
+  font-size: 8px;
+}
+
+.right-panel .histogram-channel-controls {
+  gap: 3px;
+}
+
+.right-panel .histogram-channel-controls button {
+  display: grid;
+  width: 21px;
+  height: 18px;
+  padding: 0;
+  place-items: center;
+  color: var(--text-muted);
+  border: 0;
+  border-radius: 5px;
+  background: var(--neu-detail-inner-bg);
+  box-shadow: var(--neu-shadow-control);
+  cursor: pointer;
+  font-size: 8px;
+  font-weight: 700;
+  line-height: 1;
+}
+
+.right-panel .histogram-channel-controls button.is-active {
+  color: var(--text-high);
+  background: var(--neu-surface-pressed);
+  box-shadow: var(--neu-shadow-pressed);
+}
+
+.right-panel .histogram-channel-controls button.is-red.is-active {
+  color: #e88989;
+}
+
+.right-panel .histogram-channel-controls button.is-green.is-active {
+  color: #8fc59a;
+}
+
+.right-panel .histogram-channel-controls button.is-blue.is-active {
+  color: #8db5e0;
+}
+
+.right-panel .histogram-channel-controls button.is-all.is-active {
+  color: var(--accent-strong);
+}
+
+.right-panel .histogram-channel-controls button:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--accent-strong) 72%, transparent);
+  outline-offset: 1px;
+}
+
+.right-panel .histogram-chart {
+  display: grid;
+  min-height: 64px;
+  place-items: center;
+  overflow: hidden;
+  border-radius: 7px;
+  background: var(--neu-detail-inner-bg);
+  box-shadow: var(--neu-detail-inner-shadow);
+}
+
+.right-panel .histogram-chart svg {
+  display: block;
+  width: 100%;
+  height: 64px;
+}
+
+.right-panel .histogram-grid-lines {
+  color: var(--text-muted);
+  opacity: 0.18;
+}
+
+.right-panel .histogram-grid-lines line {
+  stroke: currentColor;
+  stroke-width: 0.5;
+}
+
+.right-panel .histogram-red,
+.right-panel .histogram-green,
+.right-panel .histogram-blue {
+  mix-blend-mode: screen;
+}
+
+.right-panel .histogram-red {
+  fill: rgba(239, 68, 68, 0.32);
+}
+
+.right-panel .histogram-green {
+  fill: rgba(34, 197, 94, 0.28);
+}
+
+.right-panel .histogram-blue {
+  fill: rgba(59, 130, 246, 0.3);
+}
+
+.right-panel .histogram-status {
+  color: var(--text-muted);
+  font-size: 8px;
+}
+
+.right-panel .histogram-scale {
+  justify-content: space-between;
+  padding-inline: 1px;
+  color: var(--text-muted);
+  font-size: 8px;
+  opacity: 0.7;
 }

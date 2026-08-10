@@ -1,8 +1,17 @@
 # Checkpoint D — Semantic + Dominant Color
 
-状态：NOT_STARTED
+状态：PARTIAL_REQUIRES_RECONCILIATION
 
-本阶段升级 Semantic taxonomy、分类状态语义、模型版本追踪和 Dominant Color pipeline。完成后必须提交并停止，不能自动进入 Checkpoint E。
+本阶段升级 Semantic taxonomy、分类状态语义、模型版本追踪和 Dominant Color pipeline。当前工作树已完成 D1-D3 的 taxonomy/拒识/分组基线，但 D4-D10 的评估、阈值校准、Dominant Color 细化和人工视觉复核仍未完成；完成后必须提交并停止，不能自动进入 Checkpoint E。
+
+### 2026-08-10 执行记录
+
+- 新增执行计划 [0025-semantic-taxonomy-and-open-set](../plans/0025-semantic-taxonomy-and-open-set.md) 和 ADR 0006。
+- `semantic_labels` 通过 migration 0012 增加 `category_group` 与 `taxonomy_version`；旧结果保留但不会混入当前 taxonomy。
+- 当前自动标签分为 `scene`（互斥且最多一个）、`subject`（多选）和 `context`（多选）。旧 `primary_category` 继续作为 scene 的兼容槽位。
+- `unknown` 已从 TinyCLIP prompt 和相似度榜单移除；完成但没有可靠 scene 的结果由 Effective Resolver 生成虚拟拒识状态，FAILED 仍不生成自动分类。
+- 侧栏、详情、场景分组和筛选已消费同一分组元数据；未知筛选使用虚拟状态条件。
+- Rust 58 个库测试 + 3 个二进制测试、clippy、fmt check，以及前端 38 个测试、typecheck、format check 已通过；尚未完成人工语义质量验收。
 
 ## 1. Goal
 
@@ -94,19 +103,19 @@ Imaging / Color：
 ## 5. Current Implementation
 
 - [src-tauri/src/semantic.rs](E:/Code/Codex/photo-organizer/src-tauri/src/semantic.rs)
-  - LABELS 数组定义当前 Semantic labels、displayName、threshold 和 primary 标记。
-  - select_predictions 当前做阈值、top score window、primary fallback 和 unknown fallback。
+  - LABELS 数组定义稳定 ID、displayName、category group 和 threshold；unknown 不再是模型候选。
+  - select_predictions 按 scene/subject/context 分组选择；scene 只保留一个通过阈值和组内 margin 的结果。
   - 当前 inference error 由 SemanticError 返回。
 - [src-tauri/src/semantic_tasks.rs](E:/Code/Codex/photo-organizer/src-tauri/src/semantic_tasks.rs)
   - 负责逐 Asset 执行 Semantic task 和保存结果。
-  - 当前没有把 Semantic FAILED 与 UNKNOWN 完整分离为最终产品状态。
+  - 失败仍写入 semantic_status=failed；成功空结果由读取层解释为虚拟 unknown。
 - [src-tauri/src/models.rs](E:/Code/Codex/photo-organizer/src-tauri/src/models.rs)
-  - SemanticLabelResult 同时包含 modelVersion、analysisVersion、isManual、isPrimary。
-  - 版本字段尚未按 Semantic、taxonomy、imaging、color、tone 分开。
+  - SemanticLabelResult 同时包含 modelVersion、analysisVersion、taxonomyVersion、categoryGroup、isManual、isPrimary。
+  - Imaging、Color、Tone 的独立版本仍待后续 D 阶段完善。
 - [src-tauri/src/db.rs](E:/Code/Codex/photo-organizer/src-tauri/src/db.rs)
-  - semantic_labels 保存 label、threshold、source fingerprint 和模型字段。
-  - semantic_labels_for_asset 通过当前模型版本读取结果。
-  - list_semantic_groups 使用固定 MODEL_NAME、MODEL_VERSION 和 SEMANTIC_ANALYSIS_VERSION。
+  - semantic_labels 保存 label、threshold、source fingerprint、category group 和 taxonomy version。
+  - semantic_labels_for_asset 通过当前模型、分析版本、taxonomy 和 fingerprint 读取结果。
+  - list_semantic_groups 同时返回 scene、subject、context 的有效标签计数，并包含虚拟 unknown。
 - [src-tauri/src/imaging.rs](E:/Code/Codex/photo-organizer/src-tauri/src/imaging.rs)
   - ANALYSIS_VERSION 当前同时承担基础 imaging 版本。
   - analyze_rgba 计算 brightness、saturation、chroma、neutral ratio、dominant color 和 coverage。
@@ -119,13 +128,13 @@ Imaging / Color：
 - [docs/model-evaluation.md](E:/Code/Codex/photo-organizer/docs/model-evaluation.md)
   - 记录当前模型评估背景。
 
-### 当前分类注册表（D1/D3 已部分落地）
+### 当前分类注册表（D1-D3 基线已落地）
 
-- 活动主类别：人像、风景、建筑、静物、动物、文档、未知。
-- 活动辅助标签：多人、室内、街道、车辆、食品、夜景、花卉、抽象。
-- `still_life`、`screenshot`、`mountain`、`water`、`forest`、`sunset` 作为历史 ID 保留可读性，但不再由当前 catalog、自动预测或相似度榜单暴露。
-- 手动编辑器和筛选器只提供活动分类；历史值通过稳定 ID 和中文回退映射继续显示。
-- 这不代表 D2、D4-D10 已完成，完整 taxonomy version、失败状态和评估流程仍按本 Checkpoint 的剩余任务执行。
+- scene：人像、多人、风景、建筑、产品、静物、食品、动物、截图、文档、抽象、其他。
+- subject：车辆、花卉、山、水体、森林。
+- context：室内、街道、夜景、日落。
+- 未知不出现在 catalog；前端用虚拟 descriptor 提供筛选和手动恢复入口，但不显示模型分数。
+- 这不代表 D4-D10 已完成，完整阈值校准、evaluation dataset、Color pipeline 和人工视觉复核仍按本 Checkpoint 的剩余任务执行。
 
 ## 6. Target State
 

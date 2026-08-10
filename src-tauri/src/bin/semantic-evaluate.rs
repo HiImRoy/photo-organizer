@@ -649,6 +649,7 @@ mod tests {
             raw_similarities: vec![SemanticSimilarity {
                 label_id: top1.into(),
                 display_name: top1.into(),
+                category_group: "scene".into(),
                 similarity: 0.3,
                 threshold: 0.16,
             }],

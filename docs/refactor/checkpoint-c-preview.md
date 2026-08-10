@@ -1,8 +1,8 @@
 # Checkpoint C — Preview
 
-状态：NOT_STARTED
+状态：PARTIAL_REQUIRES_RECONCILIATION
 
-本阶段统一当前图片状态、预览资源层级和异步加载安全。完成后必须提交并停止，不能自动进入 Checkpoint D。
+本阶段原计划统一当前图片状态、预览资源层级和异步加载安全。当前按用户体验要求保留旧预览链路，仅保留 `activeAssetId` 单一当前图片状态和“双击回到适应屏幕”的交互调整；新的 DPR/tier 资源方案不作为已完成内容。
 
 ## 1. Goal
 
@@ -38,7 +38,7 @@
 
 - activeAssetId 是唯一当前图片状态源。
 - selectedAssetIds 是批量选择状态，不能替代 activeAssetId。
-- 预览资源必须绑定 Asset ID、fingerprint、tier 和尺寸/DPR。
+- 预览资源必须绑定 Asset ID、fingerprint 和尺寸；tier/DPR 资源契约仍待重新规划。
 - 过期响应不能覆盖当前 Asset。
 - Original 读取只读源文件。
 - thumbnail、screen、preview cache 只能写入 AppData。
@@ -47,29 +47,32 @@
 
 ## 5. Current Implementation
 
-- [src/App.tsx](E:/Code/Codex/photo-organizer/src/App.tsx)
-  - 同时维护 activeAssetId 和 previewAssetId。
-  - activeAsset、previewAsset 分别通过 useMemo 查找。
-  - openSinglePreview、selectPreview、navigatePreview 同时写两个状态。
+- [src/App.tsx](D:/Code/Codex/photo-manager/src/App.tsx)
+  - 只维护 activeAssetId；activeAsset 同时驱动 DetailPanel、Single Preview、Filmstrip 和导航。
+  - openSinglePreview、selectPreview、navigatePreview 只更新 activeAssetId。
   - SinglePreview、ZoomablePreview 和预览请求逻辑位于同一文件。
-  - 当前使用 generation guard，但请求本身没有真正 abort。
-- [src/api.ts](E:/Code/Codex/photo-organizer/src/api.ts)
-  - fetchPreview(assetId, tier) 当前只接受 Asset ID 和资源 tier。
-- [src/components/Thumbnail.tsx](E:/Code/Codex/photo-organizer/src/components/Thumbnail.tsx)
+  - 预览控制器恢复为原图优先、原图失败后回退 screen、generation guard、bounded timeout 的旧逻辑；双击在适应屏幕和 100% 之间切换。
+  - 网格当前图或单图当前图进入稳定状态后，延迟预取前后相邻最多两张原图；缓存有数量和估算内存上限，并按源版本复用。
+  - 胶片栏以跟随当前 Asset 的环形描边标记预览图片；左右切换时不强制居中，只有当前缩略图离开可视区域时才做最小滚动。fit 测量会忽略零尺寸容器并在图片加载/窗口变化时重算。
+- [src/api.ts](D:/Code/Codex/photo-manager/src/api.ts)
+  - `fetchPreview(assetId, tier, maxWidth, maxHeight)` 仅保留旧的 screen/original 请求兼容参数，不按 viewport/DPR 重请求。
+- [src/components/Thumbnail.tsx](D:/Code/Codex/photo-manager/src/components/Thumbnail.tsx)
   - 负责网格 thumbnail 显示和加载状态。
-- [src-tauri/src/ipc.rs](E:/Code/Codex/photo-organizer/src-tauri/src/ipc.rs)
+- [src-tauri/src/ipc.rs](D:/Code/Codex/photo-manager/src-tauri/src/ipc.rs)
   - preview IPC 读取 Asset source，生成或读取 AppData preview cache。
-  - 当前实现使用 fs::write/fs::rename 等 cache 写入逻辑。
-- [src-tauri/src/imaging.rs](E:/Code/Codex/photo-organizer/src-tauri/src/imaging.rs)
+  - 恢复旧的 screen/original 路由；screen cache key 绑定 asset、fingerprint 和尺寸，original data URL 受 96 MiB 上限。
+- [src-tauri/src/imaging.rs](D:/Code/Codex/photo-manager/src-tauri/src/imaging.rs)
   - process_image 写 thumbnail。
   - load_oriented_image 读取并应用 EXIF orientation。
-  - SCREEN_PREVIEW_SPEC 定义当前 screen 规格。
-- [src-tauri/src/paths.rs](E:/Code/Codex/photo-organizer/src-tauri/src/paths.rs)
+  - SCREEN_PREVIEW_SPEC 定义当前 screen 规格；screen preview 仍只写 AppData cache。
+- [src-tauri/src/paths.rs](D:/Code/Codex/photo-manager/src-tauri/src/paths.rs)
   - 创建 thumbnail、preview 和 database 目录。
-- [src/App.test.tsx](E:/Code/Codex/photo-organizer/src/App.test.tsx)
-  - 当前测试预期 fetchPreview(assetId, "screen")，并覆盖选择、预览和导航。
+- [src/App.test.tsx](D:/Code/Codex/photo-manager/src/App.test.tsx)
+  - 当前测试覆盖旧 screen/original 请求、选择、预览、导航、缩放/平移/适配和 Escape；不再把 DPR/tier 方案视为当前契约。
 
 ## 6. Target State
+
+以下是待重新规划的未来目标，不代表本轮回退后的当前实现；在重新确认加载性能和缩放体验前，不继续实施其中的 DPR/tier 扩展。
 
 ### Domain Model
 
@@ -130,7 +133,7 @@
 - 点击卡片、Enter、双击和 Filmstrip 都只改变 activeAssetId。
 - Preview 和 DetailPanel 始终显示同一个 Asset。
 - Escape 返回 Grid，但不产生第二个 preview selection。
-- Original 只为当前单图查看器加载；进入单图时优先请求原图，不预加载整组原图。
+- Original 只为当前单图查看器和前后相邻最多两张图片按需加载；不预加载整组原图。
 
 ## 7. Detailed Implementation Steps
 
@@ -278,11 +281,9 @@ Goal：验证预览在真实桌面窗口中的性能和交互。
 
 ### Rust unit
 
-- tier key 生成。
-- DPR size clamp。
-- fingerprint cache invalidation。
 - oriented image read。
 - source boundary check。
+- 旧 preview cache 和 source boundary 行为。
 
 ### Rust integration
 
@@ -325,48 +326,57 @@ Goal：验证预览在真实桌面窗口中的性能和交互。
 4. 使用左右方向键。
    - 预期：按照当前 sort/filter 和 recursive scope 导航。
 5. 打开单图并缩放到不同级别。
-   - 预期：当前图片优先请求 original；原图读取失败时回退 screen，不加载无关图片。
+   - 预期：当前图片优先请求 original；原图读取失败时回退 screen，只有限预取相邻图片。
 6. 快速连续切换多张图片。
    - 预期：旧请求不会覆盖最后选中的图片。
-7. 调整窗口 DPR 或尺寸。
-   - 预期：screen resource 重新匹配尺寸，旧缓存不会错误复用。
-8. 使用 zoom、pan、fit。
-   - 预期：图片不会跳出边界，切换 Asset 后状态符合定义。
-9. 按 Escape。
-   - 预期：关闭 Single Preview 或清除选择，不产生隐藏 preview state。
-10. 断开或删除 fixture source。
+7. 等待当前图打开后切换下一张再返回。
+   - 预期：邻图会在后台预取，已缓存图片不重复发起原图请求。
+8. 在适应屏幕状态双击，再次双击回到适应屏幕。
+   - 预期：第一次为 100%，第二次恢复适应屏幕。
+9. 调整窗口尺寸。
+   - 预期：预览继续适配窗口，不触发连续的 DPR/screen 资源请求。
+10. 使用 zoom、pan、fit。
+
+- 预期：图片不会跳出边界，切换 Asset 后状态符合定义。
+
+11. 按 Escape。
+
+- 预期：关闭 Single Preview 或清除选择，不产生隐藏 preview state。
+
+12. 断开或删除 fixture source。
     - 预期：显示 missing/error，不修改数据库外的源目录。
-11. 检查 cache。
+13. 检查 cache。
     - 预期：只写入 AppData，源文件 hash 不变。
 
 ## 11. Exit Criteria
 
-- [ ] previewAssetId 已删除。
-- [ ] activeAssetId 是唯一当前图片状态。
-- [ ] Grid、Detail、Preview、Filmstrip 状态一致。
-- [ ] thumbnail、screen、original tier 契约稳定。
-- [ ] cache key 包含 Asset fingerprint、tier、尺寸和 DPR。
-- [ ] Original transport 有大小和内存边界。
-- [ ] 旧响应不会覆盖当前 Asset。
-- [ ] zoom、pan、fit、键盘和 Escape 通过测试。
-- [ ] Preview 不写 SourceRoot。
-- [ ] Rust、frontend、source integrity 和 desktop tests 通过。
+- [x] previewAssetId 已删除。
+- [x] activeAssetId 是唯一当前图片状态。
+- [x] Grid、Detail、Preview、Filmstrip 状态一致。
+- [ ] thumbnail、screen、original 三层 tier 契约稳定（本轮未保留新 tier 方案）。
+- [ ] cache key 包含 Asset fingerprint、tier、尺寸和 DPR（待重新规划）。
+- [x] Original transport 有大小和内存边界。
+- [x] 旧响应不会覆盖当前 Asset。
+- [x] zoom、pan、fit、键盘和 Escape 通过自动化测试。
+- [x] 当前图片标识、邻图有限预取和 fit/100% 双击行为通过自动化测试。
+- [x] Preview 不写 SourceRoot（自动化 source-boundary 测试通过）。
+- [x] Rust、frontend 和现有 source-integrity 自动化测试通过。
 - [ ] Manual Verification 全部通过。
 - [ ] 创建独立 Checkpoint C commit。
 
 ## 12. Expected Files To Change
 
-- [src/App.tsx](E:/Code/Codex/photo-organizer/src/App.tsx)
-- [src/types.ts](E:/Code/Codex/photo-organizer/src/types.ts)
-- [src/api.ts](E:/Code/Codex/photo-organizer/src/api.ts)
-- [src/components/AssetCard.tsx](E:/Code/Codex/photo-organizer/src/components/AssetCard.tsx)
-- [src/components/Thumbnail.tsx](E:/Code/Codex/photo-organizer/src/components/Thumbnail.tsx)
+- [src/App.tsx](D:/Code/Codex/photo-manager/src/App.tsx)
+- [src/types.ts](D:/Code/Codex/photo-manager/src/types.ts)
+- [src/api.ts](D:/Code/Codex/photo-manager/src/api.ts)
+- [src/components/AssetCard.tsx](D:/Code/Codex/photo-manager/src/components/AssetCard.tsx)
+- [src/components/Thumbnail.tsx](D:/Code/Codex/photo-manager/src/components/Thumbnail.tsx)
 - 预览相关 component 和 styles。
-- [src/App.test.tsx](E:/Code/Codex/photo-organizer/src/App.test.tsx)
-- [src-tauri/src/models.rs](E:/Code/Codex/photo-organizer/src-tauri/src/models.rs)
-- [src-tauri/src/ipc.rs](E:/Code/Codex/photo-organizer/src-tauri/src/ipc.rs)
-- [src-tauri/src/imaging.rs](E:/Code/Codex/photo-organizer/src-tauri/src/imaging.rs)
-- [src-tauri/src/paths.rs](E:/Code/Codex/photo-organizer/src-tauri/src/paths.rs)
+- [src/App.test.tsx](D:/Code/Codex/photo-manager/src/App.test.tsx)
+- [src-tauri/src/models.rs](D:/Code/Codex/photo-manager/src-tauri/src/models.rs)
+- [src-tauri/src/ipc.rs](D:/Code/Codex/photo-manager/src-tauri/src/ipc.rs)
+- [src-tauri/src/imaging.rs](D:/Code/Codex/photo-manager/src-tauri/src/imaging.rs)
+- [src-tauri/src/paths.rs](D:/Code/Codex/photo-manager/src-tauri/src/paths.rs)
 
 ## 13. Risks
 

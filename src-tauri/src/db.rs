@@ -20,7 +20,8 @@ use crate::models::{
 };
 use crate::semantic::{
     ANALYSIS_VERSION as SEMANTIC_ANALYSIS_VERSION, MODEL_NAME, MODEL_VERSION,
-    SemanticAnalysisOutput, known_display_name_for_label_id,
+    SemanticAnalysisOutput, TAXONOMY_VERSION, category_group_for_label_id,
+    known_display_name_for_label_id,
 };
 use crate::source_identity::{SourceIdentity, identity_key, is_same_or_descendant};
 
@@ -41,6 +42,7 @@ const MANUAL_ASSET_MARKS_MIGRATION: &str =
     include_str!("../migrations/0010_manual_asset_marks.sql");
 const PHOTO_WORKFLOW_MVP_MIGRATION: &str =
     include_str!("../migrations/0011_photo_workflow_mvp.sql");
+const SEMANTIC_TAXONOMY_MIGRATION: &str = include_str!("../migrations/0012_semantic_taxonomy.sql");
 
 #[derive(Debug, Clone)]
 pub struct Repository {
@@ -114,6 +116,7 @@ impl Repository {
             (9_i64, MANUAL_CLASSIFICATION_MIGRATION),
             (10_i64, MANUAL_ASSET_MARKS_MIGRATION),
             (11_i64, PHOTO_WORKFLOW_MVP_MIGRATION),
+            (12_i64, SEMANTIC_TAXONOMY_MIGRATION),
         ] {
             if current < version {
                 let transaction = connection.transaction()?;
@@ -689,6 +692,15 @@ impl Repository {
         Ok(missing)
     }
 
+    pub fn fail_library_scope(&self, library_id: i64, error: &str) -> AppResult<()> {
+        let connection = self.open()?;
+        connection.execute(
+            "UPDATE libraries SET status='error', last_error=?2 WHERE id=?1",
+            params![library_id, error],
+        )?;
+        Ok(())
+    }
+
     pub fn cancel_scan(&self, task_id: &str, library_id: i64) -> AppResult<()> {
         let mut connection = self.open()?;
         let transaction = connection.transaction()?;
@@ -1215,7 +1227,20 @@ impl Repository {
                     |row| row.get::<_, String>(0),
                 )?;
                 transaction.execute("DELETE FROM assets WHERE id=?1", [asset_id])?;
-                removed_cache_entries.push((asset_id, fingerprint, cache_path));
+                let removable_cache_path = if let Some(cache_path) = cache_path {
+                    let cache_path_string = cache_path.to_string_lossy().into_owned();
+                    let still_referenced: bool = transaction.query_row(
+                        "SELECT EXISTS(
+                            SELECT 1 FROM thumbnails WHERE cache_path=?1
+                        )",
+                        [&cache_path_string],
+                        |row| row.get(0),
+                    )?;
+                    (!still_referenced).then_some(cache_path)
+                } else {
+                    None
+                };
+                removed_cache_entries.push((asset_id, fingerprint, removable_cache_path));
             }
         }
 
@@ -1656,29 +1681,43 @@ impl Repository {
             .query_map([library_id], |row| row.get::<_, i64>(0))?
             .collect::<Result<Vec<_>, _>>()?;
         drop(statement);
-        let mut groups = HashMap::<String, (String, i64)>::new();
+        let mut groups = HashMap::<String, (String, String, i64)>::new();
         for asset_id in asset_ids {
             let mut asset = load_asset_by_id(&connection, asset_id)?;
             asset.semantic_labels = semantic_labels_for_asset(&connection, asset_id)?;
             asset.classification = effective_classification_for_asset(&connection, &asset)?;
-            let Some(label_id) = asset.classification.primary_category.effective else {
-                continue;
+            let mut add_group = |label_id: String| {
+                let label = asset
+                    .semantic_labels
+                    .iter()
+                    .find(|label| label.label_id == label_id);
+                let display_name = label
+                    .map(|label| label.display_name.clone())
+                    .or_else(|| known_display_name_for_label_id(&label_id).map(str::to_owned))
+                    .unwrap_or_else(|| label_id.clone());
+                let category_group = label
+                    .map(|label| label.category_group.clone())
+                    .or_else(|| category_group_for_label_id(&label_id).map(str::to_owned))
+                    .unwrap_or_else(|| "subject".to_owned());
+                let entry = groups
+                    .entry(label_id)
+                    .or_insert((display_name, category_group, 0));
+                entry.2 += 1;
             };
-            let display_name = asset
-                .semantic_labels
-                .iter()
-                .find(|label| label.label_id == label_id)
-                .map(|label| label.display_name.clone())
-                .unwrap_or_else(|| label_id.clone());
-            let entry = groups.entry(label_id).or_insert((display_name, 0));
-            entry.1 += 1;
+            if let Some(label_id) = asset.classification.primary_category.effective.clone() {
+                add_group(label_id);
+            }
+            for tag_id in &asset.classification.auxiliary_tags.effective {
+                add_group(tag_id.clone());
+            }
         }
         let mut result = groups
             .into_iter()
             .map(
-                |(label_id, (display_name, asset_count))| SemanticGroupSummary {
+                |(label_id, (display_name, category_group, asset_count))| SemanticGroupSummary {
                     label_id,
                     display_name,
+                    category_group,
                     asset_count,
                 },
             )
@@ -1783,7 +1822,7 @@ impl Repository {
         let mut sql = format!(
             "SELECT a.id, a.absolute_path, a.fingerprint, t.cache_path
              FROM assets a
-             LEFT JOIN thumbnails t
+             JOIN thumbnails t
                ON t.asset_id=a.id AND t.spec={thumbnail_spec} AND t.status='ready'
               AND t.source_modified_at=a.modified_at AND t.source_size=a.file_size
              WHERE COALESCE(
@@ -1820,11 +1859,13 @@ impl Repository {
                     SELECT 1 FROM semantic_labels sl
                     WHERE sl.asset_id=a.id AND sl.source_fingerprint=a.fingerprint
                       AND sl.model_name=? AND sl.model_version=? AND sl.analysis_version=?
+                      AND sl.taxonomy_version=?
                  )",
             );
             values.push(Value::Text(MODEL_NAME.into()));
             values.push(Value::Text(MODEL_VERSION.into()));
             values.push(Value::Text(SEMANTIC_ANALYSIS_VERSION.into()));
+            values.push(Value::Text(TAXONOMY_VERSION.into()));
         }
         sql.push_str(" ORDER BY a.id ASC");
         let candidates = {
@@ -1835,10 +1876,7 @@ impl Repository {
                     Ok(SemanticAssetCandidate {
                         id: row.get(0)?,
                         absolute_path: absolute_path.clone(),
-                        analysis_path: row
-                            .get::<_, Option<String>>(3)?
-                            .map(PathBuf::from)
-                            .unwrap_or(absolute_path),
+                        analysis_path: PathBuf::from(row.get::<_, String>(3)?),
                         fingerprint: row.get(2)?,
                     })
                 })?
@@ -1887,17 +1925,28 @@ impl Repository {
     }
 
     pub fn mark_semantic_item_running(&self, job_id: &str, asset_id: i64) -> AppResult<()> {
-        let connection = self.open()?;
+        self.mark_semantic_items_running(job_id, &[asset_id])
+    }
+
+    pub fn mark_semantic_items_running(&self, job_id: &str, asset_ids: &[i64]) -> AppResult<()> {
+        if asset_ids.is_empty() {
+            return Ok(());
+        }
+        let mut connection = self.open()?;
+        let transaction = connection.transaction()?;
         let timestamp = now();
-        connection.execute(
-            "UPDATE analysis_job_items SET status='running', attempts=attempts+1, updated_at=?3
-             WHERE job_id=?1 AND asset_id=?2",
-            params![job_id, asset_id, timestamp],
-        )?;
-        connection.execute(
-            "UPDATE assets SET semantic_status='running', semantic_error=NULL WHERE id=?1",
-            [asset_id],
-        )?;
+        for asset_id in asset_ids {
+            transaction.execute(
+                "UPDATE analysis_job_items SET status='running', attempts=attempts+1, updated_at=?3
+                 WHERE job_id=?1 AND asset_id=?2",
+                params![job_id, asset_id, timestamp],
+            )?;
+            transaction.execute(
+                "UPDATE assets SET semantic_status='running', semantic_error=NULL WHERE id=?1",
+                [asset_id],
+            )?;
+        }
+        transaction.commit()?;
         Ok(())
     }
 
@@ -1907,97 +1956,119 @@ impl Repository {
         candidate: &SemanticAssetCandidate,
         output: &SemanticAnalysisOutput,
     ) -> AppResult<bool> {
+        let entries = [(candidate, output)];
+        let (completed, _) = self.save_semantic_results(job_id, &entries)?;
+        Ok(completed == 1)
+    }
+
+    pub fn save_semantic_results(
+        &self,
+        job_id: &str,
+        entries: &[(&SemanticAssetCandidate, &SemanticAnalysisOutput)],
+    ) -> AppResult<(usize, usize)> {
+        if entries.is_empty() {
+            return Ok((0, 0));
+        }
         let mut connection = self.open()?;
         let transaction = connection.transaction()?;
-        let current_fingerprint: Option<String> = transaction
-            .query_row(
-                "SELECT fingerprint FROM assets WHERE id=?1",
-                [candidate.id],
-                |row| row.get(0),
-            )
-            .optional()?;
-        if current_fingerprint.as_deref() != Some(candidate.fingerprint.as_str()) {
+        let mut completed = 0;
+        let mut skipped = 0;
+
+        for (candidate, output) in entries {
+            let current_fingerprint: Option<String> = transaction
+                .query_row(
+                    "SELECT fingerprint FROM assets WHERE id=?1",
+                    [candidate.id],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            if current_fingerprint.as_deref() != Some(candidate.fingerprint.as_str()) {
+                transaction.execute(
+                    "UPDATE analysis_job_items SET status='skipped', error_message='source_changed', updated_at=?3
+                     WHERE job_id=?1 AND asset_id=?2",
+                    params![job_id, candidate.id, now()],
+                )?;
+                transaction.execute(
+                    "UPDATE assets SET semantic_status='not_analyzed', semantic_error=NULL WHERE id=?1",
+                    [candidate.id],
+                )?;
+                skipped += 1;
+                continue;
+            }
             transaction.execute(
-                "UPDATE analysis_job_items SET status='skipped', error_message='source_changed', updated_at=?3
-                 WHERE job_id=?1 AND asset_id=?2",
-                params![job_id, candidate.id, now()],
-            )?;
-            transaction.execute(
-                "UPDATE assets SET semantic_status='not_analyzed', semantic_error=NULL WHERE id=?1",
-                [candidate.id],
-            )?;
-            transaction.commit()?;
-            return Ok(false);
-        }
-        transaction.execute(
-            "DELETE FROM semantic_labels
-             WHERE asset_id=?1 AND model_name=?2 AND model_version=?3 AND analysis_version=?4",
-            params![
-                candidate.id,
-                MODEL_NAME,
-                MODEL_VERSION,
-                SEMANTIC_ANALYSIS_VERSION
-            ],
-        )?;
-        let timestamp = now();
-        for prediction in &output.predictions {
-            transaction.execute(
-                "INSERT INTO semantic_labels(
-                    asset_id, label, display_name, similarity, threshold, model_name, model_version,
-                    analysis_version, source_fingerprint, is_manual, is_primary, generated_at
-                 ) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 0, ?10, ?11)",
+                "DELETE FROM semantic_labels
+                 WHERE asset_id=?1 AND model_name=?2 AND model_version=?3 AND analysis_version=?4",
                 params![
                     candidate.id,
-                    prediction.label_id,
-                    prediction.display_name,
-                    prediction.similarity,
-                    prediction.threshold,
+                    MODEL_NAME,
+                    MODEL_VERSION,
+                    SEMANTIC_ANALYSIS_VERSION
+                ],
+            )?;
+            let timestamp = now();
+            for prediction in &output.predictions {
+                transaction.execute(
+                    "INSERT INTO semantic_labels(
+                        asset_id, label, display_name, similarity, threshold, model_name, model_version,
+                        analysis_version, taxonomy_version, category_group, source_fingerprint,
+                        is_manual, is_primary, generated_at
+                     ) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, 0, ?12, ?13)",
+                    params![
+                        candidate.id,
+                        prediction.label_id,
+                        prediction.display_name,
+                        prediction.similarity,
+                        prediction.threshold,
+                        MODEL_NAME,
+                        MODEL_VERSION,
+                        SEMANTIC_ANALYSIS_VERSION,
+                        TAXONOMY_VERSION,
+                        prediction.category_group,
+                        candidate.fingerprint,
+                        if prediction.is_primary { 1_i64 } else { 0_i64 },
+                        timestamp,
+                    ],
+                )?;
+            }
+            let mut embedding_bytes = Vec::with_capacity(output.embedding.len() * 4);
+            for value in &output.embedding {
+                embedding_bytes.extend_from_slice(&value.to_le_bytes());
+            }
+            transaction.execute(
+                "INSERT INTO semantic_embeddings(
+                    asset_id, model_name, model_version, analysis_version, source_fingerprint,
+                    dimensions, vector_blob, generated_at
+                 ) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+                 ON CONFLICT(asset_id, model_name, model_version, analysis_version, source_fingerprint)
+                 DO UPDATE SET dimensions=excluded.dimensions, vector_blob=excluded.vector_blob,
+                               generated_at=excluded.generated_at",
+                params![
+                    candidate.id,
                     MODEL_NAME,
                     MODEL_VERSION,
                     SEMANTIC_ANALYSIS_VERSION,
                     candidate.fingerprint,
-                    if prediction.is_primary { 1_i64 } else { 0_i64 },
+                    output.embedding.len() as i64,
+                    embedding_bytes,
                     timestamp,
                 ],
             )?;
+            transaction.execute(
+                "UPDATE assets SET semantic_status='completed', semantic_error=NULL,
+                                   semantic_analyzed_at=?2,
+                                   classification_revision=classification_revision+1
+                 WHERE id=?1",
+                params![candidate.id, timestamp],
+            )?;
+            transaction.execute(
+                "UPDATE analysis_job_items SET status='completed', error_message=NULL, updated_at=?3
+                 WHERE job_id=?1 AND asset_id=?2",
+                params![job_id, candidate.id, timestamp],
+            )?;
+            completed += 1;
         }
-        let mut embedding_bytes = Vec::with_capacity(output.embedding.len() * 4);
-        for value in &output.embedding {
-            embedding_bytes.extend_from_slice(&value.to_le_bytes());
-        }
-        transaction.execute(
-            "INSERT INTO semantic_embeddings(
-                asset_id, model_name, model_version, analysis_version, source_fingerprint,
-                dimensions, vector_blob, generated_at
-             ) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
-             ON CONFLICT(asset_id, model_name, model_version, analysis_version, source_fingerprint)
-             DO UPDATE SET dimensions=excluded.dimensions, vector_blob=excluded.vector_blob,
-                           generated_at=excluded.generated_at",
-            params![
-                candidate.id,
-                MODEL_NAME,
-                MODEL_VERSION,
-                SEMANTIC_ANALYSIS_VERSION,
-                candidate.fingerprint,
-                output.embedding.len() as i64,
-                embedding_bytes,
-                timestamp,
-            ],
-        )?;
-        transaction.execute(
-            "UPDATE assets SET semantic_status='completed', semantic_error=NULL,
-                               semantic_analyzed_at=?2,
-                               classification_revision=classification_revision+1
-             WHERE id=?1",
-            params![candidate.id, timestamp],
-        )?;
-        transaction.execute(
-            "UPDATE analysis_job_items SET status='completed', error_message=NULL, updated_at=?3
-             WHERE job_id=?1 AND asset_id=?2",
-            params![job_id, candidate.id, timestamp],
-        )?;
         transaction.commit()?;
-        Ok(true)
+        Ok((completed, skipped))
     }
 
     pub fn fail_semantic_item(&self, job_id: &str, asset_id: i64, error: &str) -> AppResult<()> {
@@ -2132,10 +2203,13 @@ impl Repository {
             Ok(SemanticAssetCandidate {
                 id: row.get(0)?,
                 absolute_path: absolute_path.clone(),
+                // A queued item can outlive its cache after a source change.
+                // Keep it in the job so the worker records a visible failure,
+                // but never substitute the full-resolution source path.
                 analysis_path: row
                     .get::<_, Option<String>>(3)?
                     .map(PathBuf::from)
-                    .unwrap_or(absolute_path),
+                    .unwrap_or_default(),
                 fingerprint: row.get(2)?,
             })
         })?;
@@ -2522,15 +2596,28 @@ fn asset_filter_sql(library_id: i64, filter: &AssetFilter) -> (String, Vec<Value
         let expression = effective_scalar_expression(
             FIELD_PRIMARY_CATEGORY,
             &format!(
-                "(SELECT sl.label FROM semantic_labels sl
-                  WHERE sl.asset_id=a.id AND sl.source_fingerprint=a.fingerprint
-                    AND sl.is_manual=0 AND sl.is_primary=1
-                    AND sl.model_name={model_name} AND sl.model_version={model_version}
-                    AND sl.analysis_version={analysis_version}
-                  ORDER BY sl.similarity DESC, sl.label ASC LIMIT 1)",
+                "CASE WHEN a.semantic_status='completed' AND NOT EXISTS(
+                         SELECT 1 FROM semantic_labels current_scene
+                         WHERE current_scene.asset_id=a.id
+                           AND current_scene.source_fingerprint=a.fingerprint
+                           AND current_scene.is_manual=0 AND current_scene.is_primary=1
+                           AND current_scene.model_name={model_name}
+                           AND current_scene.model_version={model_version}
+                           AND current_scene.analysis_version={analysis_version}
+                           AND current_scene.taxonomy_version={taxonomy_version}
+                       ) THEN 'unknown'
+                       ELSE (SELECT sl.label FROM semantic_labels sl
+                             WHERE sl.asset_id=a.id AND sl.source_fingerprint=a.fingerprint
+                               AND sl.is_manual=0 AND sl.is_primary=1
+                               AND sl.model_name={model_name} AND sl.model_version={model_version}
+                               AND sl.analysis_version={analysis_version}
+                               AND sl.taxonomy_version={taxonomy_version}
+                             ORDER BY sl.similarity DESC, sl.label ASC LIMIT 1)
+                  END",
                 model_name = sql_literal(MODEL_NAME),
                 model_version = sql_literal(MODEL_VERSION),
                 analysis_version = sql_literal(SEMANTIC_ANALYSIS_VERSION),
+                taxonomy_version = sql_literal(TAXONOMY_VERSION),
             ),
         );
         clauses.push(format!(
@@ -2551,13 +2638,15 @@ fn asset_filter_sql(library_id: i64, filter: &AssetFilter) -> (String, Vec<Value
                                  WHERE sl.asset_id=a.id AND sl.source_fingerprint=a.fingerprint
                                    AND sl.is_manual=0 AND sl.is_primary=0
                                    AND sl.model_name={model_name} AND sl.model_version={model_version}
-                                   AND sl.analysis_version={analysis_version} AND sl.label=?)
+                                   AND sl.analysis_version={analysis_version}
+                                   AND sl.taxonomy_version={taxonomy_version} AND sl.label=?)
                          AND NOT EXISTS(SELECT 1 FROM manual_tag_overrides remove_tag
                                         WHERE remove_tag.asset_id=a.id AND remove_tag.tag_id=?
                                           AND remove_tag.state='remove')))" ,
                     model_name = sql_literal(MODEL_NAME),
                     model_version = sql_literal(MODEL_VERSION),
                     analysis_version = sql_literal(SEMANTIC_ANALYSIS_VERSION),
+                    taxonomy_version = sql_literal(TAXONOMY_VERSION),
                 )
             })
             .collect::<Vec<_>>();
@@ -2740,11 +2829,13 @@ fn semantic_labels_for_asset(
 ) -> AppResult<Vec<SemanticLabelResult>> {
     let mut statement = connection.prepare(
         "SELECT sl.label, sl.display_name, sl.similarity, sl.threshold, sl.model_name,
-                sl.model_version, sl.analysis_version, sl.generated_at, sl.is_manual, sl.is_primary
+                sl.model_version, sl.analysis_version, sl.category_group, sl.taxonomy_version,
+                sl.generated_at, sl.is_manual, sl.is_primary
          FROM semantic_labels sl
          JOIN assets a ON a.id=sl.asset_id
          WHERE sl.asset_id=?1 AND sl.source_fingerprint=a.fingerprint AND sl.is_manual=0
            AND sl.model_name=?2 AND sl.model_version=?3 AND sl.analysis_version=?4
+           AND sl.taxonomy_version=?5
          ORDER BY sl.is_primary DESC, sl.similarity DESC, sl.label ASC",
     )?;
     let rows = statement.query_map(
@@ -2752,7 +2843,8 @@ fn semantic_labels_for_asset(
             asset_id,
             MODEL_NAME,
             MODEL_VERSION,
-            SEMANTIC_ANALYSIS_VERSION
+            SEMANTIC_ANALYSIS_VERSION,
+            TAXONOMY_VERSION,
         ],
         |row| {
             let label_id: String = row.get(0)?;
@@ -2762,14 +2854,16 @@ fn semantic_labels_for_asset(
                     .unwrap_or(stored_display_name.as_str())
                     .to_owned(),
                 label_id,
+                category_group: row.get(7)?,
                 similarity: row.get(2)?,
                 threshold: row.get(3)?,
                 model_name: row.get(4)?,
                 model_version: row.get(5)?,
                 analysis_version: row.get(6)?,
-                analyzed_at: row.get(7)?,
-                is_manual: row.get::<_, i64>(8)? != 0,
-                is_primary: row.get::<_, i64>(9)? != 0,
+                taxonomy_version: row.get(8)?,
+                analyzed_at: row.get(9)?,
+                is_manual: row.get::<_, i64>(10)? != 0,
+                is_primary: row.get::<_, i64>(11)? != 0,
             })
         },
     )?;
@@ -2801,8 +2895,13 @@ fn effective_classification_for_asset(
         dominant_color_categories: asset.dominant_color_category.clone().into_iter().collect(),
         saturation_level: asset.saturation_label.clone(),
     };
-    if auto.primary_category.is_none() && auto.auxiliary_tags.is_empty() {
-        auto.auxiliary_tags = Vec::new();
+    if auto.primary_category.is_none()
+        && asset.semantic_status == "completed"
+        && asset.semantic_error.is_none()
+    {
+        // UNKNOWN is a virtual rejection state. It is intentionally not a
+        // semantic_labels row and therefore has no model similarity score.
+        auto.primary_category = Some("unknown".to_owned());
     }
     let manual = manual_classification_for_asset(connection, asset.id)?;
     Ok(resolve_classification(revision, auto, manual))
@@ -2906,8 +3005,49 @@ fn merge_duplicate_assets(
     duplicates: &HashMap<String, Vec<i64>>,
 ) -> AppResult<()> {
     for ids in duplicates.values().filter(|ids| ids.len() > 1) {
-        let survivor = ids[0];
-        for duplicate in ids.iter().skip(1).copied() {
+        let survivor = select_duplicate_survivor(
+            transaction,
+            "assets",
+            ids,
+            "CASE WHEN file_status='present' THEN 0 ELSE 1 END,
+             CASE WHEN scan_status='indexed' THEN 0 ELSE 1 END,
+             CASE WHEN analysis_status='completed' THEN 0 ELSE 1 END,
+             COALESCE(last_seen_at, '') DESC,
+             last_seen_scan DESC,
+             id DESC",
+        )?;
+        for duplicate in ids.iter().copied().filter(|id| *id != survivor) {
+            transaction.execute(
+                "UPDATE assets
+                 SET rating=MAX(rating, (SELECT rating FROM assets WHERE id=?2)),
+                     color_label=COALESCE(color_label,
+                                         (SELECT color_label FROM assets WHERE id=?2)),
+                     is_favorite=MAX(is_favorite,
+                                     (SELECT is_favorite FROM assets WHERE id=?2)),
+                     classification_revision=MAX(
+                         classification_revision,
+                         (SELECT classification_revision FROM assets WHERE id=?2)
+                     )
+                 WHERE id=?1",
+                params![survivor, duplicate],
+            )?;
+            merge_asset_library_assignment(transaction, survivor, duplicate)?;
+            merge_manual_classification_overrides(transaction, survivor, duplicate)?;
+            merge_manual_tag_overrides(transaction, survivor, duplicate)?;
+            transaction.execute(
+                "INSERT OR IGNORE INTO collection_assets(collection_id, asset_id, added_at)
+                 SELECT collection_id, ?1, added_at
+                 FROM collection_assets WHERE asset_id=?2",
+                params![survivor, duplicate],
+            )?;
+            transaction.execute(
+                "UPDATE edit_export_plans SET asset_id=?1 WHERE asset_id=?2",
+                params![survivor, duplicate],
+            )?;
+            transaction.execute(
+                "UPDATE face_detections SET asset_id=?1 WHERE asset_id=?2",
+                params![survivor, duplicate],
+            )?;
             transaction.execute(
                 "INSERT OR IGNORE INTO thumbnails(
                     asset_id, cache_path, spec, source_modified_at, source_size,
@@ -2952,11 +3092,13 @@ fn merge_duplicate_assets(
                 "INSERT OR IGNORE INTO semantic_labels(
                     asset_id, label, similarity, model_name, model_version,
                     analysis_version, generated_at, is_manual, is_excluded,
-                    display_name, threshold, source_fingerprint, is_primary
+                    display_name, threshold, source_fingerprint, is_primary,
+                    category_group, taxonomy_version
                  )
                  SELECT ?1, label, similarity, model_name, model_version,
                         analysis_version, generated_at, is_manual, is_excluded,
-                        display_name, threshold, source_fingerprint, is_primary
+                        display_name, threshold, source_fingerprint, is_primary,
+                        category_group, taxonomy_version
                  FROM semantic_labels WHERE asset_id=?2",
                 params![survivor, duplicate],
             )?;
@@ -3034,8 +3176,21 @@ fn merge_duplicate_libraries(
     duplicates: &HashMap<String, Vec<i64>>,
 ) -> AppResult<()> {
     for ids in duplicates.values().filter(|ids| ids.len() > 1) {
-        let survivor = ids[0];
-        for duplicate in ids.iter().skip(1).copied() {
+        let survivor = select_duplicate_survivor(
+            transaction,
+            "libraries",
+            ids,
+            "CASE status
+                 WHEN 'ready' THEN 0
+                 WHEN 'scanning' THEN 1
+                 ELSE 2
+             END,
+             COALESCE(last_scan_at, '') DESC,
+             scan_generation DESC,
+             id DESC",
+        )?;
+        for duplicate in ids.iter().copied().filter(|id| *id != survivor) {
+            merge_library_assignments(transaction, survivor, duplicate)?;
             transaction.execute(
                 "UPDATE assets SET library_id=?1 WHERE library_id=?2",
                 params![survivor, duplicate],
@@ -3053,12 +3208,265 @@ fn merge_duplicate_libraries(
                 params![survivor, duplicate],
             )?;
             transaction.execute(
+                "UPDATE saved_views SET library_id=?1 WHERE library_id=?2",
+                params![survivor, duplicate],
+            )?;
+            let duplicate_parent: Option<i64> = transaction
+                .query_row(
+                    "SELECT parent_library_id FROM libraries WHERE id=?1",
+                    [duplicate],
+                    |row| row.get::<_, Option<i64>>(0),
+                )
+                .optional()?
+                .flatten();
+            let survivor_parent: Option<i64> = transaction
+                .query_row(
+                    "SELECT parent_library_id FROM libraries WHERE id=?1",
+                    [survivor],
+                    |row| row.get::<_, Option<i64>>(0),
+                )
+                .optional()?
+                .flatten();
+            if survivor_parent.is_none()
+                && duplicate_parent.is_some_and(|parent| parent != survivor && parent != duplicate)
+            {
+                transaction.execute(
+                    "UPDATE libraries SET parent_library_id=?2 WHERE id=?1",
+                    params![survivor, duplicate_parent],
+                )?;
+            }
+            let duplicate_parent_relation: String = transaction.query_row(
+                "SELECT parent_relation FROM libraries WHERE id=?1",
+                [duplicate],
+                |row| row.get(0),
+            )?;
+            if duplicate_parent_relation == "manual" {
+                transaction.execute(
+                    "UPDATE libraries SET parent_relation='manual' WHERE id=?1",
+                    [survivor],
+                )?;
+            }
+            transaction.execute(
                 "UPDATE libraries SET parent_library_id=?1 WHERE parent_library_id=?2",
                 params![survivor, duplicate],
             )?;
             transaction.execute("DELETE FROM libraries WHERE id=?1", [duplicate])?;
         }
     }
+    Ok(())
+}
+
+fn select_duplicate_survivor(
+    transaction: &Transaction<'_>,
+    table: &str,
+    ids: &[i64],
+    order_by: &str,
+) -> AppResult<i64> {
+    let sql = format!(
+        "SELECT id FROM {table} WHERE id IN ({}) ORDER BY {order_by} LIMIT 1",
+        placeholders(ids.len())
+    );
+    transaction
+        .query_row(&sql, params_from_iter(ids.iter()), |row| row.get(0))
+        .map_err(AppError::from)
+}
+
+fn merge_asset_library_assignment(
+    transaction: &Transaction<'_>,
+    survivor: i64,
+    duplicate: i64,
+) -> AppResult<()> {
+    let duplicate_assignment: Option<(i64, String)> = transaction
+        .query_row(
+            "SELECT library_id, assigned_at
+             FROM asset_library_assignments WHERE asset_id=?1",
+            [duplicate],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()?;
+    let Some((library_id, assigned_at)) = duplicate_assignment else {
+        return Ok(());
+    };
+
+    let survivor_assigned_at: Option<String> = transaction
+        .query_row(
+            "SELECT assigned_at FROM asset_library_assignments WHERE asset_id=?1",
+            [survivor],
+            |row| row.get(0),
+        )
+        .optional()?;
+    match survivor_assigned_at {
+        None => {
+            transaction.execute(
+                "INSERT INTO asset_library_assignments(asset_id, library_id, assigned_at)
+                 VALUES(?1, ?2, ?3)",
+                params![survivor, library_id, assigned_at],
+            )?;
+        }
+        Some(current) if assigned_at > current => {
+            transaction.execute(
+                "UPDATE asset_library_assignments
+                 SET library_id=?2, assigned_at=?3 WHERE asset_id=?1",
+                params![survivor, library_id, assigned_at],
+            )?;
+        }
+        Some(_) => {}
+    }
+    Ok(())
+}
+
+fn merge_manual_classification_overrides(
+    transaction: &Transaction<'_>,
+    survivor: i64,
+    duplicate: i64,
+) -> AppResult<()> {
+    let rows = {
+        let mut statement = transaction.prepare(
+            "SELECT field, value_json, updated_at
+             FROM manual_classification_overrides WHERE asset_id=?1",
+        )?;
+        statement
+            .query_map([duplicate], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            })?
+            .collect::<Result<Vec<_>, _>>()?
+    };
+    for (field, value_json, updated_at) in rows {
+        let current: Option<String> = transaction
+            .query_row(
+                "SELECT updated_at FROM manual_classification_overrides
+                 WHERE asset_id=?1 AND field=?2",
+                params![survivor, field],
+                |row| row.get(0),
+            )
+            .optional()?;
+        match current {
+            None => {
+                transaction.execute(
+                    "INSERT INTO manual_classification_overrides(
+                        asset_id, field, value_json, updated_at
+                     ) VALUES(?1, ?2, ?3, ?4)",
+                    params![survivor, field, value_json, updated_at],
+                )?;
+            }
+            Some(current) if updated_at > current => {
+                transaction.execute(
+                    "UPDATE manual_classification_overrides
+                     SET value_json=?3, updated_at=?4
+                     WHERE asset_id=?1 AND field=?2",
+                    params![survivor, field, value_json, updated_at],
+                )?;
+            }
+            Some(_) => {}
+        }
+    }
+    Ok(())
+}
+
+fn merge_manual_tag_overrides(
+    transaction: &Transaction<'_>,
+    survivor: i64,
+    duplicate: i64,
+) -> AppResult<()> {
+    let rows = {
+        let mut statement = transaction.prepare(
+            "SELECT tag_id, state, updated_at
+             FROM manual_tag_overrides WHERE asset_id=?1",
+        )?;
+        statement
+            .query_map([duplicate], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            })?
+            .collect::<Result<Vec<_>, _>>()?
+    };
+    for (tag_id, state, updated_at) in rows {
+        let current: Option<String> = transaction
+            .query_row(
+                "SELECT updated_at FROM manual_tag_overrides
+                 WHERE asset_id=?1 AND tag_id=?2",
+                params![survivor, tag_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        match current {
+            None => {
+                transaction.execute(
+                    "INSERT INTO manual_tag_overrides(asset_id, tag_id, state, updated_at)
+                     VALUES(?1, ?2, ?3, ?4)",
+                    params![survivor, tag_id, state, updated_at],
+                )?;
+            }
+            Some(current) if updated_at > current => {
+                transaction.execute(
+                    "UPDATE manual_tag_overrides
+                     SET state=?3, updated_at=?4
+                     WHERE asset_id=?1 AND tag_id=?2",
+                    params![survivor, tag_id, state, updated_at],
+                )?;
+            }
+            Some(_) => {}
+        }
+    }
+    Ok(())
+}
+
+fn merge_library_assignments(
+    transaction: &Transaction<'_>,
+    survivor: i64,
+    duplicate: i64,
+) -> AppResult<()> {
+    let rows = {
+        let mut statement = transaction.prepare(
+            "SELECT asset_id, assigned_at
+             FROM asset_library_assignments WHERE library_id=?1",
+        )?;
+        statement
+            .query_map([duplicate], |row| {
+                Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+            })?
+            .collect::<Result<Vec<_>, _>>()?
+    };
+    for (asset_id, assigned_at) in rows {
+        let current: Option<(i64, String)> = transaction
+            .query_row(
+                "SELECT library_id, assigned_at
+                 FROM asset_library_assignments WHERE asset_id=?1",
+                [asset_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+        match current {
+            None => {
+                transaction.execute(
+                    "INSERT INTO asset_library_assignments(asset_id, library_id, assigned_at)
+                     VALUES(?1, ?2, ?3)",
+                    params![asset_id, survivor, assigned_at],
+                )?;
+            }
+            Some((current_library, current))
+                if current_library == duplicate || assigned_at > current =>
+            {
+                transaction.execute(
+                    "UPDATE asset_library_assignments
+                     SET library_id=?2, assigned_at=?3 WHERE asset_id=?1",
+                    params![asset_id, survivor, assigned_at],
+                )?;
+            }
+            Some(_) => {}
+        }
+    }
+    transaction.execute(
+        "DELETE FROM asset_library_assignments WHERE library_id=?1",
+        [duplicate],
+    )?;
     Ok(())
 }
 
@@ -3160,7 +3568,7 @@ mod tests {
         let repository = Repository::new(temp.path().join("database.sqlite3"));
         repository.initialize().expect("first initialization");
         repository.initialize().expect("second initialization");
-        assert_eq!(repository.migration_version().expect("version"), 11);
+        assert_eq!(repository.migration_version().expect("version"), 12);
         let connection = repository.open().expect("connection");
         for table in [
             "organization_plans",
@@ -3189,6 +3597,434 @@ mod tests {
                 .expect("column lookup");
             assert_eq!(exists, 1, "missing asset column {column}");
         }
+    }
+
+    #[test]
+    fn semantic_jobs_only_schedule_current_thumbnail_cache() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let repository = Repository::new(temp.path().join("database.sqlite3"));
+        repository.initialize().expect("initialize");
+        let (library_id, _) = repository
+            .begin_scan("C:\\fixtures\\semantic-thumbnails", "semantic-thumbnails")
+            .expect("begin scan");
+        let source_path = "C:\\fixtures\\semantic-thumbnails\\source.jpg";
+        let connection = repository.open().expect("open database");
+        connection
+            .execute(
+                "INSERT INTO assets(
+                    library_id, asset_identity_key, absolute_path, relative_path, file_name,
+                    extension, file_size, modified_at, fingerprint, file_status, scan_status,
+                    analysis_status, first_seen_at, last_seen_at
+                 ) VALUES(?1, 'c:/fixtures/semantic-thumbnails/source.jpg', ?2,
+                          'source.jpg', 'source.jpg', 'jpg', 42, 123, 'fingerprint',
+                          'present', 'indexed', 'completed', '2026-08-10T00:00:00Z',
+                          '2026-08-10T00:00:00Z')",
+                params![library_id, source_path],
+            )
+            .expect("asset without thumbnail");
+        let asset_id = connection.last_insert_rowid();
+
+        let no_thumbnail = repository
+            .create_semantic_job("semantic-without-thumbnail", library_id, false, None)
+            .expect("create job without thumbnail");
+        assert!(no_thumbnail.is_empty());
+        connection
+            .execute(
+                "UPDATE analysis_jobs SET status='completed' WHERE id='semantic-without-thumbnail'",
+                [],
+            )
+            .expect("complete empty job");
+
+        let thumbnail_path = temp.path().join("grid-640-v1.jpg");
+        std::fs::write(&thumbnail_path, b"thumbnail").expect("write thumbnail fixture");
+        connection
+            .execute(
+                "INSERT INTO thumbnails(
+                    asset_id, cache_path, spec, source_modified_at, source_size, status, updated_at
+                 ) VALUES(?1, ?2, ?3, 123, 42, 'ready', '2026-08-10T00:00:00Z')",
+                params![
+                    asset_id,
+                    thumbnail_path.to_string_lossy().into_owned(),
+                    crate::imaging::THUMBNAIL_SPEC,
+                ],
+            )
+            .expect("thumbnail row");
+
+        let with_thumbnail = repository
+            .create_semantic_job("semantic-with-thumbnail", library_id, false, None)
+            .expect("create job with thumbnail");
+        assert_eq!(with_thumbnail.len(), 1);
+        assert_eq!(with_thumbnail[0].absolute_path, PathBuf::from(source_path));
+        assert_eq!(with_thumbnail[0].analysis_path, thumbnail_path);
+
+        connection
+            .execute("UPDATE assets SET modified_at=124 WHERE id=?1", [asset_id])
+            .expect("stale source metadata");
+        drop(connection);
+        let recovered = repository
+            .pending_semantic_candidates("semantic-with-thumbnail")
+            .expect("recover pending job");
+        assert_eq!(recovered.len(), 1);
+        assert_eq!(recovered[0].absolute_path, PathBuf::from(source_path));
+        assert!(recovered[0].analysis_path.as_os_str().is_empty());
+    }
+
+    #[test]
+    fn identity_backfill_merges_asset_state_and_all_user_relations() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let repository = Repository::new(temp.path().join("database.sqlite3"));
+        repository.initialize().expect("initialize");
+        let (first_library, _) = repository
+            .begin_scan("C:\\fixtures\\merge-first", "merge-first")
+            .expect("first library");
+        repository
+            .cancel_scan("merge-first", first_library)
+            .expect("cancel first library");
+        let (second_library, _) = repository
+            .begin_scan("D:\\fixtures\\merge-second", "merge-second")
+            .expect("second library");
+        repository
+            .cancel_scan("merge-second", second_library)
+            .expect("cancel second library");
+
+        let connection = repository.open().expect("open database");
+        connection
+            .execute("DROP INDEX idx_assets_identity", [])
+            .expect("allow duplicate identities for migration fixture");
+        let identity = "c:/fixtures/merged/photo.jpg";
+        connection
+            .execute(
+                "INSERT INTO assets(
+                    library_id, asset_identity_key, absolute_path, relative_path, file_name,
+                    extension, file_size, modified_at, fingerprint, file_status, scan_status,
+                    analysis_status, first_seen_at, last_seen_at, last_seen_scan, rating,
+                    color_label, is_favorite
+                 ) VALUES(?1, ?2, ?3, 'photo.jpg', 'photo.jpg', 'jpg', 100, 1, 'same',
+                          'missing', 'indexed', 'completed', '2026-08-01T00:00:00Z',
+                          '2026-08-01T00:00:00Z', 1, 5, 'purple', 0)",
+                params![first_library, identity, "C:\\fixtures\\merged\\photo.jpg"],
+            )
+            .expect("first duplicate asset");
+        let first_asset = connection.last_insert_rowid();
+        connection
+            .execute(
+                "INSERT INTO assets(
+                    library_id, asset_identity_key, absolute_path, relative_path, file_name,
+                    extension, file_size, modified_at, fingerprint, file_status, scan_status,
+                    analysis_status, first_seen_at, last_seen_at, last_seen_scan, rating,
+                    color_label, is_favorite
+                 ) VALUES(?1, ?2, ?3, 'photo.jpg', 'photo.jpg', 'jpg', 100, 1, 'same',
+                          'present', 'indexed', 'completed', '2026-08-02T00:00:00Z',
+                          '2026-08-02T00:00:00Z', 2, 1, NULL, 1)",
+                params![second_library, identity, "D:\\fixtures\\merged\\photo.jpg"],
+            )
+            .expect("second duplicate asset");
+        let second_asset = connection.last_insert_rowid();
+
+        connection
+            .execute(
+                "INSERT INTO asset_library_assignments(asset_id, library_id, assigned_at)
+                 VALUES(?1, ?2, '2026-08-03T00:00:00Z')",
+                params![first_asset, second_library],
+            )
+            .expect("asset assignment");
+        connection
+            .execute(
+                "INSERT INTO manual_classification_overrides(
+                    asset_id, field, value_json, updated_at
+                 ) VALUES(?1, 'primary_category', 'product', '2026-08-03T00:00:00Z')",
+                [first_asset],
+            )
+            .expect("classification override");
+        connection
+            .execute(
+                "INSERT INTO manual_tag_overrides(asset_id, tag_id, state, updated_at)
+                 VALUES(?1, 'favorite', 'add', '2026-08-03T00:00:00Z')",
+                [first_asset],
+            )
+            .expect("tag override");
+        connection
+            .execute(
+                "INSERT INTO collections(name, description, created_at, updated_at)
+                 VALUES('Merged collection', '', '2026-08-03T00:00:00Z', '2026-08-03T00:00:00Z')",
+                [],
+            )
+            .expect("collection");
+        let collection_id = connection.last_insert_rowid();
+        connection
+            .execute(
+                "INSERT INTO collection_assets(collection_id, asset_id, added_at)
+                 VALUES(?1, ?2, '2026-08-03T00:00:00Z')",
+                params![collection_id, first_asset],
+            )
+            .expect("collection membership");
+        connection
+            .execute(
+                "INSERT INTO edit_export_plans(
+                    id, asset_id, source_fingerprint, target_path, recipe_json,
+                    status, created_at
+                 ) VALUES('merge-plan', ?1, 'same', 'D:\\exports\\copy.jpg', '{}',
+                          'ready', '2026-08-03T00:00:00Z')",
+                [first_asset],
+            )
+            .expect("edit plan");
+        connection
+            .execute(
+                "INSERT INTO face_detections(
+                    asset_id, source_fingerprint, bounds_json, confidence,
+                    model_name, model_version, created_at
+                 ) VALUES(?1, 'same', '{}', 0.9, 'fixture', '1', '2026-08-03T00:00:00Z')",
+                [first_asset],
+            )
+            .expect("face detection");
+        drop(connection);
+
+        repository
+            .backfill_path_identities()
+            .expect("merge duplicate identities");
+
+        let connection = repository.open().expect("reopen database");
+        let merged: (i64, i64, Option<String>, bool, String) = connection
+            .query_row(
+                "SELECT id, rating, color_label, is_favorite, file_status
+                 FROM assets WHERE asset_identity_key=?1",
+                [identity],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                    ))
+                },
+            )
+            .expect("merged asset");
+        assert_eq!(merged.0, second_asset);
+        assert_eq!(merged.1, 5);
+        assert_eq!(merged.2.as_deref(), Some("purple"));
+        assert!(merged.3);
+        assert_eq!(merged.4, "present");
+        for (table, column) in [
+            ("asset_library_assignments", "asset_id"),
+            ("manual_classification_overrides", "asset_id"),
+            ("manual_tag_overrides", "asset_id"),
+            ("collection_assets", "asset_id"),
+            ("edit_export_plans", "asset_id"),
+            ("face_detections", "asset_id"),
+        ] {
+            let count: i64 = connection
+                .query_row(
+                    &format!("SELECT COUNT(*) FROM {table} WHERE {column}=?1"),
+                    [second_asset],
+                    |row| row.get(0),
+                )
+                .expect("merged relation count");
+            assert_eq!(count, 1, "missing merged relation in {table}");
+        }
+        let duplicate_count: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM assets WHERE id=?1",
+                [first_asset],
+                |row| row.get(0),
+            )
+            .expect("duplicate count");
+        assert_eq!(duplicate_count, 0);
+    }
+
+    #[test]
+    fn identity_backfill_merges_duplicate_library_relations() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let repository = Repository::new(temp.path().join("database.sqlite3"));
+        repository.initialize().expect("initialize");
+        let connection = repository.open().expect("open database");
+        connection
+            .execute("DROP INDEX idx_libraries_source_identity", [])
+            .expect("allow duplicate library identities for migration fixture");
+        connection
+            .execute(
+                "INSERT INTO libraries(
+                    root_path, created_at, name, source_path, source_identity_key,
+                    status, last_scan_at, scan_generation, parent_relation
+                 ) VALUES('C:\\fixtures\\same-library', '2026-08-01T00:00:00Z',
+                          'Old', 'C:\\fixtures\\same-library', 'c:/fixtures/same-library',
+                          'error', NULL, 1, 'source')",
+                [],
+            )
+            .expect("first duplicate library");
+        connection
+            .execute(
+                "INSERT INTO libraries(
+                    root_path, created_at, name, source_path, source_identity_key,
+                    status, last_scan_at, scan_generation, parent_relation
+                 ) VALUES('c:\\fixtures\\same-library-alt', '2026-08-02T00:00:00Z',
+                          'Current', 'c:\\fixtures\\same-library-alt',
+                          'c:/fixtures/same-library', 'ready', '2026-08-02T00:00:00Z',
+                          2, 'source')",
+                [],
+            )
+            .expect("second duplicate library");
+        let second_library = connection.last_insert_rowid();
+        connection
+            .execute(
+                "INSERT INTO assets(
+                    library_id, asset_identity_key, absolute_path, relative_path,
+                    file_name, extension, file_size, modified_at, fingerprint,
+                    file_status, scan_status, analysis_status, first_seen_at,
+                    last_seen_at, last_seen_scan
+                 ) VALUES(?1, 'c:/fixtures/same-library/photo.jpg',
+                          'C:\\fixtures\\same-library\\photo.jpg', 'photo.jpg',
+                          'photo.jpg', 'jpg', 100, 1, 'library-asset', 'present',
+                          'indexed', 'completed', '2026-08-02T00:00:00Z',
+                          '2026-08-02T00:00:00Z', 2)",
+                [second_library],
+            )
+            .expect("library asset");
+        let asset_id = connection.last_insert_rowid();
+        connection
+            .execute(
+                "INSERT INTO asset_library_assignments(asset_id, library_id, assigned_at)
+                 VALUES(?1, ?2, '2026-08-03T00:00:00Z')",
+                params![asset_id, second_library],
+            )
+            .expect("library assignment");
+        connection
+            .execute(
+                "INSERT INTO saved_views(
+                    name, library_id, query_json, created_at, updated_at
+                 ) VALUES('Saved duplicate view', ?1, '{}',
+                          '2026-08-03T00:00:00Z', '2026-08-03T00:00:00Z')",
+                [second_library],
+            )
+            .expect("saved view");
+        drop(connection);
+
+        repository
+            .backfill_path_identities()
+            .expect("merge duplicate libraries");
+
+        let connection = repository.open().expect("reopen database");
+        let library_count: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM libraries WHERE source_identity_key=?1",
+                ["c:/fixtures/same-library"],
+                |row| row.get(0),
+            )
+            .expect("library count");
+        assert_eq!(library_count, 1);
+        let remaining_status: String = connection
+            .query_row(
+                "SELECT status FROM libraries WHERE source_identity_key=?1",
+                ["c:/fixtures/same-library"],
+                |row| row.get(0),
+            )
+            .expect("remaining library");
+        assert_eq!(remaining_status, "ready");
+        let asset_library: i64 = connection
+            .query_row(
+                "SELECT library_id FROM assets WHERE id=?1",
+                [asset_id],
+                |row| row.get(0),
+            )
+            .expect("asset library");
+        assert_eq!(asset_library, second_library);
+        let assignment_library: i64 = connection
+            .query_row(
+                "SELECT library_id FROM asset_library_assignments WHERE asset_id=?1",
+                [asset_id],
+                |row| row.get(0),
+            )
+            .expect("assignment library");
+        assert_eq!(assignment_library, second_library);
+        let saved_view_library: i64 = connection
+            .query_row(
+                "SELECT library_id FROM saved_views WHERE name='Saved duplicate view'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("saved view library");
+        assert_eq!(saved_view_library, second_library);
+    }
+
+    #[test]
+    fn library_removal_only_returns_unreferenced_thumbnail_cache_paths() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let repository = Repository::new(temp.path().join("database.sqlite3"));
+        repository.initialize().expect("initialize");
+        let (first_library, first_generation) = repository
+            .begin_scan("C:\\fixtures\\cache-first", "cache-first")
+            .expect("first library");
+        repository
+            .cancel_scan("cache-first", first_library)
+            .expect("cancel first library");
+        let (second_library, second_generation) = repository
+            .begin_scan("D:\\fixtures\\cache-second", "cache-second")
+            .expect("second library");
+        repository
+            .cancel_scan("cache-second", second_library)
+            .expect("cancel second library");
+        let connection = repository.open().expect("open database");
+        for (library_id, generation, identity, path) in [
+            (
+                first_library,
+                first_generation,
+                "c:/fixtures/cache-first/photo.jpg",
+                "C:\\fixtures\\cache-first\\photo.jpg",
+            ),
+            (
+                second_library,
+                second_generation,
+                "d:/fixtures/cache-second/photo.jpg",
+                "D:\\fixtures\\cache-second\\photo.jpg",
+            ),
+        ] {
+            connection
+                .execute(
+                    "INSERT INTO assets(
+                        library_id, asset_identity_key, absolute_path, relative_path,
+                        file_name, extension, file_size, modified_at, fingerprint,
+                        file_status, scan_status, analysis_status, first_seen_at,
+                        last_seen_at, last_seen_scan
+                     ) VALUES(?1, ?2, ?3, 'photo.jpg', 'photo.jpg', 'jpg', 100, 1,
+                              'shared-fingerprint', 'present', 'indexed', 'completed',
+                              '2026-08-01T00:00:00Z', '2026-08-01T00:00:00Z', ?4)",
+                    params![library_id, identity, path, generation],
+                )
+                .expect("asset");
+            let asset_id = connection.last_insert_rowid();
+            connection
+                .execute(
+                    "INSERT INTO thumbnails(
+                        asset_id, cache_path, spec, source_modified_at, source_size,
+                        status, updated_at
+                     ) VALUES(?1, ?2, ?3, 1, 100, 'ready', '2026-08-01T00:00:00Z')",
+                    params![
+                        asset_id,
+                        temp.path().join("shared-thumb.jpg").to_string_lossy(),
+                        crate::imaging::THUMBNAIL_SPEC
+                    ],
+                )
+                .expect("shared thumbnail");
+        }
+        drop(connection);
+
+        let first_removal = repository
+            .remove_library_with_reconciliation(first_library)
+            .expect("remove first library");
+        assert_eq!(first_removal.removed_cache_entries.len(), 1);
+        assert!(first_removal.removed_cache_entries[0].2.is_none());
+
+        let second_removal = repository
+            .remove_library_with_reconciliation(second_library)
+            .expect("remove second library");
+        assert_eq!(second_removal.removed_cache_entries.len(), 1);
+        assert_eq!(
+            second_removal.removed_cache_entries[0]
+                .2
+                .as_deref()
+                .map(Path::to_path_buf),
+            Some(temp.path().join("shared-thumb.jpg"))
+        );
     }
 
     fn seed_classifiable_asset(repository: &Repository, suffix: &str) -> (i64, i64) {
@@ -3248,14 +4084,15 @@ mod tests {
             .execute(
                 "INSERT INTO semantic_labels(
                     asset_id, label, display_name, similarity, threshold, model_name,
-                    model_version, analysis_version, generated_at, source_fingerprint,
-                    is_primary, is_manual
-                 ) VALUES(?1, 'landscape', 'Landscape', 0.9, 0.2, ?2, ?3, ?4, ?5, ?6, 1, 0)",
+                    model_version, analysis_version, taxonomy_version, category_group,
+                    generated_at, source_fingerprint, is_primary, is_manual
+                 ) VALUES(?1, 'landscape', 'Landscape', 0.9, 0.2, ?2, ?3, ?4, ?5, 'scene', ?6, ?7, 1, 0)",
                 params![
                     asset_id,
                     MODEL_NAME,
                     MODEL_VERSION,
                     SEMANTIC_ANALYSIS_VERSION,
+                    TAXONOMY_VERSION,
                     timestamp,
                     fingerprint
                 ],
@@ -3265,14 +4102,15 @@ mod tests {
             .execute(
                 "INSERT INTO semantic_labels(
                     asset_id, label, display_name, similarity, threshold, model_name,
-                    model_version, analysis_version, generated_at, source_fingerprint,
-                    is_primary, is_manual
-                 ) VALUES(?1, 'outdoor', 'Outdoor', 0.8, 0.2, ?2, ?3, ?4, ?5, ?6, 0, 0)",
+                    model_version, analysis_version, taxonomy_version, category_group,
+                    generated_at, source_fingerprint, is_primary, is_manual
+                 ) VALUES(?1, 'outdoor', 'Outdoor', 0.8, 0.2, ?2, ?3, ?4, ?5, 'context', ?6, ?7, 0, 0)",
                 params![
                     asset_id,
                     MODEL_NAME,
                     MODEL_VERSION,
                     SEMANTIC_ANALYSIS_VERSION,
+                    TAXONOMY_VERSION,
                     timestamp,
                     fingerprint
                 ],
@@ -3315,7 +4153,9 @@ mod tests {
                 .is_err()
         );
         let high_rated_path = "C:\\fixtures\\classification-one\\high-rated.jpg";
-        let connection = repository.open().expect("open database for rating threshold");
+        let connection = repository
+            .open()
+            .expect("open database for rating threshold");
         connection
             .execute(
                 "INSERT INTO assets(
@@ -3513,6 +4353,79 @@ mod tests {
                 .as_deref(),
             Some("product")
         );
+    }
+
+    #[test]
+    fn completed_without_current_scene_is_virtual_unknown_and_filterable() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let repository = Repository::new(temp.path().join("database.sqlite3"));
+        repository.initialize().expect("initialize");
+        let (library_id, asset_id) = seed_classifiable_asset(&repository, "unknown");
+        let connection = repository.open().expect("open database");
+        connection
+            .execute("DELETE FROM semantic_labels WHERE asset_id=?1", [asset_id])
+            .expect("remove current labels");
+        connection
+            .execute(
+                "UPDATE assets SET semantic_status='completed', semantic_error=NULL WHERE id=?1",
+                [asset_id],
+            )
+            .expect("mark empty semantic analysis complete");
+        connection
+            .execute(
+                "INSERT INTO semantic_labels(
+                    asset_id, label, display_name, similarity, threshold, model_name,
+                    model_version, analysis_version, taxonomy_version, category_group,
+                    generated_at, source_fingerprint, is_primary, is_manual
+                 ) VALUES(?1, 'landscape', '旧风景', 0.95, 0.16, ?2, ?3, ?4, 'legacy-v1',
+                          'scene', ?5, 'fingerprint-unknown', 1, 0)",
+                params![
+                    asset_id,
+                    MODEL_NAME,
+                    MODEL_VERSION,
+                    SEMANTIC_ANALYSIS_VERSION,
+                    now()
+                ],
+            )
+            .expect("seed stale taxonomy label");
+        let detail = repository
+            .get_asset_detail(asset_id)
+            .expect("load virtual unknown detail");
+        assert!(detail.asset.semantic_labels.is_empty());
+        assert_eq!(
+            detail.asset.classification.primary_category.auto.as_deref(),
+            Some("unknown")
+        );
+        assert_eq!(
+            detail
+                .asset
+                .classification
+                .primary_category
+                .effective
+                .as_deref(),
+            Some("unknown")
+        );
+
+        let unknown_filter = repository
+            .list_assets(
+                library_id,
+                AssetSortField::FileName,
+                SortDirection::Asc,
+                1,
+                100,
+                &AssetFilter {
+                    primary_categories: vec!["unknown".into()],
+                    ..AssetFilter::default()
+                },
+            )
+            .expect("filter virtual unknown");
+        assert_eq!(unknown_filter.total, 1);
+        let groups = repository
+            .list_semantic_groups(library_id)
+            .expect("list virtual unknown group");
+        assert!(groups.iter().any(|group| {
+            group.label_id == "unknown" && group.category_group == "scene" && group.asset_count == 1
+        }));
     }
 
     #[test]

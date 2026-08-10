@@ -46,20 +46,36 @@ const semanticCatalog: SemanticLabelDescriptor[] = [
   ["night", "夜景"],
   ["flower", "花卉"],
   ["abstract", "抽象"],
-  ["unknown", "未知"],
 ].map(([id, displayName]) => ({
   id,
   displayName,
-  threshold: 0.16,
-  isPrimaryCategory: [
+  categoryGroup: [
     "portrait",
+    "group",
     "landscape",
     "architecture",
     "product",
+    "food",
+    "animal",
+    "abstract",
+  ].includes(id)
+    ? "scene"
+    : ["vehicle", "flower", "mountain", "water", "forest"].includes(id)
+      ? "subject"
+      : "context",
+  threshold: 0.16,
+  isPrimaryCategory: [
+    "portrait",
+    "group",
+    "landscape",
+    "architecture",
+    "product",
+    "food",
     "animal",
     "document",
-    "unknown",
+    "abstract",
   ].includes(id),
+  taxonomyVersion: "photo-organizer-taxonomy-v2",
 }));
 
 const library: LibrarySummary = {
@@ -229,10 +245,10 @@ export function visualFixtureFromSearch(search: string): VisualFixture | null {
     },
     semanticCatalog,
     semanticGroups: [
-      { labelId: "landscape", displayName: "风景", assetCount: 7 },
-      { labelId: "architecture", displayName: "建筑", assetCount: 4 },
-      { labelId: "product", displayName: "静物", assetCount: 4 },
-      { labelId: "night", displayName: "夜景", assetCount: 3 },
+      { labelId: "landscape", displayName: "风景", categoryGroup: "scene", assetCount: 7 },
+      { labelId: "architecture", displayName: "建筑", categoryGroup: "scene", assetCount: 4 },
+      { labelId: "product", displayName: "产品", categoryGroup: "scene", assetCount: 4 },
+      { labelId: "night", displayName: "夜景", categoryGroup: "context", assetCount: 3 },
     ],
     folders: [
       { relativePath: "", assetCount: 18 },
@@ -288,10 +304,16 @@ function semanticLabelsFor(index: number) {
       threshold: 0.16,
       modelName: "TinyCLIP-ViT-8M-16-Text-3M-YFCC15M",
       modelVersion: "onnx-int8-2025-08-06",
-      analysisVersion: "photo-organizer-semantic-v1",
+      analysisVersion: "photo-organizer-semantic-v2",
+      taxonomyVersion: "photo-organizer-taxonomy-v2",
       analyzedAt: "2026-08-07T03:12:00Z",
       isManual: false,
       isPrimary: rank === 0,
+      categoryGroup: ["landscape", "architecture", "product"].includes(labelId)
+        ? "scene"
+        : ["mountain", "forest"].includes(labelId)
+          ? "subject"
+          : "context",
     }));
 }
 

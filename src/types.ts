@@ -100,11 +100,13 @@ export interface LibrarySummary {
 export interface SemanticLabelResult {
   labelId: string;
   displayName: string;
+  categoryGroup: string;
   similarity: number;
   threshold: number;
   modelName: string;
   modelVersion: string;
   analysisVersion: string;
+  taxonomyVersion: string;
   analyzedAt: string;
   isManual: boolean;
   isPrimary: boolean;
@@ -165,6 +167,32 @@ export interface AssetPage {
   pageSize: number;
 }
 
+/**
+ * The serializable membership query for the current browse surface.
+ * Presentation state such as grid/single preview is intentionally separate.
+ */
+export interface AssetQueryV1 {
+  version: 1;
+  libraryId: number | null;
+  filter: AssetFilter;
+  sort: SortField;
+  direction: SortDirection;
+  groupBySemantic: boolean;
+  page: number;
+  pageSize: number;
+}
+
+export type AssetScopeInputV1 =
+  | { kind: "query"; query: AssetQueryV1 }
+  | { kind: "selection"; query: AssetQueryV1; assetIds: number[] };
+
+export interface AssetScopeDescription {
+  kind: AssetScopeInputV1["kind"];
+  label: string;
+  count: number;
+  isExplicitSelection: boolean;
+}
+
 export interface AssetFilter {
   search: string | null;
   primaryCategories: string[];
@@ -211,6 +239,7 @@ export interface FolderSummary {
 export interface SemanticGroupSummary {
   labelId: string;
   displayName: string;
+  categoryGroup: string;
   assetCount: number;
 }
 
@@ -221,7 +250,10 @@ export interface ScanPerformance {
   fingerprintUs: number;
   imageProcessingUs: number;
   exifUs: number;
+  sourceDimensionUs: number;
   decodeUs: number;
+  sourceDecodeUs: number;
+  thumbnailDecodeUs: number;
   resizeUs: number;
   featureAnalysisUs: number;
   thumbnailWriteUs: number;
@@ -268,8 +300,10 @@ export interface SemanticRuntimeStatus {
 export interface SemanticLabelDescriptor {
   id: string;
   displayName: string;
+  categoryGroup: string;
   threshold: number;
   isPrimaryCategory: boolean;
+  taxonomyVersion: string;
 }
 
 export interface SemanticProgress {

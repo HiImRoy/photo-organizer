@@ -31,6 +31,22 @@ const ASSET_PROJECTION: &str = "
         WHERE t.asset_id=a.id AND t.status='ready'
     )";
 
+const LIBRARY_SCOPE_FILTER: &str = "COALESCE(
+    (SELECT assignment.library_id
+     FROM asset_library_assignments assignment
+     WHERE assignment.asset_id=a.id),
+    a.library_id
+) IN (
+    WITH RECURSIVE library_scope(library_id) AS (
+        SELECT id FROM libraries WHERE id=?1
+        UNION
+        SELECT child.id
+        FROM libraries child
+        JOIN library_scope scope ON child.parent_library_id=scope.library_id
+    )
+    SELECT library_id FROM library_scope
+)";
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct WorkflowAsset {
@@ -202,11 +218,12 @@ struct EmbeddedAsset {
 
 pub fn list_favorite_asset_ids(repository: &Repository, library_id: i64) -> AppResult<Vec<i64>> {
     let connection = open(repository)?;
-    let mut statement = connection.prepare(
-        "SELECT id FROM assets
-         WHERE library_id=?1 AND file_status='present' AND is_favorite=1
-         ORDER BY id",
-    )?;
+    let mut statement = connection.prepare(&format!(
+        "SELECT a.id FROM assets a
+         WHERE {LIBRARY_SCOPE_FILTER}
+           AND a.file_status='present' AND a.is_favorite=1
+         ORDER BY a.id"
+    ))?;
     Ok(statement
         .query_map([library_id], |row| row.get(0))?
         .collect::<Result<Vec<_>, _>>()?)
@@ -221,7 +238,8 @@ pub fn list_favorite_assets(
         &connection,
         &format!(
             "SELECT {ASSET_PROJECTION} FROM assets a
-             WHERE a.library_id=?1 AND a.file_status='present' AND a.is_favorite=1
+             WHERE {LIBRARY_SCOPE_FILTER}
+               AND a.file_status='present' AND a.is_favorite=1
              ORDER BY COALESCE(a.capture_time, ''), a.id DESC"
         ),
         [library_id],
@@ -358,15 +376,16 @@ pub fn list_duplicate_groups(
 ) -> AppResult<Vec<DuplicateGroup>> {
     let connection = open(repository)?;
     let limit = i64::from(limit.clamp(1, 200));
-    let mut statement = connection.prepare(
-        "SELECT fingerprint, SUM(file_size), MAX(file_size)
-         FROM assets
-         WHERE library_id=?1 AND file_status='present' AND fingerprint<>''
+    let mut statement = connection.prepare(&format!(
+        "SELECT a.fingerprint, SUM(a.file_size), MAX(a.file_size)
+         FROM assets a
+         WHERE {LIBRARY_SCOPE_FILTER}
+           AND a.file_status='present' AND a.fingerprint<>''
          GROUP BY fingerprint
          HAVING COUNT(*) > 1
          ORDER BY (SUM(file_size) - MAX(file_size)) DESC, fingerprint
-         LIMIT ?2",
-    )?;
+         LIMIT ?2"
+    ))?;
     let summaries = statement
         .query_map(params![library_id, limit], |row| {
             Ok((
@@ -382,7 +401,8 @@ pub fn list_duplicate_groups(
             &connection,
             &format!(
                 "SELECT {ASSET_PROJECTION} FROM assets a
-                 WHERE a.library_id=?1 AND a.fingerprint=?2 AND a.file_status='present'
+                 WHERE {LIBRARY_SCOPE_FILTER}
+                   AND a.fingerprint=?2 AND a.file_status='present'
                  ORDER BY a.is_favorite DESC, a.rating DESC, a.capture_time, a.id"
             ),
             params![library_id, fingerprint],
@@ -980,7 +1000,8 @@ fn list_embedded_assets(
         "SELECT {ASSET_PROJECTION}, se.dimensions, se.vector_blob
          FROM assets a
          JOIN semantic_embeddings se ON se.asset_id=a.id AND se.source_fingerprint=a.fingerprint
-         WHERE a.library_id=?1 AND a.file_status='present'
+         WHERE {LIBRARY_SCOPE_FILTER}
+           AND a.file_status='present'
            AND se.model_name=?2 AND se.model_version=?3 AND se.analysis_version=?4
          ORDER BY a.id
          LIMIT ?5"
@@ -1195,6 +1216,7 @@ fn validate_export_target(repository: &Repository, target: &Path) -> AppResult<(
         .ok_or_else(|| {
             AppError::InvalidArgument("target parent directory does not exist".into())
         })?;
+    let canonical_parent = parent.canonicalize().map_err(AppError::from)?;
     let extension = target
         .extension()
         .and_then(|value| value.to_str())
@@ -1205,7 +1227,8 @@ fn validate_export_target(repository: &Repository, target: &Path) -> AppResult<(
             "edited copies support JPEG, PNG, and WebP targets".into(),
         ));
     }
-    let target_identity = identity_key(&parent.join(target.file_name().unwrap_or_default()));
+    let target_identity =
+        identity_key(&canonical_parent.join(target.file_name().unwrap_or_default()));
     let connection = open(repository)?;
     let mut statement = connection.prepare("SELECT source_identity_key FROM libraries")?;
     let roots = statement
@@ -1342,6 +1365,76 @@ mod tests {
         assert_eq!(groups.len(), 1);
         assert_eq!(groups[0].assets.len(), 2);
         assert_eq!(groups[0].reclaimable_bytes, 100);
+    }
+
+    #[test]
+    fn workflow_queries_include_descendant_and_virtual_assets() {
+        let (_temporary, repository, parent_library_id, asset_id) = fixture_repository();
+        let connection = open(&repository).expect("database");
+        let fingerprint: String = connection
+            .query_row(
+                "SELECT fingerprint FROM assets WHERE id=?1",
+                [asset_id],
+                |row| row.get(0),
+            )
+            .expect("fixture fingerprint");
+        connection
+            .execute(
+                "INSERT INTO libraries(
+                    root_path, created_at, name, source_path, source_identity_key,
+                    parent_library_id, parent_relation
+                 ) VALUES('C:\\workflow-child', ?1, 'Child', 'C:\\workflow-child',
+                          'c:/workflow-child', ?2, 'manual')",
+                params![now(), parent_library_id],
+            )
+            .expect("child library");
+        let child_library_id = connection.last_insert_rowid();
+        let child_asset_path = "C:\\workflow-child\\child.jpg";
+        connection
+            .execute(
+                "INSERT INTO assets(
+                    library_id, asset_identity_key, absolute_path, relative_path,
+                    file_name, extension, file_size, modified_at, fingerprint,
+                    file_status, scan_status, analysis_status, first_seen_at,
+                    last_seen_at, last_seen_scan
+                 ) VALUES(?1, ?2, ?3, 'child.jpg', 'child.jpg', 'jpg', 100, 1,
+                          ?4, 'present', 'indexed', 'completed', ?5, ?5, 1)",
+                params![
+                    child_library_id,
+                    identity_key(Path::new(child_asset_path)),
+                    child_asset_path,
+                    fingerprint,
+                    now()
+                ],
+            )
+            .expect("child asset");
+        let child_asset_id = connection.last_insert_rowid();
+        drop(connection);
+
+        assert!(set_favorite(&repository, asset_id, true).expect("parent favorite"));
+        assert!(set_favorite(&repository, child_asset_id, true).expect("child favorite"));
+        assert!(
+            repository
+                .assign_asset_to_library(asset_id, child_library_id)
+                .expect("virtual assignment")
+        );
+
+        assert_eq!(
+            list_favorite_asset_ids(&repository, parent_library_id).expect("parent favorites"),
+            vec![asset_id, child_asset_id]
+        );
+        assert_eq!(
+            list_favorite_asset_ids(&repository, child_library_id).expect("child favorites"),
+            vec![asset_id, child_asset_id]
+        );
+        let parent_groups =
+            list_duplicate_groups(&repository, parent_library_id, 20).expect("parent duplicates");
+        assert_eq!(parent_groups.len(), 1);
+        assert_eq!(parent_groups[0].assets.len(), 3);
+        let child_groups =
+            list_duplicate_groups(&repository, child_library_id, 20).expect("child duplicates");
+        assert_eq!(child_groups.len(), 1);
+        assert_eq!(child_groups[0].assets.len(), 2);
     }
 
     #[test]

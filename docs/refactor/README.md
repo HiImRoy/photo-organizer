@@ -1,8 +1,8 @@
 # PhotoOrganizer Refactor Implementation Runbook
 
-状态：Architecture Plan 已冻结；Checkpoint A 已实现并完成自动化/桌面构建验证，等待交互式 Manual Verification；Checkpoint B-F 尚未开始。
+状态：旧 Architecture Plan 已由 2026-08-10 Product Architecture Review 重新基线化。Checkpoint A/B 有实现但仍待人工验收；C-E 已有偏离旧计划的部分实现；Organization COPY 尚未开始；Checkpoint G 当前要求先完成 `G-UI` 界面整合整改。
 
-本目录把最终 Revised Architecture Plan 转换为可以逐阶段执行、测试、人工验证和提交的实施 Runbook。文档本身不代表实现已经完成；所有 Checkpoint 都必须按顺序执行，并在完成后停止等待审核。
+本目录保留旧 Revised Architecture Plan 的详细约束和测试清单。文档本身不代表实现已经完成。后续工作以 Checkpoint G、`docs/product-architecture.md` 和 `docs/plans/next-stage-product-strategy.md` 为入口；A-F 不再被机械视为仍未开始的线性队列。
 
 ## 冻结的核心架构原则
 
@@ -41,7 +41,7 @@ Parent Rescan 只维护 Parent 自己的 ownership scope。扫描遇到任何显
 
 OriginalDirectory 只属于 Export Rule Context。它使用 Asset 相对于当前 owner Library SourceRoot 的完整 relative parent path，可与分类、日期等 Export Dimension 组合，但不进入 Sidebar、FilterState 或 Library hierarchy。
 
-## 执行顺序
+## 历史执行顺序与新入口
 
 ```text
 Checkpoint A
@@ -57,7 +57,19 @@ Checkpoint E
 Checkpoint F
 ```
 
-禁止一次执行多个 Checkpoint。每个 Checkpoint 内也必须按照对应文档中的步骤顺序执行。
+该顺序现在作为历史计划保留。真实代码已经跨越 C-E，并单独实现 Edit copy/rollback，因此继续机械执行会重复功能并扩大文件操作边界。新的顺序为：
+
+```text
+Checkpoint G review baseline
+    ↓ UI_REMEDIATION_REQUIRED
+G-UI LAP-derived UI Integration Remediation
+    ↓ 主界面集成验收
+N1 Workflow Foundation Consolidation execution plan
+    ↓ 独立实现、验证、checkpoint、停止
+后续按 revised roadmap 的 dependency/evidence gate 决定
+```
+
+N1 的查询契约切片已存在，但旧工作台 IA 不作为通过条件。先按 Plan 0021 完成主界面整合；旧 Checkpoint 的未完成 Exit Criteria 仍需诚实记录，G-UI 验收前不得进入后续业务里程碑。
 
 ## 冲突处理
 
@@ -87,6 +99,7 @@ Checkpoint F
 - [Checkpoint D — Semantic and Color](E:/Code/Codex/photo-organizer/docs/refactor/checkpoint-d-semantic-color.md)
 - [Checkpoint E — Export Preview](E:/Code/Codex/photo-organizer/docs/refactor/checkpoint-e-export-preview.md)
 - [Checkpoint F — Copy Export](E:/Code/Codex/photo-organizer/docs/refactor/checkpoint-f-copy-export.md)
+- [Checkpoint G — Product Architecture Consolidation](checkpoint-g-product-architecture-consolidation.md)
 - [Implementation Status](E:/Code/Codex/photo-organizer/docs/refactor/IMPLEMENTATION_STATUS.md)
 
 ## 当前范围外的事项

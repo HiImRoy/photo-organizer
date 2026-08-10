@@ -12,6 +12,8 @@ const api = vi.hoisted(() => ({
   fetchAssets: vi.fn(),
   fetchAssetDetail: vi.fn(),
   fetchFavoriteAssetIds: vi.fn(),
+  fetchFavoriteAssets: vi.fn(),
+  fetchCollections: vi.fn(),
   fetchClassificationRegistry: vi.fn(),
   startLibraryScan: vi.fn(),
   rescanLibrary: vi.fn(),
@@ -107,11 +109,13 @@ const asset: AssetListItem = {
     {
       labelId: "sunset",
       displayName: "日落",
+      categoryGroup: "context",
       similarity: 0.31,
       threshold: 0.16,
       modelName: "TinyCLIP",
       modelVersion: "test",
       analysisVersion: "test",
+      taxonomyVersion: "photo-organizer-taxonomy-v2",
       analyzedAt: "2026-08-06T10:00:00Z",
       isManual: false,
       isPrimary: true,
@@ -151,6 +155,8 @@ beforeEach(() => {
   api.fetchAssets.mockResolvedValue({ items: [], total: 0, page: 1, pageSize: 200 });
   api.fetchAssetDetail.mockResolvedValue(null);
   api.fetchFavoriteAssetIds.mockResolvedValue([]);
+  api.fetchFavoriteAssets.mockResolvedValue([]);
+  api.fetchCollections.mockResolvedValue([]);
   api.updateAssetRating.mockResolvedValue(null);
   api.updateAssetColorLabel.mockResolvedValue(null);
   api.setAssetFavorite.mockResolvedValue(true);
@@ -247,14 +253,16 @@ describe("PhotoOrganizer application shell", () => {
       {
         id: "portrait",
         displayName: "人像",
+        categoryGroup: "scene",
         threshold: 0.2,
         isPrimaryCategory: true,
+        taxonomyVersion: "photo-organizer-taxonomy-v2",
       },
     ]);
     render(<App />);
 
     const categoryButton = await screen.findByRole("button", { name: "人像" });
-    const categorySection = screen.getByText("主类别").closest(".panel-section");
+    const categorySection = screen.getByText("场景分类").closest(".panel-section");
     const countBadge = categorySection?.querySelector(".panel-section-heading small");
 
     expect(countBadge).toHaveClass("is-placeholder");
@@ -308,11 +316,173 @@ describe("PhotoOrganizer application shell", () => {
     await user.click(assetButton);
 
     expect(screen.getByRole("complementary", { name: "图片详情" })).toBeInTheDocument();
+    expect(screen.getByText("直方图")).toBeInTheDocument();
+    const histogramChannels = screen.getByRole("group", { name: "直方图通道" });
+    expect(histogramChannels).toBeInTheDocument();
+    expect(within(histogramChannels).getByRole("button", { name: "显示全部通道" })).toHaveAttribute(
+      "aria-pressed",
+      "true",
+    );
+    expect(within(histogramChannels).getByRole("button", { name: "显示L通道" })).toHaveAttribute(
+      "aria-pressed",
+      "false",
+    );
+    await user.click(within(histogramChannels).getByRole("button", { name: "显示R通道" }));
+    expect(within(histogramChannels).getByRole("button", { name: "显示L通道" })).toHaveAttribute(
+      "aria-pressed",
+      "false",
+    );
+    expect(within(histogramChannels).getByRole("button", { name: "显示R通道" })).toHaveAttribute(
+      "aria-pressed",
+      "true",
+    );
+    await user.click(within(histogramChannels).getByRole("button", { name: "显示全部通道" }));
+    expect(within(histogramChannels).getByRole("button", { name: "显示全部通道" })).toHaveAttribute(
+      "aria-pressed",
+      "true",
+    );
     expect(await screen.findByRole("button", { name: "分析" })).toBeInTheDocument();
     await waitFor(() => expect(assetButton).toHaveAttribute("aria-pressed", "true"));
     expect(screen.getByText("1200 × 800")).toBeInTheDocument();
     expect(screen.getByText("#D76A52")).toBeInTheDocument();
     await waitFor(() => expect(api.fetchThumbnail).toHaveBeenCalledWith(12));
+  });
+
+  it("refreshes the grid and sidebar category counts after a manual classification change", async () => {
+    const user = userEvent.setup();
+    const classifiedAsset = {
+      ...asset,
+      classification: {
+        revision: 1,
+        primaryCategory: {
+          auto: "portrait",
+          manual: null,
+          effective: "portrait",
+          source: "auto" as const,
+        },
+        auxiliaryTags: {
+          auto: [],
+          manualAdditions: [],
+          manualRemovals: [],
+          effective: [],
+          source: "none" as const,
+        },
+        tone: {
+          auto: "balanced",
+          manual: null,
+          effective: "balanced",
+          source: "auto" as const,
+        },
+        dominantColorCategories: {
+          auto: ["orange"],
+          manual: null,
+          effective: ["orange"],
+          source: "auto" as const,
+        },
+        saturationLevel: {
+          auto: "high",
+          manual: null,
+          effective: "high",
+          source: "auto" as const,
+        },
+      },
+    };
+    const updatedAsset = {
+      ...classifiedAsset,
+      classification: {
+        ...classifiedAsset.classification,
+        revision: 2,
+        primaryCategory: {
+          auto: "portrait",
+          manual: "landscape",
+          effective: "landscape",
+          source: "manual" as const,
+        },
+      },
+    };
+    api.fetchLibraries.mockResolvedValue([library]);
+    api.fetchAssets.mockResolvedValue({
+      items: [classifiedAsset],
+      total: 1,
+      page: 1,
+      pageSize: 200,
+    });
+    api.fetchAssetDetail.mockResolvedValue(classifiedAsset);
+    api.fetchSemanticCatalog.mockResolvedValue([
+      {
+        id: "portrait",
+        displayName: "人像",
+        categoryGroup: "scene",
+        threshold: 0.2,
+        isPrimaryCategory: true,
+        taxonomyVersion: "photo-organizer-taxonomy-v2",
+      },
+      {
+        id: "landscape",
+        displayName: "风景",
+        categoryGroup: "scene",
+        threshold: 0.2,
+        isPrimaryCategory: true,
+        taxonomyVersion: "photo-organizer-taxonomy-v2",
+      },
+    ]);
+    api.fetchClassificationRegistry.mockResolvedValue([
+      {
+        id: "primary_category",
+        displayName: "场景分类",
+        kind: "single",
+        filterable: true,
+        supportsManualOverride: true,
+        supportsRestoreAuto: true,
+      },
+    ]);
+    api.fetchSemanticGroups.mockResolvedValue([
+      { labelId: "portrait", displayName: "人像", categoryGroup: "scene", assetCount: 1 },
+    ]);
+    api.updateClassificationOverride.mockImplementation(async () => {
+      api.fetchAssetDetail.mockResolvedValue(updatedAsset);
+      return updatedAsset;
+    });
+
+    render(<App />);
+    const assetButton = await screen.findByRole("button", { name: "晚霞.png" });
+    await user.click(assetButton);
+    const details = await screen.findByRole("complementary", { name: "图片详情" });
+    await user.click(within(details).getByRole("button", { name: "手动修改" }));
+    await waitFor(() => expect(api.fetchSemanticGroups).toHaveBeenCalled());
+    const groupRequestCount = api.fetchSemanticGroups.mock.calls.length;
+
+    const primarySelect = within(details).getAllByRole("combobox")[0];
+    await user.selectOptions(primarySelect, "landscape");
+    await user.click(within(details).getByRole("button", { name: "保存" }));
+    await waitFor(() =>
+      expect(api.updateClassificationOverride).toHaveBeenCalledWith(
+        12,
+        "primary_category",
+        "landscape",
+      ),
+    );
+
+    await waitFor(() =>
+      expect(api.fetchSemanticGroups.mock.calls.length).toBeGreaterThan(groupRequestCount),
+    );
+    await waitFor(() => expect(api.fetchAssets.mock.calls.length).toBeGreaterThan(1));
+  });
+
+  it("opens the query review context without exposing the unavailable Faces tab", async () => {
+    const user = userEvent.setup();
+    api.fetchLibraries.mockResolvedValue([library]);
+    api.fetchAssets.mockResolvedValue({ items: [asset], total: 1, page: 1, pageSize: 200 });
+    render(<App />);
+
+    await screen.findByRole("button", { name: "晚霞.png" });
+    await user.click(screen.getByRole("button", { name: "查找与审阅" }));
+
+    expect(screen.getByRole("region", { name: "查找与审阅" })).toBeInTheDocument();
+    expect(screen.getByText("QUERY / REVIEW CONTEXT")).toBeInTheDocument();
+    expect(screen.getByText("当前查询")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Faces" })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "返回图库" })).toBeInTheDocument();
   });
 
   it("applies Lightroom-style marks to one image or the selected images", async () => {
@@ -732,6 +902,23 @@ describe("PhotoOrganizer application shell", () => {
     );
   });
 
+  it("loads all grid results on one surface without gallery pagination", async () => {
+    api.fetchLibraries.mockResolvedValue([library]);
+    api.fetchAssets.mockImplementation((query: { page: number }) =>
+      Promise.resolve(
+        query.page === 1
+          ? { items: [asset], total: 2, page: 1, pageSize: 1 }
+          : { items: [secondAsset], total: 2, page: 2, pageSize: 1 },
+      ),
+    );
+    render(<App />);
+
+    expect(await screen.findByRole("button", { name: "晚霞.png" })).toBeInTheDocument();
+    expect(await screen.findByRole("button", { name: "海边.png" })).toBeInTheDocument();
+    expect(screen.queryByRole("navigation", { name: "图库分页" })).not.toBeInTheDocument();
+    expect(api.fetchAssets).toHaveBeenCalledWith(expect.objectContaining({ page: 2 }));
+  });
+
   it("surfaces startup errors without hiding the import affordance", async () => {
     api.fetchLibraries.mockRejectedValue(new Error("database unavailable"));
     render(<App />);
@@ -789,6 +976,10 @@ describe("PhotoOrganizer application shell", () => {
     await user.dblClick(first);
     const filmstrip = await screen.findByLabelText("胶片栏");
     expect(filmstrip).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "晚霞.png" })).toHaveAttribute(
+      "aria-current",
+      "true",
+    );
     expect(
       screen.getByRole("toolbar", { name: "人工标记筛选" }).closest(".single-workspace"),
     ).not.toBeNull();
@@ -810,25 +1001,74 @@ describe("PhotoOrganizer application shell", () => {
     );
     expect(screen.queryByRole("navigation", { name: "图库分页" })).not.toBeInTheDocument();
     await waitFor(() => expect(api.fetchPreview).toHaveBeenCalledWith(12, "original"));
+    await waitFor(() => expect(api.fetchPreview).toHaveBeenCalledWith(13, "original"));
     const previewStage = screen.getByAltText(asset.fileName).closest<HTMLElement>(".zoom-stage");
     expect(previewStage).not.toBeNull();
+    const getBoundingClientRect = vi.spyOn(previewStage as HTMLElement, "getBoundingClientRect");
+    getBoundingClientRect.mockReturnValue({
+      width: 640,
+      height: 480,
+      top: 0,
+      right: 640,
+      bottom: 480,
+      left: 0,
+      x: 0,
+      y: 0,
+      toJSON: () => ({}),
+    });
+    fireEvent.resize(window);
     const zoomLabel = document.querySelector<HTMLElement>(".preview-navigator-zoom-label");
     expect(zoomLabel).not.toBeNull();
+    await waitFor(() => expect(zoomLabel?.textContent).toBe("50.67%"));
     const zoomBeforeWheel = zoomLabel?.textContent;
-    fireEvent.wheel(previewStage as HTMLElement, { deltaY: 120 });
-    await waitFor(() => expect(zoomLabel?.textContent).not.toBe(zoomBeforeWheel));
     fireEvent.doubleClick(await screen.findByAltText(asset.fileName));
+    await waitFor(() => expect(screen.getByText("100%")).toBeInTheDocument());
+    fireEvent.doubleClick(await screen.findByAltText(asset.fileName));
+    await waitFor(() => expect(zoomLabel?.textContent).toBe(zoomBeforeWheel));
+    fireEvent.wheel(previewStage as HTMLElement, { deltaY: -120 });
+    await waitFor(() => expect(zoomLabel?.textContent).not.toBe(zoomBeforeWheel));
     expect(
       api.fetchPreview.mock.calls.filter((call) => call[0] === 12 && call[1] === "original"),
     ).toHaveLength(1);
-    expect(screen.getByText("100%")).toBeInTheDocument();
     expect(screen.queryByRole("combobox", { name: "缩放比例" })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "放大预览" })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "缩小预览" })).not.toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "海边.png" }));
-    await waitFor(() => expect(api.fetchPreview).toHaveBeenCalledWith(13, "original"));
+    await waitFor(() => expect(zoomLabel?.textContent).toBe(zoomBeforeWheel));
+    expect(
+      api.fetchPreview.mock.calls.filter((call) => call[0] === 13 && call[1] === "original"),
+    ).toHaveLength(1);
+    expect(screen.getByRole("button", { name: "海边.png" })).toHaveAttribute(
+      "aria-current",
+      "true",
+    );
+    await waitFor(() =>
+      expect(screen.getByRole("heading", { name: secondAsset.fileName })).toBeInTheDocument(),
+    );
+    await waitFor(() =>
+      expect(document.querySelector<HTMLImageElement>(".zoom-stage .preview-image")?.alt).toBe(
+        secondAsset.fileName,
+      ),
+    );
+    await user.keyboard("{ArrowLeft}");
+    await waitFor(() =>
+      expect(screen.getByRole("heading", { name: asset.fileName })).toBeInTheDocument(),
+    );
+    expect(screen.getByRole("button", { name: asset.fileName })).toHaveAttribute(
+      "aria-current",
+      "true",
+    );
+    await user.keyboard("{ArrowRight}");
+    await waitFor(() =>
+      expect(screen.getByRole("heading", { name: secondAsset.fileName })).toBeInTheDocument(),
+    );
+    expect(screen.getByRole("button", { name: secondAsset.fileName })).toHaveAttribute(
+      "aria-current",
+      "true",
+    );
     await user.keyboard("{Escape}");
     expect(screen.getByLabelText("图片网格")).toBeInTheDocument();
+    getBoundingClientRect.mockRestore();
   });
 
   it("resizes both side panels from border hit areas with accessible controls", async () => {

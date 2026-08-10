@@ -9,6 +9,7 @@ export const PRIMARY_CATEGORY_OPTIONS = [
   ["product", "静物"],
   ["animal", "动物"],
   ["document", "文档"],
+  ["other", "其他"],
   ["unknown", "未知"],
 ] as const;
 
@@ -59,12 +60,22 @@ const FALLBACK_LABELS = new Map<string, string>([
   ["water", "水体"],
   ["forest", "森林"],
   ["sunset", "日落"],
+  ["other", "其他"],
 ]);
+
+export const UNKNOWN_SEMANTIC_LABEL: SemanticLabelDescriptor = {
+  id: "unknown",
+  displayName: "未知",
+  categoryGroup: "scene",
+  threshold: 0,
+  isPrimaryCategory: true,
+  taxonomyVersion: "photo-organizer-taxonomy-v2",
+};
 
 export function classificationFieldLabel(field: string): string {
   switch (field) {
     case "primary_category":
-      return "主类别";
+      return "场景分类";
     case "auxiliary_tags":
       return "辅助标签";
     case "tone":

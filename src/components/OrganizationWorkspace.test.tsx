@@ -30,6 +30,17 @@ const library: LibrarySummary = {
   semanticPendingCount: 0,
 };
 
+const testQuery = {
+  version: 1 as const,
+  libraryId: library.id,
+  filter: emptyAssetFilter,
+  sort: "file_name" as const,
+  direction: "asc" as const,
+  groupBySemantic: false,
+  page: 1,
+  pageSize: 120,
+};
+
 const plan: OrganizationPlan = {
   summary: {
     planId: "plan-1",
@@ -92,16 +103,22 @@ const plan: OrganizationPlan = {
 };
 
 describe("OrganizationWorkspace", () => {
-  it("generates a read-only mapping and exposes conflict/export controls", async () => {
+  it("inherits an explicit selection and generates a read-only mapping", async () => {
     const user = userEvent.setup();
     api.previewOrganizationPlan.mockResolvedValue(plan);
     api.exportOrganizationManifest.mockResolvedValue("D:\\整理预览.json");
     render(
       <OrganizationWorkspace
         library={library}
-        filter={emptyAssetFilter}
         selectedAssetIds={[22]}
         filteredCount={1}
+        scopeInput={{ kind: "selection", query: testQuery, assetIds: [22] }}
+        scopeDescription={{
+          kind: "selection",
+          label: "已选择 1 张",
+          count: 1,
+          isExplicitSelection: true,
+        }}
         onClose={vi.fn()}
       />,
     );
@@ -111,7 +128,11 @@ describe("OrganizationWorkspace", () => {
     await user.click(screen.getByRole("button", { name: "生成整理预览" }));
 
     expect(api.previewOrganizationPlan).toHaveBeenCalledWith(
-      expect.objectContaining({ targetRoot: "D:\\整理预览", scope: "filtered" }),
+      expect.objectContaining({
+        targetRoot: "D:\\整理预览",
+        scope: "selected",
+        filter: emptyAssetFilter,
+      }),
     );
     expect(await screen.findByText("晚霞😀.jpg")).toBeInTheDocument();
     expect(screen.getByText("冲突")).toBeInTheDocument();

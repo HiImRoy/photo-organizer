@@ -2,7 +2,8 @@
 
 ## Status
 
-Implemented; pending measurement on the user's real library.
+Implemented baseline; superseded by the thumbnail-first follow-up in
+`docs/plans/0022-thumbnail-first-import-analysis-performance.md`.
 
 ## Evidence
 
@@ -10,20 +11,20 @@ Implemented; pending measurement on the user's real library.
   repository-owned measurement recorded roughly 28.8 seconds in decode and 7.5
   seconds in resize/orientation for five large JPEGs; fingerprinting and SQLite
   writes were each below 100 ms in aggregate.
-- Semantic analysis exposes `classify_batch`, but the desktop task runner calls it
-  once per asset. Each call also decodes the original file even though import has
-  already produced a valid `grid-640-v1` cache image.
+- Semantic analysis now receives the current `grid-640-v1` cache path. The
+  remaining throughput work is batch sizing, cache-miss isolation, and grouped
+  SQLite persistence rather than source-image decoding.
 
 ## Scope
 
-1. Let semantic candidates carry a valid grid-thumbnail path when available, with
-   an absolute-source fallback for missing or stale caches.
-2. Process semantic candidates in a small bounded batch and retain per-asset
-   persistence, source-fingerprint checks, cancellation, pause, and failure
-   isolation.
-3. Process fresh import image work with at most two workers. Keep discovery,
-   ownership resolution, cache-hit decisions, SQLite writes, and progress ordering
-   at the scanner boundary.
+1. Require a current grid-thumbnail path for semantic candidates; do not fall
+   back to the absolute source during semantic analysis.
+2. Process semantic candidates in a bounded batch and retain per-asset source
+   checks, cancellation, pause, and failure isolation while grouping SQLite
+   persistence by batch.
+3. Process fresh import image work with a bounded two-to-four worker pool. Keep
+   discovery, ownership resolution, cache-hit decisions, SQLite writes, and
+   progress ordering at the scanner boundary.
 4. Preserve full-content BLAKE3 fingerprints, source read-only behavior, one
    640px cache, parent/child source-root pruning, and all existing classification
    semantics.
@@ -47,14 +48,47 @@ Implemented; pending measurement on the user's real library.
 
 ## Implementation result
 
-- Semantic analysis now prefers a current `grid-640-v1` thumbnail and falls back
-  to the source image only when that cache is unavailable or fails.
-- Semantic inference is issued in batches of up to eight images. If a batch fails,
-  the runner retries individual images so one bad source does not fail the whole
-  batch.
-- Fresh import image work is processed by at most two scoped workers; ownership,
+- Semantic analysis now requires a current `grid-640-v1` thumbnail. Missing or
+  unreadable cache files fail the semantic item instead of reopening the source.
+- Semantic inference is issued in batches of up to 32 images. If a batch fails,
+  the runner retries individual thumbnails so one bad cache entry does not fail
+  the whole batch. A missing cache path is failed before the model is invoked.
+- Semantic results for one batch are committed in one SQLite transaction.
+- Fresh import image work is processed by a bounded two-to-four scoped worker
+  pool; ownership,
   cache-hit checks, progress persistence, and SQLite writes remain serialized.
 - On the repository-owned five-image CPU benchmark, batch size 1 measured about
   402.6 ms/image and batch size 8 about 291.1 ms/image. The application path is
   expected to be faster still because it now feeds the 640px cache rather than
   reopening the original high-resolution files.
+
+## 2026-08-10 follow-up (implemented)
+
+The first implementation still allowed a missing/stale thumbnail to fall back
+to the original source during semantic retry. That was both slower and contrary
+to the thumbnail-first contract. The follow-up now:
+
+1. Require a current `grid-640-v1` cache row for semantic candidates.
+2. Keep batch and per-image retry on that cache path only; never reopen the
+   original source from the semantic worker.
+3. Raise the bounded import image-worker limit based on available CPU, while
+   keeping ownership resolution and SQLite writes serialized.
+4. Include tests that prove semantic candidates and retry paths use the cache
+   and that cold import still keeps exact source fingerprints and read-only
+   sources.
+
+## 2026-08-10 thumbnail-first follow-up
+
+- A valid cache is now reused for basic-feature reprocessing. The source is read
+  only for EXIF and dimensions; `source_decode_us` remains zero.
+- JPEGs with a valid EXIF embedded preview use that preview for first import,
+  avoiding a primary-pixel decode. Other formats still perform the single decode
+  required to create the first application thumbnail.
+- Release measurements on two isolated 4000x3000 JPEG fixtures: cold wall time
+  360 ms with 223 ms source decode and 117 ms resize; cache-reuse wall time
+  204 ms with zero source decode and 13.6 ms thumbnail decode; warm rescan wall
+  time 141 ms with zero image processing.
+- Release TinyCLIP over 48 repository PNG fixtures measured 76.8 images/second
+  at batch 8 and 87.7 images/second at batch 32 after prompt-token caching. The
+  benchmark is a model throughput smoke test, not a claim about photographic
+  classification quality.

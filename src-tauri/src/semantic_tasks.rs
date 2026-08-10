@@ -7,7 +7,7 @@ use crate::models::SemanticProgress;
 use crate::semantic::{ExecutionBackend, SemanticAnalysisOutput, SemanticClassifier};
 use crate::tasks::{SemanticControlSignal, SemanticTaskRegistry};
 
-const SEMANTIC_BATCH_SIZE: usize = 8;
+const SEMANTIC_BATCH_SIZE: usize = 32;
 
 pub fn spawn_semantic_job<F>(
     repository: Repository,
@@ -66,49 +66,63 @@ where
                 }
 
                 let mut ready = Vec::with_capacity(candidate_batch.len());
-                for candidate in candidate_batch {
-                    if let Err(error) =
-                        repository.mark_semantic_item_running(&thread_job_id, candidate.id)
-                    {
-                        progress.failed += 1;
-                        progress.error = Some(error.to_string());
+                if let Err(error) = repository.mark_semantic_items_running(
+                    &thread_job_id,
+                    &candidate_batch
+                        .iter()
+                        .map(|candidate| candidate.id)
+                        .collect::<Vec<_>>(),
+                ) {
+                    // Keep the old per-item failure isolation if the grouped
+                    // state update itself cannot be committed.
+                    for candidate in candidate_batch {
+                        match repository.mark_semantic_item_running(&thread_job_id, candidate.id) {
+                            Ok(()) => ready.push(candidate),
+                            Err(item_error) => {
+                                progress.failed += 1;
+                                progress.error = Some(item_error.to_string());
+                            }
+                        }
+                    }
+                    log::warn!(
+                        "grouped semantic running-state update failed for {thread_job_id}: {error}"
+                    );
+                } else {
+                    ready.extend(candidate_batch.iter());
+                }
+
+                let mut cache_ready = Vec::with_capacity(ready.len());
+                for candidate in ready {
+                    let path = analysis_path(candidate);
+                    if path.is_file() {
+                        cache_ready.push(candidate);
                     } else {
-                        ready.push(candidate);
+                        let error =
+                            format!("semantic thumbnail cache is missing: {}", path.display());
+                        progress.failed += 1;
+                        progress.error = Some(error.clone());
+                        let _ = repository.fail_semantic_item(&thread_job_id, candidate.id, &error);
                     }
                 }
 
-                if let Some(candidate) = ready.first() {
+                if let Some(candidate) = cache_ready.first() {
                     progress.status = "running".into();
                     progress.current_asset_id = Some(candidate.id);
                     progress.current_path =
                         Some(candidate.absolute_path.to_string_lossy().into_owned());
                     emit(progress.clone());
 
-                    let paths = ready
+                    let paths = cache_ready
                         .iter()
                         .map(|candidate| analysis_path(candidate))
                         .collect::<Vec<_>>();
-                    let outputs = classify_batch_with_fallback(classifier.as_ref(), &ready, &paths);
+                    let outputs =
+                        classify_batch_with_fallback(classifier.as_ref(), &cache_ready, &paths);
+                    let mut successful = Vec::with_capacity(cache_ready.len());
 
-                    for ((candidate, path), output) in ready.iter().zip(paths).zip(outputs) {
+                    for ((candidate, path), output) in cache_ready.iter().zip(paths).zip(outputs) {
                         match output {
-                            Ok(output) => match repository.save_semantic_result(
-                                &thread_job_id,
-                                candidate,
-                                &output,
-                            ) {
-                                Ok(true) => progress.completed += 1,
-                                Ok(false) => progress.skipped += 1,
-                                Err(error) => {
-                                    progress.failed += 1;
-                                    progress.error = Some(error.to_string());
-                                    let _ = repository.fail_semantic_item(
-                                        &thread_job_id,
-                                        candidate.id,
-                                        &error.to_string(),
-                                    );
-                                }
-                            },
+                            Ok(output) => successful.push((*candidate, output)),
                             Err(error) => {
                                 progress.failed += 1;
                                 progress.error = Some(error.clone());
@@ -120,6 +134,28 @@ where
                             }
                         }
                         progress.current_path = Some(path.to_string_lossy().into_owned());
+                    }
+
+                    let entries = successful
+                        .iter()
+                        .map(|(candidate, output)| (*candidate, output))
+                        .collect::<Vec<_>>();
+                    match repository.save_semantic_results(&thread_job_id, &entries) {
+                        Ok((completed, skipped)) => {
+                            progress.completed += completed as u64;
+                            progress.skipped += skipped as u64;
+                        }
+                        Err(error) => {
+                            progress.failed += successful.len() as u64;
+                            progress.error = Some(error.to_string());
+                            for (candidate, _) in successful {
+                                let _ = repository.fail_semantic_item(
+                                    &thread_job_id,
+                                    candidate.id,
+                                    &error.to_string(),
+                                );
+                            }
+                        }
                     }
                 }
                 progress.processed = progress.completed + progress.failed + progress.skipped;
@@ -144,11 +180,11 @@ where
 }
 
 fn analysis_path(candidate: &SemanticAssetCandidate) -> PathBuf {
-    if candidate.analysis_path.is_file() {
-        candidate.analysis_path.clone()
-    } else {
-        candidate.absolute_path.clone()
-    }
+    // New jobs only schedule assets with a current grid thumbnail. A recovered
+    // queued item can have an empty path when its cache became stale; keeping
+    // that path strict makes the worker fail visibly instead of reopening the
+    // full-resolution original during analysis.
+    candidate.analysis_path.clone()
 }
 
 fn classify_batch_with_fallback(
@@ -188,28 +224,87 @@ fn classify_single_with_fallback(
     path: &Path,
     batch_error: &str,
 ) -> Result<SemanticAnalysisOutput, String> {
-    let mut paths = vec![path.to_path_buf()];
-    if path != candidate.absolute_path {
-        paths.push(candidate.absolute_path.clone());
-    }
-
-    let mut last_error = batch_error.to_string();
-    for path in paths {
-        match classifier.classify_batch(std::slice::from_ref(&path), ExecutionBackend::Cpu) {
-            Ok(mut outputs) if outputs.len() == 1 => return Ok(outputs.remove(0)),
-            Ok(outputs) => {
-                last_error = format!(
-                    "semantic model returned {} results for one image",
-                    outputs.len()
-                );
-            }
-            Err(error) => last_error = error.to_string(),
+    let retry_paths = [path.to_path_buf()];
+    let last_error = match classifier.classify_batch(&retry_paths, ExecutionBackend::Cpu) {
+        Ok(mut outputs) if outputs.len() == 1 => return Ok(outputs.remove(0)),
+        Ok(outputs) => {
+            format!(
+                "semantic model returned {} results for one image",
+                outputs.len()
+            )
         }
-    }
+        Err(error) => error.to_string(),
+    };
     Err(format!(
-        "{}; single-image fallback failed for {}: {}",
+        "{}; single-thumbnail retry failed for {}: {}",
         batch_error,
         candidate.absolute_path.display(),
         last_error
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use parking_lot::Mutex;
+
+    use super::*;
+    use crate::semantic::{ModelMetadata, SemanticError, SemanticRuntimeStatus};
+
+    struct RecordingClassifier {
+        calls: Mutex<Vec<Vec<PathBuf>>>,
+    }
+
+    impl SemanticClassifier for RecordingClassifier {
+        fn metadata(&self) -> ModelMetadata {
+            ModelMetadata {
+                name: "test-model".into(),
+                version: "test-version".into(),
+                analysis_version: "test-analysis".into(),
+                license: Some("test".into()),
+                installed: true,
+                model_size_bytes: None,
+                model_sha256: None,
+                supported_backends: vec![ExecutionBackend::Cpu],
+            }
+        }
+
+        fn status(&self) -> SemanticRuntimeStatus {
+            SemanticRuntimeStatus {
+                status: "ready".into(),
+                message: "test".into(),
+                model: self.metadata(),
+                selected_backend: Some(ExecutionBackend::Cpu),
+            }
+        }
+
+        fn classify_batch(
+            &self,
+            images: &[PathBuf],
+            _backend: ExecutionBackend,
+        ) -> Result<Vec<SemanticAnalysisOutput>, SemanticError> {
+            self.calls.lock().push(images.to_vec());
+            Err(SemanticError::Inference("test failure".into()))
+        }
+    }
+
+    #[test]
+    fn failed_batch_retry_never_reopens_original_source() {
+        let source = PathBuf::from("source/original.jpg");
+        let thumbnail = PathBuf::from("cache/grid-640-v1.jpg");
+        let candidate = SemanticAssetCandidate {
+            id: 1,
+            absolute_path: source,
+            analysis_path: thumbnail.clone(),
+            fingerprint: "fingerprint".into(),
+        };
+        let classifier = RecordingClassifier {
+            calls: Mutex::new(Vec::new()),
+        };
+
+        let result =
+            classify_single_with_fallback(&classifier, &candidate, &thumbnail, "batch failure");
+
+        assert!(result.is_err());
+        assert_eq!(classifier.calls.lock().as_slice(), &[vec![thumbnail]]);
+    }
 }

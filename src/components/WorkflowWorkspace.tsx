@@ -3,7 +3,6 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   addAssetsToCollection,
   chooseEditedCopyTarget,
-  clearFaceData,
   createCollection,
   deleteCollection,
   executeEditExport,
@@ -11,7 +10,6 @@ import {
   fetchCollection,
   fetchCollections,
   fetchDuplicateGroups,
-  fetchFaceFeatureStatus,
   fetchFavoriteAssets,
   fetchPreview,
   fetchSimilarAssets,
@@ -34,21 +32,25 @@ import {
   type EditExportResult,
   type EditRecipe,
   type EditRollbackPlan,
-  type FaceFeatureStatus,
   type LocalSearchResponse,
+  type AssetScopeDescription,
+  type AssetScopeInputV1,
   type SimilarAsset,
   type SimilarityClusterResponse,
   type WorkflowAsset,
 } from "../types";
 
 type WorkflowTab =
-  "favorites" | "collections" | "search" | "duplicates" | "similar" | "compare" | "edit" | "faces";
+  "favorites" | "collections" | "search" | "duplicates" | "similar" | "compare" | "edit";
 
 interface WorkflowWorkspaceProps {
   libraryId: number;
   selectedAssetIds: number[];
   activeAsset: AssetListItem | null;
+  scope: AssetScopeInputV1;
+  scopeDescription: AssetScopeDescription;
   onSelectAsset: (assetId: number) => void;
+  onBack: () => void;
   onFavoriteChange: (assetId: number, favorite: boolean) => void;
 }
 
@@ -60,17 +62,19 @@ const tabs: ReadonlyArray<{ id: WorkflowTab; label: string; note: string }> = [
   { id: "similar", label: "相似聚类", note: "TinyCLIP 向量" },
   { id: "compare", label: "比较", note: "最多四张" },
   { id: "edit", label: "图像编辑", note: "非破坏性" },
-  { id: "faces", label: "人物", note: "隐私与模型门禁" },
 ];
 
 export function WorkflowWorkspace({
   libraryId,
   selectedAssetIds,
   activeAsset,
+  scope,
+  scopeDescription,
   onSelectAsset,
+  onBack,
   onFavoriteChange,
 }: WorkflowWorkspaceProps) {
-  const [tab, setTab] = useState<WorkflowTab>("favorites");
+  const [tab, setTab] = useState<WorkflowTab>("search");
   const [favorites, setFavorites] = useState<WorkflowAsset[]>([]);
   const [collections, setCollections] = useState<CollectionSummary[]>([]);
   const [collection, setCollection] = useState<CollectionDetail | null>(null);
@@ -78,19 +82,17 @@ export function WorkflowWorkspace({
   const [searchResult, setSearchResult] = useState<LocalSearchResponse | null>(null);
   const [similarAssets, setSimilarAssets] = useState<SimilarAsset[]>([]);
   const [clusters, setClusters] = useState<SimilarityClusterResponse | null>(null);
-  const [faceStatus, setFaceStatus] = useState<FaceFeatureStatus | null>(null);
   const [busy, setBusy] = useState(true);
   const [message, setMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     let cancelled = false;
-    void Promise.all([fetchFavoriteAssets(libraryId), fetchCollections(), fetchFaceFeatureStatus()])
-      .then(([favoriteItems, collectionItems, face]) => {
+    void Promise.all([fetchFavoriteAssets(libraryId), fetchCollections()])
+      .then(([favoriteItems, collectionItems]) => {
         if (cancelled) return;
         setFavorites(favoriteItems);
         setCollections(collectionItems);
-        setFaceStatus(face);
       })
       .catch((reason) => {
         if (!cancelled) setError(messageFrom(reason));
@@ -133,12 +135,20 @@ export function WorkflowWorkspace({
   );
 
   return (
-    <section className="workflow-workspace" aria-label="增强工作流">
+    <section className="workflow-workspace" aria-label="查找与审阅">
       <aside className="workflow-nav">
         <div className="workflow-nav-heading">
-          <small>Lap-inspired · 原生实现</small>
-          <h2>本地图片工作流</h2>
+          <small>QUERY / REVIEW CONTEXT</small>
+          <h2>查找与审阅</h2>
           <p>原图只读，收藏与集合只写入本地数据库。</p>
+        </div>
+        <div className="workflow-scope-summary">
+          <strong>{scopeDescription.label}</strong>
+          <span>
+            {scopeDescription.count.toLocaleString()} 张 ·
+            {scope.kind === "selection" ? "当前选择范围" : "当前查询范围"}
+          </span>
+          <small>{scope.kind === "selection" ? "显式选择范围" : "动态查询范围"}</small>
         </div>
         <nav aria-label="工作流工具">
           {tabs.map((item) => (
@@ -160,8 +170,11 @@ export function WorkflowWorkspace({
         <div className="workflow-selection-note">
           <strong>{selectedAssetIds.length}</strong>
           <span>张已选择</span>
-          <small>比较、集合和编辑会复用图库选择。</small>
+          <small>比较、集合和编辑会复用当前范围中的显式选择。</small>
         </div>
+        <button type="button" className="workflow-back-button" onClick={onBack}>
+          返回图库
+        </button>
       </aside>
 
       <div className="workflow-content">
@@ -312,18 +325,6 @@ export function WorkflowWorkspace({
             asset={activeAsset}
             onMessage={setMessage}
             onError={setError}
-          />
-        ) : null}
-
-        {tab === "faces" ? (
-          <FaceView
-            status={faceStatus}
-            onClear={() =>
-              run(async () => {
-                setFaceStatus(await clearFaceData());
-                setMessage("本地人脸框、向量与聚类数据已清空；原图未改变。");
-              })
-            }
           />
         ) : null}
       </div>
@@ -918,56 +919,6 @@ function EditorView({
           </div>
         ) : null}
       </aside>
-    </div>
-  );
-}
-
-function FaceView({
-  status,
-  onClear,
-}: {
-  status: FaceFeatureStatus | null;
-  onClear: () => Promise<void>;
-}) {
-  return (
-    <div className="workflow-section">
-      <SectionIntro
-        title="人物聚类隐私边界"
-        body="人物能力必须显式启用，并依赖许可可用于产品的本地模型。当前不会回退到云服务或偷偷下载权重。"
-        metric={status?.modelInstalled ? "MODEL READY" : "MODEL GATED"}
-      />
-      <div className="face-status-card">
-        <div
-          className="face-status-indicator"
-          data-ready={status?.modelInstalled ? "true" : "false"}
-        />
-        <div>
-          <strong>{status?.modelInstalled ? "本地模型可用" : "模型尚未纳入安装包"}</strong>
-          <p>{status?.message}</p>
-          <small>{status?.privacyNote}</small>
-        </div>
-      </div>
-      <div className="face-metrics">
-        <span>
-          <strong>{status?.detectionCount ?? 0}</strong> 人脸框
-        </span>
-        <span>
-          <strong>{status?.clusterCount ?? 0}</strong> 人物组
-        </span>
-        <span>
-          <strong>{status?.enabled ? "已启用" : "已关闭"}</strong> 分析开关
-        </span>
-      </div>
-      <div className="workflow-actions">
-        <button
-          type="button"
-          disabled={!status?.detectionCount && !status?.clusterCount}
-          onClick={() => void onClear()}
-        >
-          清空全部人脸派生数据
-        </button>
-        <span>此操作只清理数据库派生数据，不触碰原图。</span>
-      </div>
     </div>
   );
 }

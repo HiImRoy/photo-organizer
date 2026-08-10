@@ -7,19 +7,21 @@ use std::time::{Duration, Instant, UNIX_EPOCH};
 
 use crate::db::{LibrarySourceRoot, Repository};
 use crate::error::{AppError, AppResult};
-use crate::imaging::process_image_with_source_bytes;
+use crate::imaging::{process_image_from_cached_thumbnail, process_image_with_source_bytes};
 use crate::models::{FileSnapshot, ProcessedImage, ScanPerformance, ScanProgress, ScanSummary};
 use crate::source_identity::{
     SourceIdentity, existing_identity, identity_key, is_same_or_descendant,
 };
 
-const IMPORT_IMAGE_WORKERS: usize = 2;
+const MIN_IMPORT_IMAGE_WORKERS: usize = 2;
+const MAX_IMPORT_IMAGE_WORKERS: usize = 4;
 
 struct PendingImageWork {
     path: PathBuf,
     snapshot: FileSnapshot,
     library_id: i64,
     generation: i64,
+    cached_thumbnail_path: Option<PathBuf>,
 }
 
 struct ImageWorkResult {
@@ -60,6 +62,13 @@ const MAX_IN_MEMORY_SOURCE_BYTES: u64 = 32 * 1024 * 1024;
 const SCAN_PROGRESS_EVENT_INTERVAL: Duration = Duration::from_millis(120);
 const SCAN_PROGRESS_DB_INTERVAL: Duration = Duration::from_millis(300);
 const SCAN_PROGRESS_DB_BATCH: u64 = 32;
+
+fn import_image_worker_count() -> usize {
+    std::thread::available_parallelism()
+        .map(|parallelism| parallelism.get())
+        .unwrap_or(MIN_IMPORT_IMAGE_WORKERS)
+        .clamp(MIN_IMPORT_IMAGE_WORKERS, MAX_IMPORT_IMAGE_WORKERS)
+}
 
 struct FingerprintedSource {
     fingerprint: String,
@@ -275,7 +284,7 @@ where
         }
 
         let base_progress = aggregate.clone();
-        let scope_summary = scan_library_scope(
+        let scope_summary = match scan_library_scope(
             repository,
             thumbnail_dir,
             &scope_root,
@@ -285,7 +294,13 @@ where
             generation,
             false,
             |local| emit(aggregate_scope_progress(&base_progress, &local)),
-        )?;
+        ) {
+            Ok(summary) => summary,
+            Err(error) => {
+                repository.fail_library_scope(library_id, &error.to_string())?;
+                return Err(error);
+            }
+        };
         add_summary_to_progress(&mut aggregate, &scope_summary);
         if scope_summary.status == "cancelled" {
             aggregate.status = "cancelled".into();
@@ -365,7 +380,8 @@ where
     progress.error = None;
     reporter.force(&mut progress, &performance)?;
 
-    let mut pending_work = Vec::with_capacity(IMPORT_IMAGE_WORKERS);
+    let image_worker_count = import_image_worker_count();
+    let mut pending_work = Vec::with_capacity(image_worker_count);
     for path in candidates {
         if cancelled.load(Ordering::Relaxed) {
             progress.status = "cancelled".into();
@@ -449,6 +465,35 @@ where
                 reporter.report(&mut progress, &performance)?;
                 continue;
             }
+
+            if existing.file_size == snapshot.file_size
+                && existing.modified_at == snapshot.modified_at
+                && cache_ready
+            {
+                pending_work.push(PendingImageWork {
+                    path,
+                    snapshot,
+                    library_id,
+                    generation,
+                    cached_thumbnail_path: existing.cache_path.map(PathBuf::from),
+                });
+                if pending_work.len() < image_worker_count {
+                    continue;
+                }
+
+                if let Some(next) = pending_work.last() {
+                    progress.current_path = Some(path_to_string(&next.path));
+                    reporter.force(&mut progress, &performance)?;
+                }
+                for result in
+                    process_image_work_batch(std::mem::take(&mut pending_work), thumbnail_dir)
+                {
+                    progress.current_path = Some(path_to_string(&result.path));
+                    apply_image_work_result(repository, result, &mut progress, &mut performance)?;
+                    reporter.report(&mut progress, &performance)?;
+                }
+                continue;
+            }
         }
 
         pending_work.push(PendingImageWork {
@@ -456,8 +501,9 @@ where
             snapshot,
             library_id,
             generation,
+            cached_thumbnail_path: None,
         });
-        if pending_work.len() < IMPORT_IMAGE_WORKERS {
+        if pending_work.len() < image_worker_count {
             continue;
         }
 
@@ -518,7 +564,14 @@ fn process_image_work_batch(
 
 fn process_image_work(work: PendingImageWork, thumbnail_dir: PathBuf) -> ImageWorkResult {
     let fingerprint_started = Instant::now();
-    let fingerprinted_source = match read_fingerprinted_source(&work.path) {
+    let fingerprinted_source = match work.cached_thumbnail_path.is_some() {
+        true => hash_file(&work.path).map(|fingerprint| FingerprintedSource {
+            fingerprint,
+            bytes: None,
+        }),
+        false => read_fingerprinted_source(&work.path),
+    };
+    let fingerprinted_source = match fingerprinted_source {
         Ok(value) => value,
         Err(error) => {
             return ImageWorkResult {
@@ -537,12 +590,15 @@ fn process_image_work(work: PendingImageWork, thumbnail_dir: PathBuf) -> ImageWo
     let fingerprint_us = elapsed_us(fingerprint_started);
     let image_started = Instant::now();
     let fingerprint = fingerprinted_source.fingerprint;
-    let processed = process_image_with_source_bytes(
-        &work.path,
-        &thumbnail_dir,
-        &fingerprint,
-        fingerprinted_source.bytes.as_deref(),
-    );
+    let processed = match work.cached_thumbnail_path {
+        Some(thumbnail_path) => process_image_from_cached_thumbnail(&work.path, &thumbnail_path),
+        None => process_image_with_source_bytes(
+            &work.path,
+            &thumbnail_dir,
+            &fingerprint,
+            fingerprinted_source.bytes.as_deref(),
+        ),
+    };
     let image_processing_us = elapsed_us(image_started);
 
     match processed {
@@ -588,9 +644,18 @@ fn apply_image_work_result(
         performance.exif_us = performance
             .exif_us
             .saturating_add(processed.timings.exif_us);
+        performance.source_dimension_us = performance
+            .source_dimension_us
+            .saturating_add(processed.timings.source_dimension_us);
         performance.decode_us = performance
             .decode_us
             .saturating_add(processed.timings.decode_us);
+        performance.source_decode_us = performance
+            .source_decode_us
+            .saturating_add(processed.timings.source_decode_us);
+        performance.thumbnail_decode_us = performance
+            .thumbnail_decode_us
+            .saturating_add(processed.timings.thumbnail_decode_us);
         performance.resize_us = performance
             .resize_us
             .saturating_add(processed.timings.resize_us);
@@ -785,7 +850,16 @@ fn add_performance(total: &mut ScanPerformance, value: &ScanPerformance) {
         .image_processing_us
         .saturating_add(value.image_processing_us);
     total.exif_us = total.exif_us.saturating_add(value.exif_us);
+    total.source_dimension_us = total
+        .source_dimension_us
+        .saturating_add(value.source_dimension_us);
     total.decode_us = total.decode_us.saturating_add(value.decode_us);
+    total.source_decode_us = total
+        .source_decode_us
+        .saturating_add(value.source_decode_us);
+    total.thumbnail_decode_us = total
+        .thumbnail_decode_us
+        .saturating_add(value.thumbnail_decode_us);
     total.resize_us = total.resize_us.saturating_add(value.resize_us);
     total.feature_analysis_us = total
         .feature_analysis_us
@@ -825,6 +899,7 @@ mod tests {
     use std::sync::Mutex;
 
     use image::{DynamicImage, Rgba, RgbaImage};
+    use rusqlite::Connection;
 
     use super::*;
     use crate::models::{AssetSortField, SortDirection};
@@ -1012,6 +1087,7 @@ mod tests {
                         crate::semantic::SemanticPrediction {
                             label_id: "portrait".into(),
                             display_name: "人像".into(),
+                            category_group: "scene".into(),
                             similarity: 0.31,
                             threshold: 0.16,
                             is_primary: true,
@@ -1019,6 +1095,7 @@ mod tests {
                         crate::semantic::SemanticPrediction {
                             label_id: "night".into(),
                             display_name: "夜景".into(),
+                            category_group: "context".into(),
                             similarity: 0.27,
                             threshold: 0.16,
                             is_primary: false,
@@ -1134,6 +1211,49 @@ mod tests {
         assert_eq!(library.asset_count, 2);
         assert_eq!(library.present_count, 1);
         assert_eq!(library.missing_count, 1);
+    }
+
+    #[test]
+    fn valid_thumbnail_is_reused_when_basic_features_need_reprocessing() {
+        let (_temp, paths, repository, source) = setup();
+        let image = source.join("cache-reuse.png");
+        save_pixel(&image, Rgba([30, 120, 210, 255]), (1600, 900));
+
+        let initial = scan_library(
+            &repository,
+            &paths.thumbnail_dir,
+            &source,
+            "cache-initial",
+            &AtomicBool::new(false),
+            |_| {},
+        )
+        .expect("initial scan");
+        assert_eq!(initial.succeeded, 1);
+
+        let connection = Connection::open(&paths.database_path).expect("open database");
+        connection
+            .execute("DELETE FROM tone_features WHERE asset_id=1", [])
+            .expect("delete tone feature");
+        connection
+            .execute("DELETE FROM color_features WHERE asset_id=1", [])
+            .expect("delete color feature");
+        drop(connection);
+
+        let reused = scan_library(
+            &repository,
+            &paths.thumbnail_dir,
+            &source,
+            "cache-reused",
+            &AtomicBool::new(false),
+            |_| {},
+        )
+        .expect("reused scan");
+
+        assert_eq!(reused.succeeded, 1);
+        assert_eq!(reused.performance.source_decode_us, 0);
+        assert!(reused.performance.thumbnail_decode_us > 0);
+        assert!(reused.performance.source_dimension_us > 0);
+        assert_eq!(reused.performance.resize_us, 0);
     }
 
     #[test]

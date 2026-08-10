@@ -7,6 +7,7 @@ import type {
   SemanticLabelDescriptor,
   SemanticRuntimeStatus,
 } from "../types";
+import { UNKNOWN_SEMANTIC_LABEL } from "../classificationLabels";
 import { ChevronIcon, LibraryIcon, ShieldIcon } from "./Icons";
 
 interface SidebarProps {
@@ -280,24 +281,37 @@ export function Sidebar(props: SidebarProps) {
         className="sidebar-module sidebar-filter-module"
         aria-labelledby="sidebar-filter-title"
       >
-        <div className="sidebar-filter-area">
-          <div className="sidebar-area-heading">
-            <strong id="sidebar-filter-title">分类与筛选</strong>
-            <span>按内容属性整理图片</span>
-          </div>
+        <div className="sidebar-area-heading">
+          <strong id="sidebar-filter-title">分类与筛选</strong>
+          <span>按内容属性整理图片</span>
+        </div>
 
+        <div className="sidebar-filter-area">
           <SemanticFilterSection
-            title="主类别"
-            primary
-            labels={catalog.filter((label) => label.isPrimaryCategory)}
+            title="场景分类"
+            categoryGroup="scene"
+            labels={[
+              ...catalog.filter((label) => label.categoryGroup === "scene"),
+              ...(catalog.some((label) => label.id === "unknown") ? [] : [UNKNOWN_SEMANTIC_LABEL]),
+            ]}
             filter={filter}
             groups={groups}
             onFilterChange={onFilterChange}
           />
 
           <SemanticFilterSection
-            title="辅助标签"
-            labels={catalog.filter((label) => !label.isPrimaryCategory)}
+            title="主体标签"
+            categoryGroup="subject"
+            labels={catalog.filter((label) => label.categoryGroup === "subject")}
+            filter={filter}
+            groups={groups}
+            onFilterChange={onFilterChange}
+          />
+
+          <SemanticFilterSection
+            title="环境属性"
+            categoryGroup="context"
+            labels={catalog.filter((label) => label.categoryGroup === "context")}
             filter={filter}
             groups={groups}
             onFilterChange={onFilterChange}
@@ -678,18 +692,19 @@ function PanelSection({
 function SemanticFilterSection({
   title,
   labels,
-  primary = false,
+  categoryGroup,
   filter,
   groups,
   onFilterChange,
 }: {
   title: string;
   labels: SemanticLabelDescriptor[];
-  primary?: boolean;
+  categoryGroup: string;
   filter: AssetFilter;
   groups: SemanticGroupSummary[];
   onFilterChange: (filter: AssetFilter) => void;
 }) {
+  const primary = categoryGroup === "scene";
   const selectedValues = primary ? filter.primaryCategories : filter.auxiliaryTags;
 
   return (
@@ -701,9 +716,7 @@ function SemanticFilterSection({
       <div className="chip-grid">
         {labels.map((label) => {
           const active = selectedValues.includes(label.id);
-          const count = primary
-            ? groups.find((group) => group.labelId === label.id)?.assetCount
-            : undefined;
+          const count = groups.find((group) => group.labelId === label.id)?.assetCount;
           return (
             <button
               type="button"

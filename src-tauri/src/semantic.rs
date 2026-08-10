@@ -16,6 +16,7 @@ use tokenizers::{PaddingParams, PaddingStrategy, Tokenizer, TruncationParams};
 pub const MODEL_NAME: &str = "TinyCLIP-ViT-8M-16-Text-3M-YFCC15M";
 pub const MODEL_VERSION: &str = "onnx-int8-2025-08-06";
 pub const ANALYSIS_VERSION: &str = "photo-organizer-semantic-v2";
+pub const TAXONOMY_VERSION: &str = "photo-organizer-taxonomy-v2";
 pub const MODEL_FILE: &str = "model-int8.onnx";
 pub const TOKENIZER_FILE: &str = "tokenizer.json";
 pub const MODEL_SHA256: &str = "10921310ddef06557ec1598d1260470a0a4db53f70ffe0deb60b946dcad6d27a";
@@ -27,8 +28,9 @@ pub const EMBEDDING_DIMENSIONS: usize = 512;
 const IMAGE_SIZE: usize = 224;
 const TOKEN_LENGTH: usize = 77;
 const PAD_TOKEN_ID: u32 = 49_407;
-const MAX_LABELS: usize = 4;
+const MAX_LABELS: usize = 8;
 const TOP_SCORE_WINDOW: f32 = 0.055;
+const SCENE_SCORE_MARGIN: f32 = 0.025;
 const IMAGE_MEAN: [f32; 3] = [0.481_454_66, 0.457_827_5, 0.408_210_73];
 const IMAGE_STD: [f32; 3] = [0.268_629_54, 0.261_302_6, 0.275_777_1];
 
@@ -63,6 +65,7 @@ pub struct ModelMetadata {
 pub struct SemanticPrediction {
     pub label_id: String,
     pub display_name: String,
+    pub category_group: String,
     pub similarity: f32,
     pub threshold: f32,
     pub is_primary: bool,
@@ -73,6 +76,7 @@ pub struct SemanticPrediction {
 pub struct SemanticSimilarity {
     pub label_id: String,
     pub display_name: String,
+    pub category_group: String,
     pub similarity: f32,
     pub threshold: f32,
 }
@@ -99,8 +103,10 @@ pub struct SemanticRuntimeStatus {
 pub struct SemanticLabelDescriptor {
     pub id: String,
     pub display_name: String,
+    pub category_group: String,
     pub threshold: f32,
     pub is_primary_category: bool,
+    pub taxonomy_version: String,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -108,6 +114,7 @@ struct LabelDefinition {
     id: &'static str,
     display_name: &'static str,
     prompt: &'static str,
+    category_group: &'static str,
     threshold: f32,
 }
 
@@ -116,146 +123,173 @@ const LABELS: [LabelDefinition; 21] = [
         id: "portrait",
         display_name: "人像",
         prompt: "a portrait photograph of one person",
+        category_group: "scene",
         threshold: 0.16,
     },
     LabelDefinition {
         id: "group",
         display_name: "多人",
         prompt: "a photograph of a group of people",
+        category_group: "scene",
         threshold: 0.16,
     },
     LabelDefinition {
         id: "landscape",
         display_name: "风景",
         prompt: "a landscape photography scene",
+        category_group: "scene",
         threshold: 0.16,
     },
     LabelDefinition {
         id: "architecture",
         display_name: "建筑",
         prompt: "an architectural photograph of a building",
-        threshold: 0.16,
-    },
-    LabelDefinition {
-        id: "indoor",
-        display_name: "室内",
-        prompt: "an indoor room or interior photograph",
-        threshold: 0.16,
-    },
-    LabelDefinition {
-        id: "street",
-        display_name: "街道",
-        prompt: "a street photography scene",
-        threshold: 0.16,
-    },
-    LabelDefinition {
-        id: "vehicle",
-        display_name: "车辆",
-        prompt: "a photograph of a car, truck, train, or other vehicle",
+        category_group: "scene",
         threshold: 0.16,
     },
     LabelDefinition {
         id: "product",
-        display_name: "静物",
-        prompt: "a commercial product photograph",
+        display_name: "产品",
+        prompt: "a commercial product photograph isolated for a catalog",
+        category_group: "scene",
         threshold: 0.16,
     },
     LabelDefinition {
         id: "still_life",
         display_name: "静物",
         prompt: "a still life photograph of arranged objects",
+        category_group: "scene",
         threshold: 0.16,
     },
     LabelDefinition {
         id: "food",
         display_name: "食品",
         prompt: "a food photography image",
+        category_group: "scene",
         threshold: 0.16,
     },
     LabelDefinition {
         id: "animal",
         display_name: "动物",
         prompt: "a photograph of an animal",
+        category_group: "scene",
         threshold: 0.16,
     },
     LabelDefinition {
         id: "screenshot",
         display_name: "截图",
         prompt: "a computer or phone screenshot of a user interface",
+        category_group: "scene",
         threshold: 0.17,
     },
     LabelDefinition {
         id: "document",
         display_name: "文档",
         prompt: "a scanned document or a photographed page with text",
+        category_group: "scene",
         threshold: 0.17,
     },
     LabelDefinition {
-        id: "night",
-        display_name: "夜景",
-        prompt: "a night photography scene after dark",
+        id: "abstract",
+        display_name: "抽象",
+        prompt: "an abstract image with shapes, patterns, or textures",
+        category_group: "scene",
+        threshold: 0.16,
+    },
+    LabelDefinition {
+        id: "other",
+        display_name: "其他",
+        prompt: "a recognizable photograph outside the listed scene categories",
+        category_group: "scene",
+        threshold: 0.16,
+    },
+    LabelDefinition {
+        id: "vehicle",
+        display_name: "车辆",
+        prompt: "a photograph of a car, truck, train, or other vehicle",
+        category_group: "subject",
         threshold: 0.16,
     },
     LabelDefinition {
         id: "flower",
         display_name: "花卉",
         prompt: "a close photograph of flowers or blossoms",
+        category_group: "subject",
         threshold: 0.16,
     },
     LabelDefinition {
         id: "mountain",
         display_name: "山",
         prompt: "a mountain landscape photograph",
+        category_group: "subject",
         threshold: 0.16,
     },
     LabelDefinition {
         id: "water",
         display_name: "水体",
         prompt: "a photograph of the ocean, a lake, river, or other water",
+        category_group: "subject",
         threshold: 0.16,
     },
     LabelDefinition {
         id: "forest",
         display_name: "森林",
         prompt: "a forest or woodland photograph",
+        category_group: "subject",
+        threshold: 0.16,
+    },
+    LabelDefinition {
+        id: "indoor",
+        display_name: "室内",
+        prompt: "an indoor room or interior photograph",
+        category_group: "context",
+        threshold: 0.16,
+    },
+    LabelDefinition {
+        id: "street",
+        display_name: "街道",
+        prompt: "a street photography scene",
+        category_group: "context",
+        threshold: 0.16,
+    },
+    LabelDefinition {
+        id: "night",
+        display_name: "夜景",
+        prompt: "a night photography scene after dark",
+        category_group: "context",
         threshold: 0.16,
     },
     LabelDefinition {
         id: "sunset",
         display_name: "日落",
         prompt: "a sunset or sunrise photograph",
-        threshold: 0.16,
-    },
-    LabelDefinition {
-        id: "abstract",
-        display_name: "抽象",
-        prompt: "an abstract image with shapes, patterns, or textures",
-        threshold: 0.16,
-    },
-    LabelDefinition {
-        id: "unknown",
-        display_name: "未知",
-        prompt: "an unrecognizable or unclassifiable image",
+        category_group: "context",
         threshold: 0.16,
     },
 ];
 
-const ACTIVE_LABEL_IDS: [&str; 15] = [
+const ACTIVE_LABEL_IDS: [&str; 21] = [
     "portrait",
     "group",
     "landscape",
     "architecture",
-    "indoor",
-    "street",
-    "vehicle",
     "product",
+    "still_life",
     "food",
     "animal",
+    "screenshot",
     "document",
-    "night",
-    "flower",
     "abstract",
-    "unknown",
+    "other",
+    "vehicle",
+    "flower",
+    "mountain",
+    "water",
+    "forest",
+    "indoor",
+    "street",
+    "night",
+    "sunset",
 ];
 
 #[derive(Debug, thiserror::Error)]
@@ -290,31 +324,39 @@ pub fn semantic_catalog() -> Vec<SemanticLabelDescriptor> {
         .map(|label| SemanticLabelDescriptor {
             id: label.id.into(),
             display_name: label.display_name.into(),
+            category_group: label.category_group.into(),
             threshold: label.threshold,
             is_primary_category: is_primary_category(label.id),
+            taxonomy_version: TAXONOMY_VERSION.into(),
         })
         .collect()
 }
 
 pub fn known_display_name_for_label_id(label_id: &str) -> Option<&'static str> {
+    if label_id == "unknown" {
+        return Some("未知");
+    }
     LABELS
         .iter()
         .find(|label| label.id == label_id)
         .map(|label| label.display_name)
 }
 
-const PRIMARY_CATEGORY_IDS: [&str; 7] = [
-    "portrait",
-    "landscape",
-    "architecture",
-    "product",
-    "animal",
-    "document",
-    "unknown",
-];
+pub fn category_group_for_label_id(label_id: &str) -> Option<&'static str> {
+    if label_id == "unknown" {
+        return Some("scene");
+    }
+    LABELS
+        .iter()
+        .find(|label| label.id == label_id)
+        .map(|label| label.category_group)
+}
 
 fn is_primary_category(label_id: &str) -> bool {
-    PRIMARY_CATEGORY_IDS.contains(&label_id)
+    LABELS
+        .iter()
+        .find(|label| label.id == label_id)
+        .is_some_and(|label| label.category_group == "scene")
 }
 
 fn is_active_label(label_id: &str) -> bool {
@@ -371,6 +413,8 @@ impl SemanticClassifier for UnavailableClassifier {
 pub struct TinyClipClassifier {
     session: Mutex<Session>,
     tokenizer: Tokenizer,
+    prompt_input_ids: Vec<i64>,
+    prompt_attention_mask: Vec<i64>,
     model_size_bytes: u64,
 }
 
@@ -428,10 +472,13 @@ impl TinyClipClassifier {
             SemanticError::Inference(format!("could not load ONNX graph: {error}"))
         })?;
         validate_model_contract(&session)?;
+        let (prompt_input_ids, prompt_attention_mask) = tokenize_prompts(&tokenizer)?;
 
         Ok(Self {
             session: Mutex::new(session),
             tokenizer,
+            prompt_input_ids,
+            prompt_attention_mask,
             model_size_bytes: std::fs::metadata(model_path)
                 .map_err(|error| SemanticError::Inference(error.to_string()))?
                 .len(),
@@ -538,7 +585,11 @@ impl SemanticClassifier for TinyClipClassifier {
             return Ok(Vec::new());
         }
 
-        let (input_ids, attention_mask) = tokenize_prompts(&self.tokenizer)?;
+        // The label prompts never change for a classifier instance. Reuse the
+        // tokenized tensors across batches; the ONNX graph still requires the
+        // text inputs, but tokenization no longer runs once per batch.
+        let input_ids = self.prompt_input_ids.clone();
+        let attention_mask = self.prompt_attention_mask.clone();
         let pixel_values = preprocess_images(images)?;
         let label_count = LABELS.len();
         let image_count = images.len();
@@ -775,90 +826,57 @@ fn cosine_similarity(left: &[f32], right: &[f32]) -> f32 {
 }
 
 fn select_predictions(scores: &[f32]) -> Vec<SemanticPrediction> {
-    let unknown_index = LABELS.len() - 1;
-    let mut concrete_primaries = scores
-        .iter()
-        .enumerate()
-        .filter(|(index, _)| {
-            is_primary_category(LABELS[*index].id) && LABELS[*index].id != "unknown"
-        })
-        .map(|(index, score)| (index, *score))
-        .collect::<Vec<_>>();
-    concrete_primaries.sort_by(|left, right| right.1.total_cmp(&left.1));
-    let confident_primary = concrete_primaries.first().is_some_and(|(index, score)| {
-        *score >= LABELS[*index].threshold
-            && concrete_primaries
-                .get(1)
-                .is_none_or(|(_, second_score)| *score - *second_score >= TOP_SCORE_WINDOW)
+    let mut accepted = Vec::<(usize, f32)>::new();
+
+    // `scene` is the compatibility primary category. It is deliberately
+    // selected separately from attributes so two unrelated labels cannot
+    // force one another into the primary slot.
+    let mut scene_candidates = candidates_for_group(scores, "scene");
+    scene_candidates.sort_by(|left, right| right.1.total_cmp(&left.1).then(left.0.cmp(&right.0)));
+    if let Some((index, score)) = scene_candidates.first().copied()
+        && score >= LABELS[index].threshold
+        && scene_candidates
+            .get(1)
+            .is_none_or(|(_, second_score)| score - *second_score >= SCENE_SCORE_MARGIN)
+    {
+        accepted.push((index, score));
+    }
+
+    for group in ["subject", "context"] {
+        let mut candidates = candidates_for_group(scores, group);
+        candidates.sort_by(|left, right| right.1.total_cmp(&left.1).then(left.0.cmp(&right.0)));
+        let Some((_, top_score)) = candidates.first().copied() else {
+            continue;
+        };
+        accepted.extend(
+            candidates
+                .into_iter()
+                .filter(|(index, score)| {
+                    *score >= LABELS[*index].threshold && *score >= top_score - TOP_SCORE_WINDOW
+                })
+                .take(MAX_LABELS),
+        );
+    }
+
+    accepted.sort_by(|left, right| {
+        is_primary_category(LABELS[left.0].id)
+            .cmp(&is_primary_category(LABELS[right.0].id))
+            .reverse()
+            .then(right.1.total_cmp(&left.1))
+            .then(left.0.cmp(&right.0))
     });
-    let best_primary = scores
-        .iter()
-        .enumerate()
-        .filter(|(index, _)| is_primary_category(LABELS[*index].id))
-        .max_by(|left, right| left.1.total_cmp(right.1).then(right.0.cmp(&left.0)))
-        .map(|(index, score)| (index, *score));
-    let mut accepted = scores
-        .iter()
-        .enumerate()
-        .filter(|(index, score)| {
-            is_active_label(LABELS[*index].id) && **score >= LABELS[*index].threshold
-        })
-        .map(|(index, score)| (index, *score))
-        .collect::<Vec<_>>();
-    accepted.sort_by(|left, right| right.1.total_cmp(&left.1).then(left.0.cmp(&right.0)));
-
-    if accepted
-        .iter()
-        .all(|(index, _)| !is_primary_category(LABELS[*index].id))
-        && let Some(primary) = best_primary
-    {
-        accepted.push(primary);
-    }
-    if let Some((_, top_score)) = accepted.first().copied() {
-        accepted.retain(|(index, score)| {
-            *score >= top_score - TOP_SCORE_WINDOW || is_primary_category(LABELS[*index].id)
-        });
-    }
-    if accepted.iter().any(|(index, _)| *index != unknown_index) {
-        accepted.retain(|(index, _)| *index != unknown_index);
-    }
     accepted.truncate(MAX_LABELS);
-    if !accepted
-        .iter()
-        .any(|(index, _)| is_primary_category(LABELS[*index].id))
-        && let Some(primary) = best_primary
-    {
-        if accepted.len() == MAX_LABELS {
-            accepted.pop();
-        }
-        accepted.push(primary);
-        accepted.sort_by(|left, right| right.1.total_cmp(&left.1).then(left.0.cmp(&right.0)));
-    }
-    if accepted.is_empty() {
-        accepted.push((
-            unknown_index,
-            scores.get(unknown_index).copied().unwrap_or(0.0),
-        ));
-    }
-
-    if !confident_primary {
-        accepted.retain(|(index, _)| !is_primary_category(LABELS[*index].id));
-        accepted.push((
-            unknown_index,
-            scores.get(unknown_index).copied().unwrap_or(0.0),
-        ));
-    }
 
     let primary_index = accepted
         .iter()
-        .filter(|(index, _)| is_primary_category(LABELS[*index].id))
-        .max_by(|left, right| left.1.total_cmp(&right.1).then(right.0.cmp(&left.0)))
+        .find(|(index, _)| is_primary_category(LABELS[*index].id))
         .map(|(index, _)| *index);
     accepted
         .into_iter()
         .map(|(index, similarity)| SemanticPrediction {
             label_id: LABELS[index].id.into(),
             display_name: LABELS[index].display_name.into(),
+            category_group: LABELS[index].category_group.into(),
             similarity,
             threshold: LABELS[index].threshold,
             is_primary: primary_index == Some(index),
@@ -874,12 +892,24 @@ fn rank_similarities(scores: &[f32]) -> Vec<SemanticSimilarity> {
         .map(|(index, similarity)| SemanticSimilarity {
             label_id: LABELS[index].id.into(),
             display_name: LABELS[index].display_name.into(),
+            category_group: LABELS[index].category_group.into(),
             similarity: *similarity,
             threshold: LABELS[index].threshold,
         })
         .collect::<Vec<_>>();
     ranked.sort_by(|left, right| right.similarity.total_cmp(&left.similarity));
     ranked
+}
+
+fn candidates_for_group(scores: &[f32], group: &str) -> Vec<(usize, f32)> {
+    scores
+        .iter()
+        .enumerate()
+        .filter(|(index, _)| {
+            is_active_label(LABELS[*index].id) && LABELS[*index].category_group == group
+        })
+        .map(|(index, score)| (index, *score))
+        .collect()
 }
 
 fn cpu_thread_count() -> usize {
@@ -1093,13 +1123,9 @@ mod tests {
     }
 
     #[test]
-    fn catalog_has_stable_unique_ids_and_unknown_last() {
+    fn catalog_has_stable_unique_ids_and_group_metadata() {
         let catalog = semantic_catalog();
-        assert_eq!(catalog.len(), 15);
-        assert_eq!(
-            catalog.last().map(|label| label.id.as_str()),
-            Some("unknown")
-        );
+        assert_eq!(catalog.len(), 21);
         let mut ids = catalog
             .iter()
             .map(|label| label.id.as_str())
@@ -1107,14 +1133,26 @@ mod tests {
         ids.sort_unstable();
         ids.dedup();
         assert_eq!(ids.len(), catalog.len());
-        assert_eq!(known_display_name_for_label_id("product"), Some("静物"));
+        assert_eq!(known_display_name_for_label_id("product"), Some("产品"));
         assert_eq!(known_display_name_for_label_id("document"), Some("文档"));
+        assert_eq!(known_display_name_for_label_id("unknown"), Some("未知"));
         assert_eq!(
             catalog
                 .iter()
                 .filter(|label| label.is_primary_category)
                 .count(),
-            7
+            12
+        );
+        assert!(
+            catalog
+                .iter()
+                .all(|label| label.taxonomy_version == TAXONOMY_VERSION)
+        );
+        assert!(
+            catalog
+                .iter()
+                .filter(|label| label.is_primary_category)
+                .all(|label| label.category_group == "scene")
         );
         assert!(
             !catalog
@@ -1123,66 +1161,51 @@ mod tests {
                 .unwrap()
                 .is_primary_category
         );
-        for inactive_id in [
-            "still_life",
-            "screenshot",
-            "mountain",
-            "water",
-            "forest",
-            "sunset",
-        ] {
-            assert!(!catalog.iter().any(|label| label.id == inactive_id));
-        }
+        assert!(!catalog.iter().any(|label| label.id == "unknown"));
     }
 
     #[test]
-    fn inactive_taxonomy_labels_are_not_auto_predictions() {
+    fn unknown_is_not_a_model_candidate() {
         let mut scores = vec![0.05; LABELS.len()];
         scores[LABELS
             .iter()
             .position(|label| label.id == "portrait")
             .unwrap()] = 0.30;
-        scores[LABELS
-            .iter()
-            .position(|label| label.id == "mountain")
-            .unwrap()] = 0.99;
 
         let predictions = select_predictions(&scores);
 
         assert!(predictions.iter().any(|label| label.label_id == "portrait"));
-        assert!(!predictions.iter().any(|label| label.label_id == "mountain"));
+        assert!(!predictions.iter().any(|label| label.label_id == "unknown"));
     }
 
     #[test]
     fn primary_label_uses_highest_accepted_similarity() {
         let mut scores = vec![0.10; LABELS.len()];
-        scores[0] = 0.21;
-        scores[13] = 0.24;
+        scores[LABELS
+            .iter()
+            .position(|label| label.id == "portrait")
+            .unwrap()] = 0.21;
+        scores[LABELS
+            .iter()
+            .position(|label| label.id == "landscape")
+            .unwrap()] = 0.24;
+        scores[LABELS.iter().position(|label| label.id == "night").unwrap()] = 0.24;
         let predictions = select_predictions(&scores);
-        assert_eq!(predictions[0].label_id, "night");
-        assert!(!predictions[0].is_primary);
-        assert!(
-            predictions
-                .iter()
-                .any(|label| label.label_id == "portrait" && label.is_primary)
-        );
-    }
-
-    #[test]
-    fn low_confidence_success_is_explicit_unknown_not_a_forced_category() {
-        let scores = vec![0.01; LABELS.len()];
-        let predictions = select_predictions(&scores);
-        assert_eq!(
-            predictions
-                .iter()
-                .find(|label| label.is_primary)
-                .map(|label| label.label_id.as_str()),
-            Some("unknown")
-        );
+        assert_eq!(predictions[0].label_id, "landscape");
+        assert!(predictions[0].is_primary);
         assert_eq!(
             predictions.iter().filter(|label| label.is_primary).count(),
             1
         );
+        assert!(predictions.iter().any(|label| label.label_id == "night"));
+    }
+
+    #[test]
+    fn low_confidence_success_is_empty_and_resolves_to_virtual_unknown() {
+        let scores = vec![0.01; LABELS.len()];
+        let predictions = select_predictions(&scores);
+        assert!(predictions.is_empty());
+        assert!(!predictions.iter().any(|label| label.label_id == "unknown"));
     }
 
     #[test]

@@ -7,7 +7,6 @@ import {
 } from "../api";
 import { formatBytes } from "../format";
 import type {
-  AssetFilter,
   LibrarySummary,
   OrganizationConflictStrategy,
   OrganizationLevel,
@@ -17,6 +16,8 @@ import type {
   OrganizationPlanItem,
   OrganizationPlanRequest,
   OrganizationRules,
+  AssetScopeDescription,
+  AssetScopeInputV1,
   OrganizationScope,
 } from "../types";
 
@@ -56,21 +57,25 @@ const defaultRules: OrganizationRules = {
 
 interface OrganizationWorkspaceProps {
   library: LibrarySummary;
-  filter: AssetFilter;
   selectedAssetIds: number[];
   filteredCount: number;
+  scopeInput: AssetScopeInputV1;
+  scopeDescription: AssetScopeDescription;
   onClose: () => void;
 }
 
 export function OrganizationWorkspace({
   library,
-  filter,
   selectedAssetIds,
   filteredCount,
+  scopeInput,
+  scopeDescription,
   onClose,
 }: OrganizationWorkspaceProps) {
   const [targetRoot, setTargetRoot] = useState("");
-  const [scope, setScope] = useState<OrganizationScope>("filtered");
+  const [scope, setScope] = useState<OrganizationScope>(() =>
+    scopeInput.kind === "selection" ? "selected" : "filtered",
+  );
   const [rules, setRules] = useState<OrganizationRules>(defaultRules);
   const [plan, setPlan] = useState<OrganizationPlan | null>(null);
   const [selectedItem, setSelectedItem] = useState<OrganizationPlanItem | null>(null);
@@ -112,7 +117,7 @@ export function OrganizationWorkspace({
         libraryId: library.id,
         targetRoot: targetRoot.trim(),
         scope,
-        filter,
+        filter: scopeInput.query.filter,
         selectedAssetIds,
         rules,
       };
@@ -170,6 +175,9 @@ export function OrganizationWorkspace({
         <span className="safety-dot" aria-hidden="true" />
         <strong>只读整理预览</strong>
         <span>仅生成源路径 → 规划目标路径映射，不会创建目录、复制、移动、重命名或删除文件。</span>
+        <span className="organization-scope-chip" title={scopeDescription.label}>
+          {scopeInput.kind === "selection" ? "显式选择" : "当前查询"} · {scopeDescription.count} 张
+        </span>
         <button type="button" onClick={onClose}>
           返回图库
         </button>
