@@ -131,7 +131,18 @@ export function AssetCard({
               <span className="asset-title" title={asset.fileName}>
                 {asset.fileName}
               </span>
-              {asset.dominantColor ? (
+              {asset.colorPalette?.prominentPalette.length ? (
+                <span className="asset-color-palette" aria-label="强调色">
+                  {asset.colorPalette.prominentPalette.slice(0, 3).map((candidate) => (
+                    <i
+                      className="color-swatch"
+                      key={`${candidate.rank}-${candidate.color}`}
+                      style={{ backgroundColor: candidate.color }}
+                      title={`强调色 ${candidate.color}`}
+                    />
+                  ))}
+                </span>
+              ) : asset.dominantColor ? (
                 <span
                   className="color-swatch"
                   style={{ backgroundColor: asset.dominantColor }}

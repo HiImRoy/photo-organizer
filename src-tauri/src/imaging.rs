@@ -6,14 +6,36 @@ use std::time::Instant;
 
 use exif::{In, Tag, Value};
 use image::codecs::jpeg::JpegEncoder;
-use image::{DynamicImage, GenericImageView, RgbaImage};
+use image::{DynamicImage, GenericImageView, Limits, RgbaImage};
 
 use crate::error::{AppError, AppResult};
-use crate::models::{BasicImageFeatures, ExifMetadata, ImageProcessingTimings, ProcessedImage};
+use crate::models::{
+    BasicImageFeatures, ColorCandidate, ColorPalette, ExifMetadata, ImageProcessingTimings,
+    ProcessedImage,
+};
+#[cfg(windows)]
+use crate::wic_thumbnail;
 
 pub const THUMBNAIL_SPEC: &str = "grid-640-v1";
-pub const ANALYSIS_VERSION: &str = "basic-color-v3";
+pub const ANALYSIS_THUMBNAIL_MAX_DIMENSION: u32 = 640;
+pub const ANALYSIS_VERSION: &str = "basic-color-v6";
+pub const COLOR_ALGORITHM_VERSION: &str = "accent-oklab-v3";
 pub const SCREEN_PREVIEW_SPEC: &str = "screen-2560-v1";
+
+const MAX_COLOR_CLUSTERS: usize = 8;
+const COLOR_CLUSTER_ITERATIONS: usize = 8;
+const MIN_PALETTE_AREA: f64 = 0.012;
+pub const MIN_MAIN_COLOR_AREA: f64 = 0.08;
+const MIN_ACCENT_AREA: f64 = MIN_PALETTE_AREA * 0.5;
+const CHROMATIC_MAIN_OVERRIDE_AREA: f64 = 0.20;
+const MIN_COLOR_DISTANCE: f64 = 0.045;
+const MIN_ACCENT_CHROMA: f64 = 0.0085;
+const MIN_SHADOW_ACCENT_CHROMA: f64 = 0.025;
+const MIN_HIGHLIGHT_ACCENT_CHROMA: f64 = 0.012;
+/// Keep one pathological image from reserving hundreds of megabytes while
+/// the importer is already running alongside the desktop models.
+pub const MAX_DECODE_ALLOC_BYTES: u64 = 256 * 1024 * 1024;
+pub const MAX_IMAGE_DIMENSION: u32 = 16_384;
 
 pub fn process_image(
     source_path: &Path,
@@ -37,33 +59,46 @@ pub fn process_image_with_source_bytes(
     let exif_us = elapsed_us(exif_started);
 
     let decode_started = Instant::now();
-    let (decoded, used_embedded_thumbnail) = match source_metadata.embedded_thumbnail.as_deref() {
-        Some(bytes) => match image::load_from_memory(bytes) {
-            Ok(image) => (image, true),
-            Err(_) => (decode_source_image(source_path, source_bytes)?, false),
-        },
-        None => (decode_source_image(source_path, source_bytes)?, false),
-    };
+    let (decoded, used_embedded_thumbnail, raw_dimensions) =
+        match source_metadata.embedded_thumbnail.as_deref() {
+            Some(bytes) => match decode_bounded_memory_image(bytes, 640) {
+                Ok(image) => (image, true, None),
+                Err(_) => {
+                    let (image, dimensions) =
+                        decode_bounded_source(source_path, source_bytes, 640)?;
+                    (image, false, Some(dimensions))
+                }
+            },
+            None => {
+                let (image, dimensions) = decode_bounded_source(source_path, source_bytes, 640)?;
+                (image, false, Some(dimensions))
+            }
+        };
     let decode_us = elapsed_us(decode_started);
-    let source_decode_us = if used_embedded_thumbnail {
-        0
-    } else {
-        decode_us
-    };
-    let thumbnail_decode_us = if used_embedded_thumbnail {
-        decode_us
-    } else {
-        0
-    };
+    // `decode_bounded_source` is a thumbnail extraction operation. It never
+    // returns a full-resolution source pixel buffer, so source decode time is
+    // intentionally zero for every import path.
+    let source_decode_us = 0;
+    let thumbnail_decode_us = decode_us;
 
     let resize_started = Instant::now();
     let oriented = apply_orientation(decoded, exif.orientation);
     let (width, height) = if used_embedded_thumbnail {
         source_dimensions(source_path, source_bytes, exif.orientation)?
     } else {
-        oriented.dimensions()
+        oriented_dimensions(
+            raw_dimensions.ok_or_else(|| {
+                AppError::InvalidArgument("bounded thumbnail dimensions are missing".into())
+            })?,
+            exif.orientation,
+        )
     };
-    let thumbnail = bounded_thumbnail(&oriented, 640, 640).to_rgba8();
+    let thumbnail = bounded_thumbnail(
+        &oriented,
+        ANALYSIS_THUMBNAIL_MAX_DIMENSION,
+        ANALYSIS_THUMBNAIL_MAX_DIMENSION,
+    )
+    .to_rgba8();
     let resize_us = elapsed_us(resize_started);
 
     let analysis_step = if thumbnail.width() > 320 || thumbnail.height() > 320 {
@@ -119,10 +154,7 @@ pub fn process_image_from_cached_thumbnail(
     let source_dimension_us = elapsed_us(dimension_started);
 
     let decode_started = Instant::now();
-    let thumbnail = image::ImageReader::open(thumbnail_path)?
-        .with_guessed_format()?
-        .decode()?
-        .to_rgba8();
+    let thumbnail = DynamicImage::ImageRgb8(load_analysis_thumbnail(thumbnail_path)?).to_rgba8();
     let thumbnail_decode_us = elapsed_us(decode_started);
 
     let analysis_step = if thumbnail.width() > 320 || thumbnail.height() > 320 {
@@ -153,13 +185,135 @@ pub fn process_image_from_cached_thumbnail(
     })
 }
 
-fn decode_source_image(source_path: &Path, source_bytes: Option<&[u8]>) -> AppResult<DynamicImage> {
-    match source_bytes {
-        Some(bytes) => Ok(image::load_from_memory(bytes)?),
-        None => Ok(image::ImageReader::open(source_path)?
-            .with_guessed_format()?
-            .decode()?),
+/// Decode only an application-owned analysis thumbnail.
+///
+/// Semantic and color analysis must never receive a source path. Keeping this
+/// decoder here makes the pixel-size boundary explicit at every model call,
+/// including recovered jobs or a corrupted cache entry.
+pub fn load_analysis_thumbnail(path: &Path) -> AppResult<image::RgbImage> {
+    let mut reader = image::ImageReader::open(path)?.with_guessed_format()?;
+    reader.limits(decode_limits_for(ANALYSIS_THUMBNAIL_MAX_DIMENSION));
+    let image = reader.decode()?.to_rgb8();
+    if image.width() == 0 || image.height() == 0 {
+        return Err(AppError::InvalidArgument(
+            "analysis thumbnail has zero dimensions".into(),
+        ));
     }
+    Ok(image)
+}
+
+fn decode_limits() -> Limits {
+    decode_limits_for(MAX_IMAGE_DIMENSION)
+}
+
+fn decode_limits_for(max_dimension: u32) -> Limits {
+    let mut limits = Limits::default();
+    limits.max_image_width = Some(max_dimension);
+    limits.max_image_height = Some(max_dimension);
+    let bounded_alloc = u64::from(max_dimension)
+        .saturating_mul(u64::from(max_dimension))
+        .saturating_mul(16)
+        .min(MAX_DECODE_ALLOC_BYTES);
+    limits.max_alloc = Some(bounded_alloc.max(4 * 1024 * 1024));
+    limits
+}
+
+fn decode_bounded_memory_image(bytes: &[u8], max_dimension: u32) -> AppResult<DynamicImage> {
+    let dimension_reader = image::ImageReader::new(Cursor::new(bytes)).with_guessed_format()?;
+    let dimensions = dimension_reader.into_dimensions()?;
+    if dimensions.0 > max_dimension || dimensions.1 > max_dimension {
+        return Err(AppError::InvalidArgument(format!(
+            "embedded preview exceeds the bounded thumbnail size: {}x{}",
+            dimensions.0, dimensions.1
+        )));
+    }
+    let mut reader = image::ImageReader::new(Cursor::new(bytes)).with_guessed_format()?;
+    reader.limits(decode_limits_for(max_dimension));
+    Ok(reader.decode()?)
+}
+
+#[cfg(windows)]
+fn decode_bounded_source(
+    source_path: &Path,
+    source_bytes: Option<&[u8]>,
+    max_dimension: u32,
+) -> AppResult<(DynamicImage, (u32, u32))> {
+    match wic_thumbnail::decode_thumbnail(source_path, source_bytes, max_dimension) {
+        Ok(decoded) => Ok((
+            DynamicImage::ImageRgba8(decoded.image),
+            (decoded.raw_width, decoded.raw_height),
+        )),
+        Err(wic_error) if is_webp(source_path) => decode_small_webp_source(
+            source_path,
+            source_bytes,
+            max_dimension,
+        )
+        .map_err(|webp_error| {
+            AppError::InvalidArgument(format!(
+                "bounded WebP decode unavailable after WIC failure ({wic_error}): {webp_error}"
+            ))
+        }),
+        Err(error) => Err(AppError::InvalidArgument(error)),
+    }
+}
+
+#[cfg(not(windows))]
+fn decode_bounded_source(
+    source_path: &Path,
+    source_bytes: Option<&[u8]>,
+    max_dimension: u32,
+) -> AppResult<(DynamicImage, (u32, u32))> {
+    if is_webp(source_path) {
+        decode_small_webp_source(source_path, source_bytes, max_dimension)
+    } else {
+        let _ = (source_path, source_bytes, max_dimension);
+        Err(AppError::InvalidArgument(
+            "thumbnail-only source decoder is unavailable on this platform; source pixels were not decoded".into(),
+        ))
+    }
+}
+
+fn decode_small_webp_source(
+    source_path: &Path,
+    source_bytes: Option<&[u8]>,
+    max_dimension: u32,
+) -> AppResult<(DynamicImage, (u32, u32))> {
+    let raw_dimensions = match source_bytes {
+        Some(bytes) => {
+            let reader = image::ImageReader::new(Cursor::new(bytes)).with_guessed_format()?;
+            reader.into_dimensions()?
+        }
+        None => {
+            let reader = image::ImageReader::open(source_path)?.with_guessed_format()?;
+            reader.into_dimensions()?
+        }
+    };
+    if raw_dimensions.0 > max_dimension || raw_dimensions.1 > max_dimension {
+        return Err(AppError::InvalidArgument(format!(
+            "the installed WIC codecs do not support WebP and the source is larger than the bounded fallback: {}x{}",
+            raw_dimensions.0, raw_dimensions.1
+        )));
+    }
+
+    let image = match source_bytes {
+        Some(bytes) => {
+            let mut reader = image::ImageReader::new(Cursor::new(bytes)).with_guessed_format()?;
+            reader.limits(decode_limits_for(max_dimension));
+            reader.decode()?
+        }
+        None => {
+            let mut reader = image::ImageReader::open(source_path)?.with_guessed_format()?;
+            reader.limits(decode_limits_for(max_dimension));
+            reader.decode()?
+        }
+    };
+    Ok((image, raw_dimensions))
+}
+
+fn is_webp(path: &Path) -> bool {
+    path.extension()
+        .and_then(|value| value.to_str())
+        .is_some_and(|value| value.eq_ignore_ascii_case("webp"))
 }
 
 fn source_dimensions(
@@ -183,14 +337,25 @@ fn source_dimensions(
     let raw_dimensions = match raw_dimensions {
         Some(dimensions) => dimensions,
         None => match source_bytes {
-            Some(bytes) => image::ImageReader::new(Cursor::new(bytes))
-                .with_guessed_format()?
-                .into_dimensions()?,
-            None => image::ImageReader::open(source_path)?
-                .with_guessed_format()?
-                .into_dimensions()?,
+            Some(bytes) => {
+                let mut reader =
+                    image::ImageReader::new(Cursor::new(bytes)).with_guessed_format()?;
+                reader.limits(decode_limits());
+                reader.into_dimensions()?
+            }
+            None => {
+                let mut reader = image::ImageReader::open(source_path)?.with_guessed_format()?;
+                reader.limits(decode_limits());
+                reader.into_dimensions()?
+            }
         },
     };
+    if raw_dimensions.0 > MAX_IMAGE_DIMENSION || raw_dimensions.1 > MAX_IMAGE_DIMENSION {
+        return Err(AppError::InvalidArgument(format!(
+            "image dimensions exceed the safe import limit of {MAX_IMAGE_DIMENSION} px: {}x{}",
+            raw_dimensions.0, raw_dimensions.1
+        )));
+    }
     Ok(oriented_dimensions(raw_dimensions, orientation))
 }
 
@@ -262,14 +427,21 @@ fn elapsed_us(started: Instant) -> u64 {
     started.elapsed().as_micros().min(u128::from(u64::MAX)) as u64
 }
 
-/// Decode a source image with the same EXIF orientation used by thumbnails.
-/// The returned image is kept in the caller so the desktop IPC layer can
-/// choose an appropriate preview tier without ever modifying the source.
-pub fn load_oriented_image(source_path: &Path) -> AppResult<DynamicImage> {
-    let exif = read_exif(source_path);
-    let decoded = image::ImageReader::open(source_path)?
-        .with_guessed_format()?
-        .decode()?;
+/// Decode a bounded screen preview with the same EXIF orientation used by
+/// thumbnails. The returned image is never larger than `max_dimension` on
+/// either axis, so the desktop IPC layer never receives a full source image.
+pub fn load_oriented_bounded_image(
+    source_path: &Path,
+    max_dimension: u32,
+) -> AppResult<DynamicImage> {
+    let source_metadata = read_source_metadata(source_path);
+    let exif = source_metadata.exif;
+    let decoded = match source_metadata.embedded_thumbnail.as_deref() {
+        Some(bytes) => decode_bounded_memory_image(bytes, max_dimension).or_else(|_| {
+            decode_bounded_source(source_path, None, max_dimension).map(|(image, _)| image)
+        })?,
+        None => decode_bounded_source(source_path, None, max_dimension)?.0,
+    };
     Ok(apply_orientation(decoded, exif.orientation))
 }
 
@@ -314,10 +486,12 @@ pub fn analyze_rgba(image: &RgbaImage) -> BasicImageFeatures {
 fn analyze_rgba_with_step(image: &RgbaImage, sample_step: u32) -> BasicImageFeatures {
     let (left, top, right, bottom) = analysis_bounds(image);
     let sample_step = sample_step.max(1) as usize;
+    let (oklab_grid, grid_width, grid_height) =
+        build_sample_oklab_grid(image, left, top, right, bottom, sample_step);
     let mut brightness = Vec::new();
     let mut saturation = Vec::new();
-    let mut color_bins: HashMap<u16, (u64, u64, u64, u64)> = HashMap::new();
-    let mut weighted_color_bins: HashMap<u16, (f64, f64, f64, f64)> = HashMap::new();
+    let mut color_bins: HashMap<u16, ColorBin> = HashMap::new();
+    let mut color_samples = Vec::new();
     let mut hue_histogram = [0u64; 12];
     let mut warm_sum = 0.0;
     let mut warm_weight = 0.0;
@@ -329,8 +503,8 @@ fn analyze_rgba_with_step(image: &RgbaImage, sample_step: u32) -> BasicImageFeat
     let mut yb_sum = 0.0;
     let mut yb_sq_sum = 0.0;
 
-    for y in (top..bottom).step_by(sample_step) {
-        for x in (left..right).step_by(sample_step) {
+    for (grid_y, y) in (top..bottom).step_by(sample_step).enumerate() {
+        for (grid_x, x) in (left..right).step_by(sample_step).enumerate() {
             let pixel = image.get_pixel(x, y).0;
             if pixel[3] < 16 {
                 continue;
@@ -342,6 +516,27 @@ fn analyze_rgba_with_step(image: &RgbaImage, sample_step: u32) -> BasicImageFeat
             let light = 0.2126 * r + 0.7152 * g + 0.0722 * b;
             let (sat, hue) = saturation_and_hue(r, g, b);
             let chroma = (r.max(g).max(b) - r.min(g).min(b)).clamp(0.0, 1.0);
+            let oklab = oklab_grid[grid_y * grid_width + grid_x];
+            let is_accent = is_accent_color(oklab);
+            let local_contrast = local_color_contrast_from_grid(
+                image,
+                &oklab_grid,
+                grid_width,
+                grid_height,
+                grid_x,
+                grid_y,
+                left,
+                top,
+                right,
+                bottom,
+                sample_step,
+                oklab,
+            );
+            let center_bias = composition_center_bias(x, y, left, top, right, bottom);
+            let chroma_score = (oklab.chroma() / 0.22).clamp(0.0, 1.0);
+            let saliency_weight =
+                (0.45 + 0.30 * local_contrast + 0.20 * chroma_score + 0.05 * center_bias)
+                    .clamp(0.05, 1.0);
             chroma_sum += chroma;
             brightness.push(light);
             saturation.push(sat);
@@ -350,12 +545,22 @@ fn analyze_rgba_with_step(image: &RgbaImage, sample_step: u32) -> BasicImageFeat
                 | (u16::from(pixel[1] >> 4) << 4)
                 | u16::from(pixel[2] >> 4);
             let entry = color_bins.entry(key).or_default();
-            entry.0 += 1;
-            entry.1 += u64::from(pixel[0]);
-            entry.2 += u64::from(pixel[1]);
-            entry.3 += u64::from(pixel[2]);
+            entry.count += 1.0;
+            entry.lab_sum[0] += oklab.l;
+            entry.lab_sum[1] += oklab.a;
+            entry.lab_sum[2] += oklab.b;
+            color_samples.push(ColorSample {
+                oklab,
+                red: pixel[0],
+                green: pixel[1],
+                blue: pixel[2],
+                local_contrast,
+                saliency_weight,
+                x,
+                y,
+            });
 
-            if sat < 0.14 || chroma < 0.08 {
+            if !is_accent {
                 neutral_count += 1;
             } else {
                 let bucket = ((hue / 30.0).floor() as usize).min(11);
@@ -372,11 +577,6 @@ fn analyze_rgba_with_step(image: &RgbaImage, sample_step: u32) -> BasicImageFeat
                     (0.28 + ((1.0 - light) / 0.28).clamp(0.0, 1.0) * 0.72).clamp(0.28, 1.0);
                 let weight = sat.powf(0.72) * chroma.sqrt() * shadow_weight * highlight_weight;
                 if light > 0.015 && weight > 0.02 {
-                    let weighted = weighted_color_bins.entry(key).or_default();
-                    weighted.0 += weight;
-                    weighted.1 += weight * f64::from(pixel[0]);
-                    weighted.2 += weight * f64::from(pixel[1]);
-                    weighted.3 += weight * f64::from(pixel[2]);
                     chromatic_weight_total += weight;
                 }
             }
@@ -410,54 +610,25 @@ fn analyze_rgba_with_step(image: &RgbaImage, sample_step: u32) -> BasicImageFeat
     let highlight_ratio =
         brightness.iter().filter(|value| **value >= 0.90).count() as f64 / sample_count;
 
-    let mut ranked_colors: Vec<(f64, u8, u8, u8)> = weighted_color_bins
-        .values()
-        .map(|(weight, red, green, blue)| {
-            let divisor = (*weight).max(f64::EPSILON);
-            (
-                *weight,
-                (red / divisor).round().clamp(0.0, 255.0) as u8,
-                (green / divisor).round().clamp(0.0, 255.0) as u8,
-                (blue / divisor).round().clamp(0.0, 255.0) as u8,
-            )
-        })
-        .collect();
-    if ranked_colors.is_empty() {
-        ranked_colors = color_bins
-            .values()
-            .map(|(count, red, green, blue)| {
-                let divisor = (*count).max(1);
-                (
-                    0.0,
-                    (red / divisor) as u8,
-                    (green / divisor) as u8,
-                    (blue / divisor) as u8,
-                )
-            })
-            .collect();
-    }
-    ranked_colors.sort_by(|left, right| right.0.total_cmp(&left.0));
-
-    let (dominant_r, dominant_g, dominant_b) = ranked_colors
+    let color_palette = build_color_palette(
+        &color_bins,
+        &color_samples,
+        left,
+        top,
+        right,
+        bottom,
+        sample_step,
+    );
+    let first_candidate = color_palette
+        .coverage_palette
         .first()
-        .map(|(_, r, g, b)| (*r, *g, *b))
-        .unwrap_or((0, 0, 0));
-    let dominant_color_rgb = format!("#{dominant_r:02X}{dominant_g:02X}{dominant_b:02X}");
-    let dominant_color_category = if chromatic_weight_total / sample_count >= 0.06 {
-        color_category(dominant_r, dominant_g, dominant_b).to_owned()
-    } else {
-        neutral_category(brightness_mean, saturation_mean).to_owned()
-    };
-    let top_colors: Vec<serde_json::Value> = ranked_colors
-        .iter()
-        .take(5)
-        .map(|(count, red, green, blue)| {
-            serde_json::json!({
-                "color": format!("#{red:02X}{green:02X}{blue:02X}"),
-                "ratio": *count / sample_count,
-            })
-        })
-        .collect();
+        .or_else(|| color_palette.prominent_palette.first());
+    let dominant_color_rgb = first_candidate
+        .map(|candidate| candidate.color.clone())
+        .unwrap_or_else(|| "#000000".into());
+    let dominant_color_category = first_candidate
+        .map(|candidate| candidate.category.clone())
+        .unwrap_or_else(|| neutral_category(brightness_mean, saturation_mean).to_owned());
 
     let rg_mean = rg_sum / sample_count;
     let yb_mean = yb_sum / sample_count;
@@ -515,7 +686,8 @@ fn analyze_rgba_with_step(image: &RgbaImage, sample_step: u32) -> BasicImageFeat
         chroma_mean: (chroma_sum / sample_count).clamp(0.0, 1.0),
         dominant_color_rgb,
         dominant_color_category,
-        dominant_colors_json: serde_json::to_string(&top_colors).unwrap_or_else(|_| "[]".into()),
+        dominant_colors_json: serde_json::to_string(&color_palette)
+            .unwrap_or_else(|_| "{\"coveragePalette\":[],\"prominentPalette\":[]}".into()),
         hue_histogram_json: serde_json::to_string(&hue_histogram).unwrap_or_else(|_| "[]".into()),
         warmth_score,
         neutral_ratio,
@@ -532,6 +704,511 @@ fn analyze_rgba_with_step(image: &RgbaImage, sample_step: u32) -> BasicImageFeat
         .into(),
         algorithm_version: ANALYSIS_VERSION.into(),
     }
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct OklabColor {
+    l: f64,
+    a: f64,
+    b: f64,
+}
+
+impl OklabColor {
+    fn chroma(self) -> f64 {
+        (self.a * self.a + self.b * self.b).sqrt()
+    }
+
+    fn distance_squared(self, other: Self) -> f64 {
+        let dl = self.l - other.l;
+        let da = self.a - other.a;
+        let db = self.b - other.b;
+        dl * dl + da * da + db * db
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct ColorBin {
+    count: f64,
+    lab_sum: [f64; 3],
+}
+
+#[derive(Clone, Copy, Debug)]
+struct ColorSample {
+    oklab: OklabColor,
+    red: u8,
+    green: u8,
+    blue: u8,
+    local_contrast: f64,
+    saliency_weight: f64,
+    x: u32,
+    y: u32,
+}
+
+#[derive(Clone, Debug, Default)]
+struct PaletteClusterStats {
+    count: f64,
+    saliency: f64,
+    local_contrast_sum: f64,
+    chroma_sum: f64,
+    red_sum: f64,
+    green_sum: f64,
+    blue_sum: f64,
+    x_sum: f64,
+    y_sum: f64,
+    x_squared_sum: f64,
+    y_squared_sum: f64,
+    adjacency_possible: u64,
+    adjacency_matches: u64,
+}
+
+#[derive(Clone, Debug)]
+struct RankedColorCandidate {
+    candidate: ColorCandidate,
+    oklab: OklabColor,
+    prominence: f64,
+}
+
+fn build_color_palette(
+    bins: &HashMap<u16, ColorBin>,
+    samples: &[ColorSample],
+    left: u32,
+    top: u32,
+    right: u32,
+    bottom: u32,
+    sample_step: usize,
+) -> ColorPalette {
+    if bins.is_empty() || samples.is_empty() {
+        return ColorPalette {
+            algorithm_version: COLOR_ALGORITHM_VERSION.into(),
+            coverage_palette: Vec::new(),
+            prominent_palette: Vec::new(),
+        };
+    }
+
+    let mut entries: Vec<(u16, OklabColor, f64)> = bins
+        .iter()
+        .map(|(key, bin)| {
+            let divisor = bin.count.max(f64::EPSILON);
+            (
+                *key,
+                OklabColor {
+                    l: bin.lab_sum[0] / divisor,
+                    a: bin.lab_sum[1] / divisor,
+                    b: bin.lab_sum[2] / divisor,
+                },
+                bin.count,
+            )
+        })
+        .collect();
+    entries.sort_by(|left, right| {
+        right
+            .2
+            .total_cmp(&left.2)
+            .then_with(|| left.0.cmp(&right.0))
+    });
+
+    let mut centers = Vec::with_capacity(MAX_COLOR_CLUSTERS);
+    if let Some((_, first, _)) = entries.first() {
+        centers.push(*first);
+    }
+    while centers.len() < MAX_COLOR_CLUSTERS && centers.len() < entries.len() {
+        let mut best_index = None;
+        let mut best_score = 0.0;
+        for (index, (_, color, weight)) in entries.iter().enumerate() {
+            let nearest_distance = centers
+                .iter()
+                .map(|center| color.distance_squared(*center).sqrt())
+                .fold(f64::INFINITY, f64::min);
+            let score = nearest_distance * weight.sqrt();
+            if score > best_score {
+                best_score = score;
+                best_index = Some(index);
+            }
+        }
+        let Some(index) = best_index else { break };
+        if best_score < MIN_COLOR_DISTANCE * 0.5 {
+            break;
+        }
+        centers.push(entries[index].1);
+    }
+
+    for _ in 0..COLOR_CLUSTER_ITERATIONS {
+        let mut weights = vec![0.0; centers.len()];
+        let mut sums = vec![[0.0; 3]; centers.len()];
+        for (_, color, weight) in &entries {
+            let index = nearest_center(*color, &centers);
+            weights[index] += *weight;
+            sums[index][0] += color.l * *weight;
+            sums[index][1] += color.a * *weight;
+            sums[index][2] += color.b * *weight;
+        }
+
+        let mut movement = 0.0;
+        for (index, center) in centers.iter_mut().enumerate() {
+            if weights[index] <= f64::EPSILON {
+                continue;
+            }
+            let next = OklabColor {
+                l: sums[index][0] / weights[index],
+                a: sums[index][1] / weights[index],
+                b: sums[index][2] / weights[index],
+            };
+            movement += center.distance_squared(next);
+            *center = next;
+        }
+        if movement < 0.000001 {
+            break;
+        }
+    }
+
+    let grid_width = ((right.saturating_sub(left)) as usize)
+        .div_ceil(sample_step)
+        .max(1);
+    let grid_height = ((bottom.saturating_sub(top)) as usize)
+        .div_ceil(sample_step)
+        .max(1);
+    let mut grid_labels = vec![-1_i16; grid_width.saturating_mul(grid_height)];
+    let mut stats = vec![PaletteClusterStats::default(); centers.len()];
+    let width = right.saturating_sub(left).max(1) as f64;
+    let height = bottom.saturating_sub(top).max(1) as f64;
+    let mut total_saliency = 0.0;
+
+    for sample in samples {
+        let index = nearest_center(sample.oklab, &centers);
+        let stat = &mut stats[index];
+        let x = (f64::from(sample.x.saturating_sub(left)) / width).clamp(0.0, 1.0);
+        let y = (f64::from(sample.y.saturating_sub(top)) / height).clamp(0.0, 1.0);
+        stat.count += 1.0;
+        stat.saliency += sample.saliency_weight;
+        stat.local_contrast_sum += sample.local_contrast;
+        stat.chroma_sum += sample.oklab.chroma();
+        stat.red_sum += f64::from(sample.red);
+        stat.green_sum += f64::from(sample.green);
+        stat.blue_sum += f64::from(sample.blue);
+        stat.x_sum += x;
+        stat.y_sum += y;
+        stat.x_squared_sum += x * x;
+        stat.y_squared_sum += y * y;
+        total_saliency += sample.saliency_weight;
+
+        let grid_x = (sample.x.saturating_sub(left) as usize / sample_step).min(grid_width - 1);
+        let grid_y = (sample.y.saturating_sub(top) as usize / sample_step).min(grid_height - 1);
+        grid_labels[grid_y * grid_width + grid_x] = index as i16;
+    }
+
+    for y in 0..grid_height {
+        for x in 0..grid_width {
+            let index = grid_labels[y * grid_width + x];
+            if index < 0 {
+                continue;
+            }
+            let index = index as usize;
+            if x + 1 < grid_width {
+                let neighbor = grid_labels[y * grid_width + x + 1];
+                stats[index].adjacency_possible += 1;
+                if neighbor == index as i16 {
+                    stats[index].adjacency_matches += 1;
+                }
+            }
+            if y + 1 < grid_height {
+                let neighbor = grid_labels[(y + 1) * grid_width + x];
+                stats[index].adjacency_possible += 1;
+                if neighbor == index as i16 {
+                    stats[index].adjacency_matches += 1;
+                }
+            }
+        }
+    }
+
+    let sample_count = samples.len() as f64;
+    let ranked = stats
+        .iter()
+        .enumerate()
+        .filter_map(|(index, stat)| {
+            if stat.count <= f64::EPSILON {
+                return None;
+            }
+            let divisor = stat.count;
+            let red = (stat.red_sum / divisor).round().clamp(0.0, 255.0) as u8;
+            let green = (stat.green_sum / divisor).round().clamp(0.0, 255.0) as u8;
+            let blue = (stat.blue_sum / divisor).round().clamp(0.0, 255.0) as u8;
+            let chroma = (stat.chroma_sum / divisor).clamp(0.0, 1.0);
+            let category = color_category(red, green, blue).to_owned();
+            let area_coverage = (stat.count / sample_count).clamp(0.0, 1.0);
+            let saliency_coverage = if total_saliency > f64::EPSILON {
+                (stat.saliency / total_saliency).clamp(0.0, 1.0)
+            } else {
+                area_coverage
+            };
+            let local_contrast = (stat.local_contrast_sum / divisor).clamp(0.0, 1.0);
+            let adjacency = if stat.adjacency_possible > 0 {
+                stat.adjacency_matches as f64 / stat.adjacency_possible as f64
+            } else {
+                0.0
+            };
+            let mean_x = stat.x_sum / divisor;
+            let mean_y = stat.y_sum / divisor;
+            let spread_x = (stat.x_squared_sum / divisor - mean_x * mean_x).max(0.0);
+            let spread_y = (stat.y_squared_sum / divisor - mean_y * mean_y).max(0.0);
+            let dispersion = ((spread_x + spread_y).sqrt() / 0.707).clamp(0.0, 1.0);
+            let spatial_coherence = (0.7 * adjacency + 0.3 * (1.0 - dispersion)).clamp(0.0, 1.0);
+            let prominence = (0.52 * saliency_coverage
+                + 0.23 * area_coverage
+                + 0.10 * local_contrast
+                + 0.08 * (chroma / 0.22).clamp(0.0, 1.0)
+                + 0.07 * spatial_coherence)
+                .clamp(0.0, 1.0);
+            Some(RankedColorCandidate {
+                candidate: ColorCandidate {
+                    rank: 0,
+                    color: format!("#{red:02X}{green:02X}{blue:02X}"),
+                    category,
+                    area_coverage,
+                    saliency_coverage,
+                    local_contrast,
+                    chroma,
+                    spatial_coherence,
+                },
+                oklab: centers[index],
+                prominence,
+            })
+        })
+        .collect::<Vec<_>>();
+
+    let chromatic_main_available = ranked.iter().any(|item| {
+        item.candidate.category != "neutral"
+            && item.candidate.area_coverage >= CHROMATIC_MAIN_OVERRIDE_AREA
+    });
+    let mut coverage_order = ranked.clone();
+    coverage_order.sort_by(|left, right| {
+        let chromatic_priority = |item: &RankedColorCandidate| {
+            if chromatic_main_available && item.candidate.category != "neutral" {
+                1_u8
+            } else {
+                0_u8
+            }
+        };
+        chromatic_priority(right)
+            .cmp(&chromatic_priority(left))
+            .then_with(|| {
+                right
+                    .candidate
+                    .area_coverage
+                    .total_cmp(&left.candidate.area_coverage)
+            })
+            .then_with(|| right.prominence.total_cmp(&left.prominence))
+            .then_with(|| left.candidate.color.cmp(&right.candidate.color))
+    });
+    let mut prominent_order = ranked
+        .into_iter()
+        .filter(|item| item.candidate.category != "neutral")
+        .collect::<Vec<_>>();
+    prominent_order.sort_by(|left, right| {
+        right
+            .prominence
+            .total_cmp(&left.prominence)
+            .then_with(|| {
+                right
+                    .candidate
+                    .area_coverage
+                    .total_cmp(&left.candidate.area_coverage)
+            })
+            .then_with(|| left.candidate.color.cmp(&right.candidate.color))
+    });
+
+    ColorPalette {
+        algorithm_version: COLOR_ALGORITHM_VERSION.into(),
+        coverage_palette: select_palette(&coverage_order, 5, MIN_PALETTE_AREA),
+        prominent_palette: select_palette(&prominent_order, 3, MIN_ACCENT_AREA),
+    }
+}
+
+fn select_palette(
+    ordered: &[RankedColorCandidate],
+    limit: usize,
+    minimum_area: f64,
+) -> Vec<ColorCandidate> {
+    let mut selected = Vec::with_capacity(limit);
+    for item in ordered {
+        if item.candidate.area_coverage < minimum_area && !selected.is_empty() {
+            continue;
+        }
+        if selected.iter().any(|candidate: &ColorCandidate| {
+            color_distance_from_hex(&candidate.color, &item.oklab) < MIN_COLOR_DISTANCE
+        }) {
+            continue;
+        }
+        let mut candidate = item.candidate.clone();
+        candidate.rank = (selected.len() + 1) as u8;
+        selected.push(candidate);
+        if selected.len() >= limit {
+            break;
+        }
+    }
+    selected
+}
+
+fn color_distance_from_hex(hex: &str, target: &OklabColor) -> f64 {
+    let bytes = hex.as_bytes();
+    if bytes.len() != 7 || bytes[0] != b'#' {
+        return f64::INFINITY;
+    }
+    let Ok(red) = u8::from_str_radix(&hex[1..3], 16) else {
+        return f64::INFINITY;
+    };
+    let Ok(green) = u8::from_str_radix(&hex[3..5], 16) else {
+        return f64::INFINITY;
+    };
+    let Ok(blue) = u8::from_str_radix(&hex[5..7], 16) else {
+        return f64::INFINITY;
+    };
+    rgb_to_oklab(red, green, blue)
+        .distance_squared(*target)
+        .sqrt()
+}
+
+fn nearest_center(color: OklabColor, centers: &[OklabColor]) -> usize {
+    centers
+        .iter()
+        .enumerate()
+        .min_by(|(_, left), (_, right)| {
+            color
+                .distance_squared(**left)
+                .total_cmp(&color.distance_squared(**right))
+        })
+        .map(|(index, _)| index)
+        .unwrap_or(0)
+}
+
+fn rgb_to_oklab(red: u8, green: u8, blue: u8) -> OklabColor {
+    let red = srgb_to_linear(f64::from(red) / 255.0);
+    let green = srgb_to_linear(f64::from(green) / 255.0);
+    let blue = srgb_to_linear(f64::from(blue) / 255.0);
+    let l = 0.4122214708 * red + 0.5363325363 * green + 0.0514459929 * blue;
+    let m = 0.2119034982 * red + 0.6806995451 * green + 0.1073969566 * blue;
+    let s = 0.0883024619 * red + 0.2817188376 * green + 0.6299787005 * blue;
+    let l = l.max(0.0).cbrt();
+    let m = m.max(0.0).cbrt();
+    let s = s.max(0.0).cbrt();
+    OklabColor {
+        l: 0.2104542553 * l + 0.7936177850 * m - 0.0040720468 * s,
+        a: 1.9779984951 * l - 2.4285922050 * m + 0.4505937099 * s,
+        b: 0.0259040371 * l + 0.7827717662 * m - 0.8086757660 * s,
+    }
+}
+
+fn srgb_to_linear(value: f64) -> f64 {
+    if value <= 0.04045 {
+        value / 12.92
+    } else {
+        ((value + 0.055) / 1.055).powf(2.4)
+    }
+}
+
+fn build_sample_oklab_grid(
+    image: &RgbaImage,
+    left: u32,
+    top: u32,
+    right: u32,
+    bottom: u32,
+    sample_step: usize,
+) -> (Vec<OklabColor>, usize, usize) {
+    let grid_width = (right.saturating_sub(left) as usize)
+        .div_ceil(sample_step)
+        .max(1);
+    let grid_height = (bottom.saturating_sub(top) as usize)
+        .div_ceil(sample_step)
+        .max(1);
+    let mut grid = Vec::with_capacity(grid_width.saturating_mul(grid_height));
+    for y in (top..bottom).step_by(sample_step) {
+        for x in (left..right).step_by(sample_step) {
+            let pixel = image.get_pixel(x, y).0;
+            grid.push(rgb_to_oklab(pixel[0], pixel[1], pixel[2]));
+        }
+    }
+    (grid, grid_width, grid_height)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn local_color_contrast_from_grid(
+    image: &RgbaImage,
+    oklab_grid: &[OklabColor],
+    grid_width: usize,
+    grid_height: usize,
+    grid_x: usize,
+    grid_y: usize,
+    left: u32,
+    top: u32,
+    right: u32,
+    bottom: u32,
+    sample_step: usize,
+    current: OklabColor,
+) -> f64 {
+    let (width, height) = image.dimensions();
+    if width == 0 || height == 0 {
+        return 0.0;
+    }
+    let radius = sample_step.max(1) as u32;
+    let x = left.saturating_add((grid_x as u32).saturating_mul(radius));
+    let y = top.saturating_add((grid_y as u32).saturating_mul(radius));
+    let neighbors = [
+        (
+            grid_x.saturating_sub(1),
+            grid_y,
+            x.saturating_sub(radius),
+            y,
+        ),
+        (
+            (grid_x + 1).min(grid_width.saturating_sub(1)),
+            grid_y,
+            x.saturating_add(radius),
+            y,
+        ),
+        (
+            grid_x,
+            grid_y.saturating_sub(1),
+            x,
+            y.saturating_sub(radius),
+        ),
+        (
+            grid_x,
+            (grid_y + 1).min(grid_height.saturating_sub(1)),
+            x,
+            y.saturating_add(radius),
+        ),
+    ];
+    let contrast = neighbors
+        .iter()
+        .map(|(neighbor_x, neighbor_y, fallback_x, fallback_y)| {
+            let neighbor = if *fallback_x >= left
+                && *fallback_y >= top
+                && ((*fallback_x - left) as usize).is_multiple_of(sample_step)
+                && ((*fallback_y - top) as usize).is_multiple_of(sample_step)
+                && *fallback_x < right
+                && *fallback_y < bottom
+                && *neighbor_x < grid_width
+                && *neighbor_y < grid_height
+            {
+                oklab_grid[*neighbor_y * grid_width + *neighbor_x]
+            } else {
+                let x = (*fallback_x).min(width - 1);
+                let y = (*fallback_y).min(height - 1);
+                let pixel = image.get_pixel(x, y).0;
+                rgb_to_oklab(pixel[0], pixel[1], pixel[2])
+            };
+            neighbor.distance_squared(current).sqrt()
+        })
+        .sum::<f64>()
+        / neighbors.len() as f64;
+    (contrast / 0.20).clamp(0.0, 1.0)
+}
+
+fn composition_center_bias(x: u32, y: u32, left: u32, top: u32, right: u32, bottom: u32) -> f64 {
+    let width = right.saturating_sub(left).max(1) as f64;
+    let height = bottom.saturating_sub(top).max(1) as f64;
+    let normalized_x = (f64::from(x.saturating_sub(left)) / width - 0.5) / 0.707;
+    let normalized_y = (f64::from(y.saturating_sub(top)) / height - 0.5) / 0.707;
+    (1.0 - (normalized_x * normalized_x + normalized_y * normalized_y).sqrt()).clamp(0.0, 1.0)
 }
 
 fn analysis_bounds(image: &RgbaImage) -> (u32, u32, u32, u32) {
@@ -622,17 +1299,10 @@ fn color_category(red: u8, green: u8, blue: u8) -> &'static str {
     let r = f64::from(red) / 255.0;
     let g = f64::from(green) / 255.0;
     let b = f64::from(blue) / 255.0;
-    let brightness = 0.2126 * r + 0.7152 * g + 0.0722 * b;
-    let (saturation, hue) = saturation_and_hue(r, g, b);
-    if saturation < 0.14 {
-        return if brightness < 0.14 {
-            "black"
-        } else if brightness > 0.88 {
-            "white"
-        } else {
-            "gray"
-        };
+    if !is_accent_color(rgb_to_oklab(red, green, blue)) {
+        return "neutral";
     }
+    let (_, hue) = saturation_and_hue(r, g, b);
     match hue {
         value if !(15.0..345.0).contains(&value) => "red",
         value if value < 45.0 => "orange",
@@ -643,6 +1313,17 @@ fn color_category(red: u8, green: u8, blue: u8) -> &'static str {
         value if value < 315.0 => "purple",
         _ => "red",
     }
+}
+
+fn is_accent_color(color: OklabColor) -> bool {
+    let minimum_chroma = if color.l < 0.12 {
+        MIN_SHADOW_ACCENT_CHROMA
+    } else if color.l > 0.96 {
+        MIN_HIGHLIGHT_ACCENT_CHROMA
+    } else {
+        MIN_ACCENT_CHROMA
+    };
+    color.chroma() >= minimum_chroma
 }
 
 fn neutral_category(brightness: f64, saturation: f64) -> &'static str {
@@ -678,10 +1359,6 @@ fn standard_deviation(values: &[f64], mean: f64) -> f64 {
 struct SourceMetadata {
     exif: ExifMetadata,
     embedded_thumbnail: Option<Vec<u8>>,
-}
-
-fn read_exif(path: &Path) -> ExifMetadata {
-    read_source_metadata(path).exif
 }
 
 fn read_source_metadata(path: &Path) -> SourceMetadata {
@@ -868,6 +1545,131 @@ mod tests {
     }
 
     #[test]
+    fn low_saturation_color_casts_keep_their_hue_instead_of_becoming_neutral() {
+        let cool = RgbaImage::from_pixel(32, 32, Rgba([180, 185, 190, 255]));
+        let warm = RgbaImage::from_pixel(32, 32, Rgba([175, 170, 165, 255]));
+
+        let cool_features = analyze_rgba(&cool);
+        let warm_features = analyze_rgba(&warm);
+
+        assert_eq!(cool_features.dominant_color_category, "blue");
+        assert_eq!(warm_features.dominant_color_category, "orange");
+        assert!(cool_features.neutral_ratio < 0.1);
+        assert!(warm_features.neutral_ratio < 0.1);
+    }
+
+    #[test]
+    fn palette_returns_multiple_emphasis_colors_for_a_multicolor_photo() {
+        let mut image = RgbaImage::from_pixel(64, 32, Rgba([230, 35, 35, 255]));
+        for y in 0..32 {
+            for x in 32..64 {
+                image.put_pixel(x, y, Rgba([35, 90, 225, 255]));
+            }
+        }
+
+        let features = analyze_rgba(&image);
+        let palette: ColorPalette =
+            serde_json::from_str(&features.dominant_colors_json).expect("palette JSON");
+        let categories = palette
+            .prominent_palette
+            .iter()
+            .map(|candidate| candidate.category.as_str())
+            .collect::<Vec<_>>();
+
+        assert!(categories.contains(&"red"));
+        assert!(categories.contains(&"blue"));
+        assert!(palette.prominent_palette.len() >= 2);
+        assert!(
+            palette
+                .prominent_palette
+                .iter()
+                .all(|candidate| candidate.area_coverage > 0.4)
+        );
+        assert_eq!(
+            features.dominant_color_rgb,
+            palette.coverage_palette[0].color
+        );
+    }
+
+    #[test]
+    fn main_color_comes_from_area_while_small_contrast_color_stays_an_accent() {
+        let mut image = RgbaImage::from_pixel(64, 64, Rgba([124, 126, 128, 255]));
+        for y in 24..40 {
+            for x in 24..40 {
+                image.put_pixel(x, y, Rgba([235, 45, 35, 255]));
+            }
+        }
+
+        let features = analyze_rgba(&image);
+        let palette: ColorPalette =
+            serde_json::from_str(&features.dominant_colors_json).expect("palette JSON");
+
+        assert_eq!(features.dominant_color_category, "neutral");
+        assert_eq!(
+            palette
+                .coverage_palette
+                .first()
+                .map(|candidate| candidate.category.as_str()),
+            Some("neutral")
+        );
+        assert!(
+            palette
+                .prominent_palette
+                .iter()
+                .any(|candidate| candidate.category == "red")
+        );
+        assert!(palette.coverage_palette[0].area_coverage > 0.8);
+    }
+
+    #[test]
+    fn palette_keeps_a_small_high_contrast_subject_but_rejects_an_isolated_pixel() {
+        let mut subject = RgbaImage::from_pixel(64, 64, Rgba([25, 90, 210, 255]));
+        for y in 24..40 {
+            for x in 24..40 {
+                subject.put_pixel(x, y, Rgba([235, 45, 35, 255]));
+            }
+        }
+        let subject_features = analyze_rgba(&subject);
+        let subject_palette: ColorPalette =
+            serde_json::from_str(&subject_features.dominant_colors_json).expect("palette JSON");
+        assert!(
+            subject_palette
+                .prominent_palette
+                .iter()
+                .any(|candidate| candidate.category == "red")
+        );
+
+        let mut isolated = RgbaImage::from_pixel(64, 64, Rgba([25, 90, 210, 255]));
+        isolated.put_pixel(32, 32, Rgba([235, 45, 35, 255]));
+        let isolated_features = analyze_rgba(&isolated);
+        let isolated_palette: ColorPalette =
+            serde_json::from_str(&isolated_features.dominant_colors_json).expect("palette JSON");
+        assert!(
+            !isolated_palette
+                .prominent_palette
+                .iter()
+                .any(|candidate| candidate.category == "red")
+        );
+    }
+
+    #[test]
+    fn palette_analysis_is_deterministic_and_merges_nearby_colors() {
+        let mut image = RgbaImage::from_pixel(48, 32, Rgba([232, 20, 25, 255]));
+        for y in 0..32 {
+            for x in 24..48 {
+                image.put_pixel(x, y, Rgba([238, 26, 30, 255]));
+            }
+        }
+
+        let first = analyze_rgba(&image);
+        let second = analyze_rgba(&image);
+        assert_eq!(first.dominant_colors_json, second.dominant_colors_json);
+        let palette: ColorPalette =
+            serde_json::from_str(&first.dominant_colors_json).expect("palette JSON");
+        assert_eq!(palette.prominent_palette.len(), 1);
+    }
+
+    #[test]
     fn tiny_images_are_supported() {
         let image = RgbaImage::from_pixel(1, 1, Rgba([20, 80, 200, 255]));
         let features = analyze_rgba(&image);
@@ -880,6 +1682,22 @@ mod tests {
         let image = DynamicImage::ImageRgba8(RgbaImage::new(3, 2));
         let rotated = apply_orientation(image, 6);
         assert_eq!(rotated.dimensions(), (2, 3));
+    }
+
+    #[test]
+    fn oversized_jpeg_dimensions_are_rejected_before_pixel_processing() {
+        let mut header = vec![0xff, 0xd8, 0xff, 0xc0, 0x00, 0x11, 0x08];
+        header.extend_from_slice(&20_000_u16.to_be_bytes());
+        header.extend_from_slice(&20_000_u16.to_be_bytes());
+        header.extend(std::iter::repeat_n(0, 11));
+
+        let error = source_dimensions(Path::new("oversized.jpg"), Some(&header), 1)
+            .expect_err("oversized image should be rejected");
+        assert!(error.to_string().contains("safe import limit"));
+        let limits = decode_limits();
+        assert_eq!(limits.max_image_width, Some(MAX_IMAGE_DIMENSION));
+        assert_eq!(limits.max_image_height, Some(MAX_IMAGE_DIMENSION));
+        assert_eq!(limits.max_alloc, Some(MAX_DECODE_ALLOC_BYTES));
     }
 
     #[test]
@@ -950,6 +1768,31 @@ mod tests {
         assert_eq!(processed.features.algorithm_version, ANALYSIS_VERSION);
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn high_resolution_import_returns_only_bounded_thumbnail_pixels() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let source = temp.path().join("high-resolution.jpg");
+        let cache_dir = temp.path().join("cache");
+        DynamicImage::ImageRgba8(RgbaImage::from_pixel(4000, 3000, Rgba([34, 86, 172, 255])))
+            .save(&source)
+            .expect("save high resolution source");
+        let before = fs::read(&source).expect("read source before import");
+
+        let processed = process_image(&source, &cache_dir, "high-resolution").expect("process");
+        let thumbnail_dimensions = image::ImageReader::open(&processed.thumbnail_path)
+            .expect("open bounded thumbnail")
+            .decode()
+            .expect("decode bounded thumbnail")
+            .dimensions();
+
+        assert_eq!((processed.width, processed.height), (4000, 3000));
+        assert_eq!(thumbnail_dimensions, (640, 480));
+        assert_eq!(processed.timings.source_decode_us, 0);
+        assert!(processed.timings.thumbnail_decode_us > 0);
+        assert_eq!(fs::read(&source).expect("read source after import"), before);
+    }
+
     #[test]
     fn cached_thumbnail_reanalysis_never_decodes_source_pixels() {
         let temp = tempfile::tempdir().expect("temp dir");
@@ -970,6 +1813,21 @@ mod tests {
         assert!(reused.timings.source_dimension_us > 0);
         assert_eq!(reused.timings.resize_us, 0);
         assert_eq!(reused.features.algorithm_version, ANALYSIS_VERSION);
+    }
+
+    #[test]
+    fn analysis_thumbnail_decoder_rejects_oversized_cache_entries() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let path = temp.path().join("not-a-grid-thumbnail.jpg");
+        DynamicImage::ImageRgba8(RgbaImage::from_pixel(
+            ANALYSIS_THUMBNAIL_MAX_DIMENSION + 1,
+            320,
+            Rgba([30, 120, 210, 255]),
+        ))
+        .save(&path)
+        .expect("save oversized cache fixture");
+
+        assert!(load_analysis_thumbnail(&path).is_err());
     }
 
     #[test]

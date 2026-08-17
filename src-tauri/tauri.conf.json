@@ -20,6 +20,7 @@
         "center": true,
         "resizable": true,
         "fullscreen": false,
+        "dataDirectory": "webview-dev",
         "backgroundColor": "#1C2026"
       }
     ],

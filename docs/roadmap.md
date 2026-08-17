@@ -1,17 +1,17 @@
 # PhotoOrganizer Roadmap
 
-> 更新日期：2026-08-10<br>当前原则：停止按竞品功能列表扩张；先把现有能力收敛为完整工作流。<br>详细评审：[Product Architecture Review](product-architecture.md)<br>执行策略：[Next-stage Product Strategy](plans/next-stage-product-strategy.md)
+> 更新日期：2026-08-17<br>当前原则：停止按竞品功能列表扩张；先把现有能力收敛为完整工作流。<br>详细评审：[Product Architecture Review](product-architecture.md)<br>执行策略：[Next-stage Product Strategy](plans/next-stage-product-strategy.md)
 
 ## Current baseline
 
-当前代码已经具备：本地 Folder-oriented 扫描、SQLite catalog、应用私有 thumbnail/preview、EXIF、Tone/Color、TinyCLIP 分类与 embedding、组合筛选、Favorite/Rating/Color Label、manual override、Collection、文本/相似搜索、相似聚类、重复审阅、四图比较、编辑派生副本，以及 Organization Dry-run。
+当前代码已经具备：本地 Folder-oriented 扫描、SQLite catalog、应用私有 thumbnail/preview、EXIF、Tone/Color、SigLIP 2 摄影题材候选与 embedding、组合筛选、Favorite/Rating/Color Label、manual override、Collection、文本/相似搜索、相似聚类、重复审阅、四图比较、编辑派生副本，以及 Organization Dry-run。
 
 这不等于所有能力均已产品化。主要缺口是：
 
 - Library、真实 Folder 和虚拟归属边界混用；
 - Grid/Search/Collection/Review 没有统一 AssetQuery；
 - 批量入口没有统一 AssetScope；
-- 八标签“智能工作台”割裂浏览上下文；
+- LAP-derived 工具的历史渲染器仍需继续拆分，但主界面已改为持久 Grid/Preview + 上下文工具区；
 - Saved View 只有 schema；
 - Organization plan 尚不是可供 Safe Copy 消费的完整不可变快照；
 - Catalog 中的用户自产数据没有 Backup/Restore；
@@ -21,7 +21,7 @@
 
 ### Why now
 
-当前 `WorkflowWorkspace` 把 Browse Source、Query、Review Set 和 Selection Action 混在一个独立页面中，导致主 Grid/Preview 上下文被替换。先修复界面架构，再继续 N1 的性能基线和后续功能。
+历史 `WorkflowWorkspace` 把 Browse Source、Query、Review Set 和 Selection Action 混在一个独立页面中，导致主 Grid/Preview 上下文被替换。G-UI 已将其改为主界面下方的上下文工具区；仍需桌面人工验收后才能恢复 N1 的性能基线和后续功能。
 
 ### Deliverables
 
@@ -38,6 +38,8 @@
 ### Gate
 
 G-UI 通过主界面状态连续性和桌面脚本验收后，才恢复 N1。
+
+当前状态：自动化实现已通过，等待桌面人工验收；A–F 不因 G-UI 改造而自动完成。
 
 ## N1 — Workflow Foundation Consolidation（G-UI 之后）
 

@@ -2,12 +2,13 @@
 
 ## Status
 
-Implemented baseline; superseded by the thumbnail-first follow-up in
-`docs/plans/0022-thumbnail-first-import-analysis-performance.md`.
+Implemented baseline; superseded by the strict thumbnail-only contract in
+`docs/plans/0036-thumbnail-only-decode.md`. Plan 0022 is also historical and
+must not be read as permission to decode source pixels.
 
 ## Evidence
 
-- Cold image import is dominated by full-resolution decode and resize. The latest
+- The historical cold-import baseline was dominated by full-resolution decode and resize. The latest
   repository-owned measurement recorded roughly 28.8 seconds in decode and 7.5
   seconds in resize/orientation for five large JPEGs; fingerprinting and SQLite
   writes were each below 100 ms in aggregate.
@@ -22,7 +23,7 @@ Implemented baseline; superseded by the thumbnail-first follow-up in
 2. Process semantic candidates in a bounded batch and retain per-asset source
    checks, cancellation, pause, and failure isolation while grouping SQLite
    persistence by batch.
-3. Process fresh import image work with a bounded two-to-four worker pool. Keep
+3. Process fresh import thumbnail work with a bounded two-to-four worker pool. Keep
    discovery, ownership resolution, cache-hit decisions, SQLite writes, and
    progress ordering at the scanner boundary.
 4. Preserve full-content BLAKE3 fingerprints, source read-only behavior, one
@@ -54,7 +55,7 @@ Implemented baseline; superseded by the thumbnail-first follow-up in
   the runner retries individual thumbnails so one bad cache entry does not fail
   the whole batch. A missing cache path is failed before the model is invoked.
 - Semantic results for one batch are committed in one SQLite transaction.
-- Fresh import image work is processed by a bounded two-to-four scoped worker
+- Fresh import thumbnail work is processed by a bounded two-to-four scoped worker
   pool; ownership,
   cache-hit checks, progress persistence, and SQLite writes remain serialized.
 - On the repository-owned five-image CPU benchmark, batch size 1 measured about
@@ -84,10 +85,9 @@ to the thumbnail-first contract. The follow-up now:
 - JPEGs with a valid EXIF embedded preview use that preview for first import,
   avoiding a primary-pixel decode. Other formats still perform the single decode
   required to create the first application thumbnail.
-- Release measurements on two isolated 4000x3000 JPEG fixtures: cold wall time
-  360 ms with 223 ms source decode and 117 ms resize; cache-reuse wall time
-  204 ms with zero source decode and 13.6 ms thumbnail decode; warm rescan wall
-  time 141 ms with zero image processing.
+- The old 4000x3000 JPEG measurements with 223 ms source decode are historical
+  pre-0036 evidence. Current acceptance is the isolated WIC bounded-decode
+  measurement recorded in plan 0036, where `source_decode_us` remains zero.
 - Release TinyCLIP over 48 repository PNG fixtures measured 76.8 images/second
   at batch 8 and 87.7 images/second at batch 32 after prompt-token caching. The
   benchmark is a model throughput smoke test, not a claim about photographic

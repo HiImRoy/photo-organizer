@@ -56,6 +56,7 @@ pub struct AssetListItem {
     pub saturation_label: Option<String>,
     pub dominant_color: Option<String>,
     pub dominant_color_category: Option<String>,
+    pub color_palette: Option<ColorPalette>,
     pub neutral_ratio: Option<f64>,
     pub dominant_color_coverage: Option<f64>,
     pub semantic_status: String,
@@ -98,6 +99,7 @@ pub struct AssetGridItem {
     pub saturation_label: Option<String>,
     pub dominant_color: Option<String>,
     pub dominant_color_category: Option<String>,
+    pub color_palette: Option<ColorPalette>,
     pub neutral_ratio: Option<f64>,
     pub dominant_color_coverage: Option<f64>,
     pub semantic_status: String,
@@ -135,6 +137,7 @@ impl From<&AssetListItem> for AssetGridItem {
             saturation_label: asset.saturation_label.clone(),
             dominant_color: asset.dominant_color.clone(),
             dominant_color_category: asset.dominant_color_category.clone(),
+            color_palette: asset.color_palette.clone(),
             neutral_ratio: asset.neutral_ratio,
             dominant_color_coverage: asset.dominant_color_coverage,
             semantic_status: asset.semantic_status.clone(),
@@ -209,6 +212,14 @@ pub struct AssetFilter {
     #[serde(default)]
     pub color_labels: Vec<String>,
     #[serde(default)]
+    pub color_hue_center: Option<f64>,
+    #[serde(default)]
+    pub color_hue_width: Option<f64>,
+    /// Frontend strictness preference for hue matching. `None` keeps
+    /// compatibility with older callers and uses the safe default in SQL.
+    #[serde(default)]
+    pub color_hue_strictness: Option<f64>,
+    #[serde(default)]
     pub brightness_min: Option<f64>,
     #[serde(default)]
     pub brightness_max: Option<f64>,
@@ -222,6 +233,10 @@ pub struct AssetFilter {
     pub captured_to: Option<String>,
     #[serde(default)]
     pub analysis_status: Option<String>,
+    #[serde(default)]
+    pub favorite_only: bool,
+    #[serde(default)]
+    pub collection_id: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -474,6 +489,27 @@ pub struct BasicImageFeatures {
     pub dominant_color_coverage: f64,
     pub saturation_label: String,
     pub algorithm_version: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ColorCandidate {
+    pub rank: u8,
+    pub color: String,
+    pub category: String,
+    pub area_coverage: f64,
+    pub saliency_coverage: f64,
+    pub local_contrast: f64,
+    pub chroma: f64,
+    pub spatial_coherence: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ColorPalette {
+    pub algorithm_version: String,
+    pub coverage_palette: Vec<ColorCandidate>,
+    pub prominent_palette: Vec<ColorCandidate>,
 }
 
 #[derive(Debug, Clone, Default)]

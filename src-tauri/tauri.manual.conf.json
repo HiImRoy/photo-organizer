@@ -1,0 +1,31 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "PhotoOrganizer Manual",
+  "version": "0.1.0",
+  "identifier": "com.photoorganizer.manual",
+  "build": {
+    "beforeDevCommand": "npm run build",
+    "devUrl": null,
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "PhotoOrganizer Manual",
+        "create": false,
+        "width": 1360,
+        "height": 860,
+        "minWidth": 960,
+        "minHeight": 640,
+        "center": true,
+        "resizable": true,
+        "fullscreen": false,
+        "dataDirectory": "webview-manual-dev",
+        "backgroundColor": "#1C2026"
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self'; img-src 'self' data: blob:; style-src 'self' 'unsafe-inline'; connect-src ipc: http://ipc.localhost"
+    }
+  }
+}

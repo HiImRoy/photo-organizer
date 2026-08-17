@@ -29,11 +29,15 @@
 
 ### `color_features`
 
-`asset_id`、饱和度均值/中位数、平均色度、主色 RGB/类别、主色列表 JSON、色相统计 JSON、冷暖评分、中性色比例、彩色主色覆盖率、色彩丰富度、近黑白概率、饱和度标签、`algorithm_version`、`analyzed_at`。M4 起主色从加权有彩色像素中提取，黑/白/灰不参与有彩色竞争；彩色覆盖不足时类别为 `neutral`。
+`asset_id`、饱和度均值/中位数、平均色度、兼容主色 RGB/类别、`dominant_colors_json`、色相统计 JSON、冷暖评分、中性色比例、彩色主色覆盖率、色彩丰富度、近黑白概率、饱和度标签、`algorithm_version`、`analyzed_at`。当前 `dominant_colors_json` 保存 `ColorPalette` 对象：包括 `algorithmVersion`、最多 5 个按面积排序的 `coveragePalette` 候选和最多 3 个按视觉显著性排序的 `prominentPalette` 候选；每个候选包含中文映射所需的稳定颜色类别、RGB 十六进制值、面积/显著性占比、局部对比度、色度和空间连续性。兼容主色字段由面积主色候选回填，自动颜色筛选也只消费达到主色覆盖率阈值的面积候选；旧数据仍可读取。所有候选从应用私有缩略图提取，不读取原图。
 
 ### `semantic_labels`
 
 `asset_id`、稳定英文 `label`、中文 `display_name`、原始 `similarity`、使用的 `threshold`、`model_name`、`model_version`、`analysis_version`、`source_fingerprint`、`generated_at`、`is_manual`、`is_excluded`、`is_primary`。相似度不命名为 probability/accuracy。
+
+当前自动主标签来自摄影题材候选层：人像、风光自然、街拍纪实、建筑、静物产品、美食、动物、植物、运动、交通工具、文档截图、抽象艺术。每个题材由多条提示词得到候选分数，并经过独立阈值和候选间隔拒识；当前唯一候选模型 SigLIP 2 使用匹配 logits；拒识结果在有效分类层归入抽象艺术；Places365 只作为环境/场景证据，不直接成为新的摄影题材。
+
+`semantic_evidence` 还会保存当前题材模型候选、主体融合证据和 Places365 叶子场景的原始排名。每条记录通过模型名称、版本、分析版本和来源 fingerprint 区分，运行状态必须显示实际使用的模型组合。
 
 ### `subject_analysis_runs`
 
@@ -43,11 +47,11 @@
 
 保存主体模型聚合出的稳定英文 `label`、中文 `display_name`、检测分数 `similarity`、阈值、模型/分析/分类法版本、来源 fingerprint 和生成时间。主体标签与 `semantic_labels` 分表，查询时只在读取层合并；表中没有 `is_primary`，因此主体标签不能成为主类别。
 
-当前主体模型链为 PicoDet-S COCO 80 类检测器和 YuNet 人脸辅助检测器。应用只保存聚合后的 `人物`、`多人`、`人像`、`动物`、`宠物`、`车辆`、`食品`、`植物`，不保存检测框、关键点、脸部裁剪、embedding 或身份簇。
+当前主体模型链为 PicoDet-S COCO 80 类检测器和 YuNet 人脸辅助检测器。应用只保存聚合后的 `单人`、`多人`、`动物`、`车辆`、`食品`、`植物`；单人和多人互斥，宠物归入动物，不保存检测框、关键点、脸部裁剪、embedding 或身份簇。
 
 ### `semantic_models`
 
-记录模型/分析版本、许可证、来源、模型/tokenizer SHA-256 与路径、实际 execution backend、安装时间和 active 状态。UI backend 来自实际加载状态，不从枚举推断。
+记录模型/分析版本、许可证、来源、模型/tokenizer SHA-256 与路径、实际 execution backend、安装时间和 active 状态。active 记录还是成功装载过模型的持久化信号：下次启动会在后台自动恢复当前随包模型，不要求再次点击装载；历史已移除模型记录会迁移到当前 SigLIP 2 版本。UI backend 来自实际加载状态，不从枚举推断。语义运行状态另外报告题材候选模型；候选模型缺失不会伪造题材主标签。
 
 ### `semantic_embeddings`
 

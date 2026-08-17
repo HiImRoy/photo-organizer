@@ -348,9 +348,11 @@ export async function fetchSemanticStatus(): Promise<SemanticRuntimeStatus> {
   return invoke<SemanticRuntimeStatus>("get_semantic_status");
 }
 
-export async function prepareSemanticModel(): Promise<SemanticRuntimeStatus> {
+export async function prepareSemanticModel(
+  topicModel = "siglip2-base",
+): Promise<SemanticRuntimeStatus> {
   if (!desktopRuntime) throw new Error("模型准备仅在桌面应用中可用。");
-  return invoke<SemanticRuntimeStatus>("prepare_semantic_model");
+  return invoke<SemanticRuntimeStatus>("prepare_semantic_model", { topicModel });
 }
 
 function browserSubjectStatus(): SubjectRuntimeStatus {
@@ -484,6 +486,20 @@ export async function subscribeSemanticProgress(
   }
   if (!desktopRuntime) return () => undefined;
   return listen<SemanticProgress>("semantic-progress", (event) => onProgress(event.payload));
+}
+
+export async function subscribeSemanticStatus(
+  onStatus: (status: SemanticRuntimeStatus) => void,
+): Promise<UnlistenFn> {
+  if (!desktopRuntime) return () => undefined;
+  return listen<SemanticRuntimeStatus>("semantic-status", (event) => onStatus(event.payload));
+}
+
+export async function subscribeSubjectStatus(
+  onStatus: (status: SubjectRuntimeStatus) => void,
+): Promise<UnlistenFn> {
+  if (!desktopRuntime) return () => undefined;
+  return listen<SubjectRuntimeStatus>("subject-status", (event) => onStatus(event.payload));
 }
 
 export async function fetchFavoriteAssetIds(libraryId: number): Promise<number[]> {

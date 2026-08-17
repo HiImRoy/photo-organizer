@@ -3,30 +3,28 @@ import type { SemanticLabelDescriptor } from "./types";
 export type ClassificationValueKind = "primary" | "tag" | "tone" | "color" | "saturation";
 
 export const PRIMARY_CATEGORY_OPTIONS = [
+  ["photo_portrait", "人像"],
   ["photo_landscape", "风光自然"],
-  ["photo_urban", "城市街拍"],
-  ["photo_architecture", "建筑与空间"],
-  ["photo_food", "美食餐饮"],
-  ["photo_commercial", "商业与静物"],
-  ["photo_indoor", "室内与生活"],
-  ["photo_travel", "旅行人文"],
-  ["photo_event", "活动与运动"],
-  ["photo_transport", "交通与汽车"],
-  ["photo_plant", "植物与园艺"],
-  ["photo_documentary", "纪实与工业"],
-  ["unknown", "未知"],
+  ["photo_street", "街拍纪实"],
+  ["photo_architecture", "建筑"],
+  ["photo_still_life", "静物产品"],
+  ["photo_food", "美食"],
+  ["photo_wildlife", "动物"],
+  ["photo_macro", "植物"],
+  ["photo_activity", "运动"],
+  ["photo_vehicle", "交通工具"],
+  ["photo_document", "文档截图"],
+  ["photo_abstract", "抽象艺术"],
 ] as const;
 
 export const AUXILIARY_TAG_OPTIONS = [
   ["indoor", "室内"],
   ["outdoor", "室外"],
-  ["group", "多人"],
-  ["person", "人物"],
-  ["portrait", "人像"],
+  ["single_person", "单人"],
+  ["multiple_people", "多人"],
   ["vehicle", "车辆"],
   ["food", "食品"],
   ["animal", "动物"],
-  ["pet", "宠物"],
   ["plant", "植物"],
   ["night", "夜景"],
   ["flower", "花卉"],
@@ -75,6 +73,15 @@ const FALLBACK_LABELS = new Map<string, string>([
   ["scene_sports", "运动、娱乐与活动"],
   ["scene_industrial", "工业、施工、能源与军事"],
   ["scene_agriculture", "农业、园林与户外休闲"],
+  ["photo_urban", "城市街拍"],
+  ["photo_commercial", "商业与静物"],
+  ["photo_indoor", "室内与生活"],
+  ["photo_travel", "旅行人文"],
+  ["photo_event", "运动"],
+  ["photo_transport", "交通工具"],
+  ["photo_plant", "植物"],
+  ["photo_documentary", "抽象艺术"],
+  ["unknown", "抽象艺术"],
   ["still_life", "静物"],
   ["screenshot", "截图"],
   ["mountain", "山"],
@@ -82,22 +89,40 @@ const FALLBACK_LABELS = new Map<string, string>([
   ["forest", "森林"],
   ["sunset", "日落"],
   ["other", "其他"],
-  ["portrait", "人像"],
+  ["single_person", "单人"],
+  ["multiple_people", "多人"],
+  ["person", "单人"],
+  ["portrait", "单人"],
+  ["group", "多人"],
   ["landscape", "风景"],
   ["architecture", "建筑"],
   ["product", "产品"],
   ["animal", "动物"],
+  ["pet", "动物"],
   ["document", "文档"],
 ]);
 
-export const UNKNOWN_SEMANTIC_LABEL: SemanticLabelDescriptor = {
-  id: "unknown",
-  displayName: "未知",
-  categoryGroup: "scene",
-  threshold: 0,
-  isPrimaryCategory: true,
-  taxonomyVersion: "photo-organizer-photography-topics-v1",
-};
+const LEGACY_LABEL_ALIASES = new Map<string, string>([
+  ["unknown", "photo_abstract"],
+  ["photo_documentary", "photo_abstract"],
+  ["photo_urban", "photo_street"],
+  ["photo_event", "photo_activity"],
+  ["photo_transport", "photo_vehicle"],
+  ["photo_plant", "photo_macro"],
+  ["person", "single_person"],
+  ["portrait", "single_person"],
+  ["group", "multiple_people"],
+  ["pet", "animal"],
+]);
+
+export function canonicalClassificationValue(
+  value: string | null | undefined,
+  kind: ClassificationValueKind,
+): string | null | undefined {
+  if (!value) return value;
+  if (kind === "primary" && value === "portrait") return "photo_portrait";
+  return LEGACY_LABEL_ALIASES.get(value) ?? value;
+}
 
 export function classificationFieldLabel(field: string): string {
   switch (field) {
@@ -137,8 +162,10 @@ export function classificationValueLabel(
   if (!value) return "未设置";
   const catalogLabel = catalog.find((item) => item.id === value)?.displayName;
   if (catalogLabel) return catalogLabel;
-  if (kind === "primary" && value === "unknown") return "未知";
-  return FALLBACK_LABELS.get(value) ?? fallbackValueLabel(kind);
+  const canonicalValue = canonicalClassificationValue(value, kind) ?? value;
+  const canonicalCatalogLabel = catalog.find((item) => item.id === canonicalValue)?.displayName;
+  if (canonicalCatalogLabel) return canonicalCatalogLabel;
+  return FALLBACK_LABELS.get(canonicalValue) ?? fallbackValueLabel(kind);
 }
 
 export function classificationValuesLabel(
@@ -147,21 +174,24 @@ export function classificationValuesLabel(
   catalog: SemanticLabelDescriptor[] = [],
 ): string {
   if (!values?.length) return "未设置";
-  return values.map((value) => classificationValueLabel(value, kind, catalog)).join("、");
+  return [...new Set(values.map((value) => canonicalClassificationValue(value, kind) ?? value))]
+    .map((value) => classificationValueLabel(value, kind, catalog))
+    .join("、");
 }
 
 export function primaryCategoryOptions(
   catalog: SemanticLabelDescriptor[],
   selectedValue?: string | null,
 ) {
+  const canonicalSelectedValue = canonicalClassificationValue(selectedValue, "primary");
   const selectedCompatibilityOption =
-    selectedValue &&
-    !catalog.some((item) => item.id === selectedValue) &&
-    selectedValue !== "unknown"
+    canonicalSelectedValue &&
+    !catalog.some((item) => item.id === canonicalSelectedValue) &&
+    canonicalSelectedValue !== "unknown"
       ? [
           {
-            value: selectedValue,
-            label: classificationValueLabel(selectedValue, "primary", catalog),
+            value: canonicalSelectedValue,
+            label: classificationValueLabel(canonicalSelectedValue, "primary", catalog),
           },
         ]
       : [];
@@ -186,10 +216,13 @@ export function auxiliaryTagOptions(
       ...catalog
         .filter((item) => !item.isPrimaryCategory)
         .map((item) => ({ value: item.id, label: item.displayName })),
-      ...selectedValues.map((value) => ({
-        value,
-        label: classificationValueLabel(value, "tag", catalog),
-      })),
+      ...selectedValues.map((value) => {
+        const canonicalValue = canonicalClassificationValue(value, "tag") ?? value;
+        return {
+          value: canonicalValue,
+          label: classificationValueLabel(canonicalValue, "tag", catalog),
+        };
+      }),
     ],
   );
 }
@@ -212,7 +245,7 @@ function mergeOptions(
 function fallbackValueLabel(kind: ClassificationValueKind): string {
   switch (kind) {
     case "primary":
-      return "未知";
+      return "抽象艺术";
     case "tag":
       return "其他标签";
     case "tone":

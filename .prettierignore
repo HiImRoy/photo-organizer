@@ -9,3 +9,5 @@ package-lock.json
 src-tauri/Cargo.lock
 src-tauri/resources/models/**/*.json
 *.sqlite3
+lap
+target

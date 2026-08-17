@@ -9,6 +9,8 @@
   },
   "scripts": {
     "dev": "vite",
+    "start": "scripts\\start-desktop.cmd",
+    "start:desktop": "scripts\\start-desktop.cmd",
     "build": "tsc -b && vite build",
     "preview": "vite preview",
     "tauri": "tauri",
@@ -20,7 +22,7 @@
     "test:watch": "vitest",
     "test:rust": "cargo test --manifest-path src-tauri/Cargo.toml --all-targets",
     "clippy": "cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --all-features -- -D warnings",
-    "evaluate:photos": "cargo run --release --manifest-path src-tauri/Cargo.toml --no-default-features --bin semantic-evaluate -- --data evaluation-data --output benchmark-output/photo-evaluation.json --backend cpu",
+    "evaluate:photos": "cargo run --release --manifest-path src-tauri/Cargo.toml --no-default-features --bin semantic-evaluate -- --data evaluation-data --output benchmark-output/photo-evaluation.json --model siglip2-base --batch-size 4 --calibrate --backend cpu",
     "validate": "npm run format:check && npm run lint && npm run typecheck && npm run test && npm run test:rust && npm run clippy && npm run build"
   },
   "dependencies": {

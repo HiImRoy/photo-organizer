@@ -16,10 +16,7 @@ use uuid::Uuid;
 
 use crate::db::Repository;
 use crate::error::{AppError, AppResult};
-use crate::semantic::{
-    ANALYSIS_VERSION as SEMANTIC_ANALYSIS_VERSION, MODEL_NAME, MODEL_VERSION, SemanticClassifier,
-    SemanticError,
-};
+use crate::semantic::{SemanticClassifier, SemanticError, default_topic_model_metadata};
 use crate::source_identity::{identity_key, is_same_or_descendant};
 
 const ASSET_PROJECTION: &str = "
@@ -996,6 +993,26 @@ fn list_embedded_assets(
     limit: usize,
 ) -> AppResult<Vec<EmbeddedAsset>> {
     let connection = open(repository)?;
+    let active_model = connection
+        .query_row(
+            "SELECT name, version, analysis_version
+             FROM semantic_models
+             WHERE is_active=1
+             ORDER BY id DESC LIMIT 1",
+            [],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            },
+        )
+        .optional()?
+        .unwrap_or_else(|| {
+            let metadata = default_topic_model_metadata();
+            (metadata.name, metadata.version, metadata.analysis_version)
+        });
     let sql = format!(
         "SELECT {ASSET_PROJECTION}, se.dimensions, se.vector_blob
          FROM assets a
@@ -1010,9 +1027,9 @@ fn list_embedded_assets(
     let rows = statement.query_map(
         params![
             library_id,
-            MODEL_NAME,
-            MODEL_VERSION,
-            SEMANTIC_ANALYSIS_VERSION,
+            active_model.0,
+            active_model.1,
+            active_model.2,
             limit as i64
         ],
         |row| {

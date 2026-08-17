@@ -2,6 +2,8 @@
 
 本文件记录旧 Checkpoint A-F 的实施状态。2026-08-10 起，Checkpoint G 将真实代码、旧计划和产品架构审查合并为新的继续工作基线；未完成的阶段不得因“已有部分代码”填写为完成。
 
+跨 Checkpoint 的图像处理不变量：导入、图像解码、基础特征、题材/环境/主体分析和模型推理只使用应用私有缩略图或有界缩略图派生输入；原文件仅用于元数据、指纹、EXIF/内嵌预览元数据和受控的目标尺寸缩略图提取。显式 `original` 只属于用户主动查看的预览例外。
+
 ## Checkpoint A — Source Boundary + Nested Library
 
 Status: BLOCKED_FOR_REVIEW
@@ -110,11 +112,11 @@ memory/latency behavior.
 Known issues:
 
 - `activeAssetId` 现在是 Grid、DetailPanel、Single Preview、Filmstrip 和键盘导航的唯一当前图片状态。
-- 预览已回到原图优先、原图失败后 screen 回退的旧请求路径；screen cache key 保留 asset、fingerprint 和尺寸。
-- generation guard、组件清理和 15 秒超时仍保护旧响应；Tauri 的底层 decode 没有可移植的硬 AbortSignal。
-- original data URL 保留 96 MiB 源文件上限；本轮不再声称已经完成 thumbnail/screen/original tier 或 DPR-aware cache 契约。
+- 本节记录的是 Checkpoint C 历史实现；其中“原图优先”和原图预取路径已被后续缩略图-only 规范取代，不得恢复到导入或分析流程。
+- 当前 screen 预览使用有界缩略图派生输出；generation guard、组件清理和 15 秒超时仍保护旧响应。Tauri 的底层 decode 没有可移植的硬 AbortSignal。
+- `original` data URL 仅保留为用户主动查看的显式预览例外，不能被导入、分析或模型推理复用。
 - 双击预览现在在“适应屏幕”和“100%”之间切换；其余缩放、平移和 Navigator 逻辑保持旧实现。
-- 0024 增量为当前图前后最多两张原图的延迟预取和有上限的会话内存缓存；胶片栏以环形描边跟随当前图并在左右切换后自动居中，仍等待桌面端验证真实加载收益。
+- 0024 的历史预取描述不再代表当前导入/分析契约；胶片栏以环形描边跟随当前图并在左右切换后自动居中，仍等待桌面端验证真实加载收益。
 - 不能在完成重新规划和桌面人工清单前标记 `COMPLETED`；当前工作树还包含前序用户修改，因此没有创建独立 C commit。
 
 ## Checkpoint D — Semantic + Dominant Color
@@ -129,10 +131,11 @@ Automated tests:
 
 - Passed: `cargo fmt --manifest-path src-tauri/Cargo.toml -- --check`
 - Passed: `cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --all-features -- -D warnings`
-- Passed: `cargo test --manifest-path src-tauri/Cargo.toml --all-targets --all-features` (58 library tests + 3 binary tests)
-- Passed: `npm run format:check`
+- Passed: `cargo test --manifest-path src-tauri/Cargo.toml --all-targets --all-features` (79 library tests + 3 binary tests)
+- Passed: targeted Prettier check for the changed frontend/plan files; repository-wide `npm run format:check` still reports pre-existing warnings in `docs/plans/0026-places365-scene-clustering.md` and `src-tauri/resources/models/places365-resnet18/MODEL-SOURCE.md`.
 - Passed: `npm run typecheck -- --pretty false`
 - Passed: `npm test -- --run` (38 tests)
+- Passed: `npm run lint` and `npm run build`
 
 Manual verification:
 
@@ -140,9 +143,11 @@ Pending: Semantic quality review on representative local fixtures, unknown/other
 
 Known issues:
 
-- TinyCLIP、缩略图输入、批处理、Tone/Color 和人工 override 已存在。
+- 历史 TinyCLIP、当前 SigLIP 2、缩略图输入、批处理、Tone/Color 和人工 override 已存在过对应实现；当前 MVP 只保留 SigLIP 2 题材模型。
 - D1-D3 taxonomy/拒识/分组基线已实现；`unknown` 不再是模型 prompt，成功空结果由 Effective Resolver 生成虚拟拒识状态。
-- 完整 calibration dataset、逐类 threshold/margin 评估、prompt ensemble、Dominant Color 多候选 pipeline 和 manual visual review Exit Criteria 未全部验收。
+- 0029 题材候选层已接入：SigLIP 2 使用多 prompt 匹配 logits 作为可审计候选证据，Places365 映射证据负责可观察场景题材的保守主类，主体任务可补充明确的单人/多人/动物/车辆/食品/植物标签；当前 taxonomy 已收敛为 `photo-organizer-photography-topics-v3`，主体 taxonomy 为 `photo-organizer-subject-tags-v2`。低置信题材统一归入抽象艺术，纪实与工业不再作为摄影师筛选类别。MVP 已移除 TinyCLIP/MobileCLIP 的随包资源和装载入口。
+- D8 多强调色第一版已实现：缩略图-only 的 OKLab 加权聚类、感知近色合并、显著性/面积/空间连续性排序、`coveragePalette`/`prominentPalette` 多值返回、数据库 Effective 筛选和中文 UI 展示均已接入。
+- SigLIP 2 评测协议、批量评测 CLI、逐类阈值候选和 margin 扫描已经实现；仓库没有授权的真实摄影评测集，因此尚未完成逐类 quality calibration、混淆矩阵人工复核、Color evaluation、before/after 报告和 manual visual review Exit Criteria，也没有把候选阈值写回运行时。D 仍保持 PARTIAL_REQUIRES_RECONCILIATION。
 
 ## Checkpoint E — Export Preview
 
@@ -181,9 +186,9 @@ Known issues:
 
 ## Checkpoint G — Product Architecture Consolidation
 
-Status: UI_REMEDIATION_REQUIRED
+Status: IMPLEMENTED_PENDING_MANUAL
 
-Commit: current working tree; query contract slice exists, LAP-derived UI remediation not implemented
+Commit: current working tree; G-UI remediation implemented, pending desktop manual acceptance
 
 Migration: None
 
@@ -198,18 +203,29 @@ Review outputs:
 
 Automated verification:
 
-- Previous N1 frontend formatting, lint, typecheck, 36 tests and build checks remain historical evidence; they do not certify the old workbench IA.
+- Passed: `npm run format:check`
+- Passed: `npm run lint`
+- Passed: `npm run typecheck`
+- Passed: `npm test -- --run` (53 tests)
+- Passed: `npm run build`
+- Passed: `cargo fmt --manifest-path src-tauri/Cargo.toml --all -- --check`
+- Passed: `cargo test --manifest-path src-tauri/Cargo.toml --no-default-features --all-targets --quiet` (88 library tests + 1 + 3 binary tests)
+- Added source predicates `favoriteOnly` / `collectionId` without a migration; SQLite query tests remain covered by the existing database suite.
 
 Manual verification:
 
 - Product/architecture review completed against current code and LAP product concepts.
-- N1 desktop usability scripts and performance baseline have not been run.
-- Rust test/clippy could not run because `cargo` is not available in the current environment.
+- Embedded G-UI now renders one context tool at a time; the old seven-tab workflow navigation is not rendered inside the main browse surface.
+- Frontend regression coverage now verifies explicit-selection and current-query scope continuity through Organization Dry-run and back, plus Search/Collection/Duplicate/Similar/Compare/Edit result return and focus behavior.
+- Pending: desktop G-UI scripts for Browse → Similar/Compare → mark → Back, Search/Collection → Duplicate/Similar → Back, and Selection → Organization → Back.
+- Pending: real desktop layout/scroll check with the embedded tool area at the user's window size.
+- `cargo` is installed at `C:\Users\13002\.cargo\bin\cargo.exe`; invoke it by absolute path when the shell PATH is not refreshed.
 
 Known issues:
 
 - Checkpoint G reconciles status; it does not complete A-F Exit Criteria.
 - N1 is paused until `G-UI — LAP-derived UI Integration Remediation` is completed.
+- The embedded tool area still reuses the historical workflow renderers internally; it is no longer a top-level replacement surface, but the tool renderer should be split further only if manual usability exposes a concrete issue.
 
 ## Status Rules
 

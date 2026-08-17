@@ -2,7 +2,7 @@
 
 ## 目标产物
 
-Tauri 配置生成 NSIS `.exe` 与 WiX `.msi`（环境允许时）。安装包包含 Web 前端、Rust core、SQLite、TinyCLIP INT8 模型、tokenizer、许可证以及 ONNX Runtime 1.24.1 CPU DLL；不包含 Python、ExifTool、CUDA 或云端服务。
+Tauri 配置生成 NSIS `.exe` 与 WiX `.msi`（环境允许时）。安装包包含 Web 前端、Rust core、SQLite、Places365、SigLIP 2 Base、PicoDet/YuNet 模型、tokenizer、许可证以及 ONNX Runtime 1.24.1 CPU DLL；不包含 Python、ExifTool、CUDA 或云端服务。
 
 ## 构建
 
@@ -27,7 +27,7 @@ CI 在 Windows runner 执行相同检查并上传 bundle artifact。版本由 `p
 
 ## 许可与供应链
 
-发布前生成依赖清单/SBOM，核对 `THIRD_PARTY_NOTICES.md` 与 lockfile。TinyCLIP 权重与 ONNX conversion 分别归档许可；ONNX Runtime DLL 记录来源、版本、哈希、许可和更新流程。模型权重不能只继承应用仓库许可结论。
+发布前生成依赖清单/SBOM，核对 `THIRD_PARTY_NOTICES.md` 与 lockfile。Places365、SigLIP 2、PicoDet/YuNet 权重分别归档来源和许可；ONNX Runtime DLL 记录来源、版本、哈希、许可和更新流程。历史 TinyCLIP/MobileCLIP 不属于当前安装包。模型权重不能只继承应用仓库许可结论。
 
 ## 验证矩阵
 
@@ -39,7 +39,7 @@ CI 在 Windows runner 执行相同检查并上传 bundle artifact。版本由 `p
 
 普通 push 和 pull request 只运行 `windows-latest` MSVC 验证：资源校验、npm ci、Prettier、ESLint、TypeScript、Vitest、Rustfmt、Rust tests、Clippy 和前端 production build。只有手动 `workflow_dispatch` 或 `v*` tag 在验证成功后进入 bundle job：NSIS 是必需产物，MSI 是允许失败但保留日志的可选产物；成功安装包复制到独立 artifact，并同时上传 `SHA256SUMS.txt`。每条命令通过 `scripts/invoke-ci-command.ps1` 写入日志，验证和打包 job 都在 `always()` 步骤上传日志。
 
-`scripts/verify-release-resources.ps1` 在本地和 CI 中验证 TinyCLIP ONNX、tokenizer、ONNX Runtime DLL 的固定 SHA-256，并要求模型配置、许可、第三方声明和来源文件存在。正式模型与 runtime 是离线功能所需资源，应提交；临时模型下载、缓存和 `.part`/`.download` 文件必须被忽略。
+`scripts/verify-release-resources.ps1` 在本地和 CI 中验证 Places365、SigLIP 2、PicoDet/YuNet 以及 ONNX Runtime DLL 的固定 SHA-256，并要求模型配置、许可、第三方声明和来源文件存在。正式模型与 runtime 是离线功能所需资源，应提交；历史 TinyCLIP/MobileCLIP 不应重新加入资源目录；临时模型下载、缓存和 `.part`/`.download` 文件必须被忽略。
 
 ## 2026-08-06 本机验收记录
 
@@ -52,7 +52,7 @@ CI 在 Windows runner 执行相同检查并上传 bundle artifact。版本由 `p
 ## 2026-08-07 语义工作区里程碑构建记录
 
 - 实际执行 `npm.cmd run tauri build`；TypeScript 与 Vite production build 成功，Rust MSVC target 随后因 `linker link.exe not found` 失败。
-- 本机未安装 Visual Studio/Build Tools 的“使用 C++ 的桌面开发”组件，故本次未生成新的 NSIS/MSI，也无法执行包含 TinyCLIP 模型、ONNX Runtime DLL 与新工作区的打包 WebView2 smoke。
+- 本机未安装 Visual Studio/Build Tools 的“使用 C++ 的桌面开发”组件，故本次未生成新的 NSIS/MSI，也无法执行当时包含 TinyCLIP 模型、ONNX Runtime DLL 与新工作区的打包 WebView2 smoke；该记录对应历史模型包。
 - `src-tauri/target/x86_64-pc-windows-gnu/release/bundle/nsis/PhotoOrganizer_0.1.0_x64-setup.exe` 的时间戳为 2026-08-06，是 M0 的旧 GNU/LLVM 产物，不包含本次变更；发布闭环审计已将其删除。
 - 解除阻塞后需在 MSVC 环境重新运行完整 validate 和 Tauri build，再核对 resource 打包、离线首次启动、真实 CPU 分类、源图哈希、卸载、签名与安装包 SHA-256。
 
@@ -87,5 +87,5 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/build-windows.ps
   - NSIS：`src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis/PhotoOrganizer_0.1.0_x64-setup.exe`，236,452,475 bytes，SHA-256 `728550F36A1A2CC5680F54A59231C1EE4C31239E884F116B4326DCCE6881194D`。
   - MSI 简体中文：`src-tauri/target/x86_64-pc-windows-msvc/release/bundle/msi/PhotoOrganizer_0.1.0_x64_zh-CN.msi`，238,862,336 bytes，SHA-256 `CF2EBC45300A6B59CEB79AFF8E6F402DF235E3CD10F045F1AB54B90D03092161`。
   - MSI 英文：`src-tauri/target/x86_64-pc-windows-msvc/release/bundle/msi/PhotoOrganizer_0.1.0_x64_en-US.msi`，238,862,336 bytes，SHA-256 `951CE5769C66865D93F1815677E6C5C78819C24A12C9CD03BD766DA8463D4B77`。
-- 安装验收：NSIS 静默安装退出码 0，安装目录为 `%LOCALAPPDATA%\\PhotoOrganizer`；TinyCLIP ONNX、tokenizer、ONNX Runtime DLL、许可证和来源文件均存在。启动后应用数据目录和 SQLite 可打开，关闭并重启后主进程 `Responding=True` 且数据库保留（本机已有旧测试数据库，未删除用户数据）。已安装 benchmark 对 3 张临时夹具真实 CPU 推理，失败 0，平均延迟约 28.49 ms，吞吐约 35.11 张/秒；评估 CLI 对 2 张 `unknown` 夹具完成，失败 0，模型加载约 316.85 ms、端到端约 372.95 ms，并输出 21 类原始相似度。运行自带卸载器退出码 0，安装目录移除且应用数据库仍保留。源夹具三组 SHA-256 前后一致。
+- 历史安装验收：NSIS 静默安装退出码 0，安装目录为 `%LOCALAPPDATA%\\PhotoOrganizer`；当时的 TinyCLIP ONNX、tokenizer、ONNX Runtime DLL、许可证和来源文件均存在。该记录只证明旧模型包的安装链路，不代表当前 SigLIP 2 包的验收结果。启动后应用数据目录和 SQLite 可打开，关闭并重启后主进程 `Responding=True` 且数据库保留（本机已有旧测试数据库，未删除用户数据）。
 - 安装后的 WebView UI 点击验收未完成：桌面自动化 helper 在枚举窗口时两次返回 `EnumWindows failed: 0x80070003`，重置后仍失败；因此本次不能声称已在打包 WebView 中完成“导入、暂停/继续、组合筛选、关闭重启续作”的 UI 操作。相关 IPC/Rust 任务控制测试和 Vite 视觉 fixture 已通过，需在可用桌面自动化或人工桌面上补做一次。

@@ -1,12 +1,13 @@
 # PhotoOrganizer
 
-PhotoOrganizer 是一款 Windows 优先、本地优先的图片分类与整理桌面应用。它可以从系统目录选择器导入图库，递归索引 JPEG、PNG 和 WebP，在应用私有目录生成缩略图，计算亮度、对比度、饱和度和主色，并用随包分发的 TinyCLIP INT8 模型在本机完成多标签语义分类。深色三栏工作区支持网格、单图胶片栏、完整检查器和 SQLite 层组合筛选。
+PhotoOrganizer 是一款 Windows 优先、本地优先的图片分类与整理桌面应用。它可以从系统目录选择器导入图库，递归索引 JPEG、PNG 和 WebP，在应用私有目录生成缩略图，计算亮度、对比度、饱和度和主色，并用随包分发的 SigLIP 2 Base INT8 模型在本机完成摄影题材候选分析。深色三栏工作区支持网格、单图胶片栏、完整检查器和 SQLite 层组合筛选。
 
 > 当前状态：语义分类、专业图库和 Lap-inspired 智能工作台 MVP 已实现。收藏、集合、精确重复审阅、本地文本/以图搜索、相似聚类、2–4 图比较和非破坏性编辑另存均为本地实现。人脸身份聚类仍受模型许可门禁约束：没有合规模型时明确禁用，不产生伪结果。
 
 ## 安全边界
 
-- 扫描、元数据读取、缩略图和分析只读源图片。
+- 导入、缩略图提取、基础分析和模型推理只使用应用私有缩略图或有界缩略图输入；源文件仅用于元数据、指纹和受控的目标尺寸缩略图提取，不把完整原图像素交给分析链路。
+- 用户主动查看时，screen 预览使用有界尺寸缓存；显式 original 预览是查看器例外，不参与导入、分析或模型推理。
 - SQLite、日志和缩略图保存在应用数据目录，不写入图库。
 - 模型随应用分发；图片、embedding 和标签不会上传。
 - 当前版本不删除、移动、重命名、覆盖或写回原图元数据；编辑器只能在计划确认后创建不存在的新副本。
@@ -25,8 +26,21 @@ PhotoOrganizer 是一款 Windows 优先、本地优先的图片分类与整理�
 
 ```powershell
 npm.cmd install
-npm.cmd run tauri dev
+npm.cmd run start:desktop
 ```
+
+`start:desktop` 会自动补充常见的 Rust 安装路径，先构建前端再通过 Tauri 静态资源协议启动桌面窗口，不依赖本地 Vite 端口。默认使用 `%TEMP%\PhotoOrganizer-dev-data` 保存开发测试数据库、缩略图和日志，与正式应用数据隔离，并且会跨次启动保留；手动验收窗口使用独立的 `PhotoOrganizer Manual` 标题，并由 setup hook 为每次会话传入独立的临时 WebView2 profile，避免桌面测试误抓到已安装旧版本或共用正式应用缓存。手动入口默认使用 WebView2 的软件/进程内 GPU 和开发沙箱兜底，规避部分 Windows 开发环境的黑屏启动；该参数只用于手动开发入口，不会进入正式打包应用，设置 `WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS` 可覆盖默认值。保持启动它的终端窗口开启即可继续手动测试；关闭开发窗口或终端会停止开发进程。
+
+以后也可以直接双击项目根目录的 `启动 PhotoOrganizer.cmd`；它会自动切换到正确的项目目录并执行同一套启动流程。命令行中也可以使用标准入口 `npm.cmd start`。
+
+如需明确测试已有应用数据，可在 PowerShell 中指定数据目录后启动（不会复制或删除数据）：
+
+```powershell
+$env:PHOTO_ORGANIZER_DATA_DIR = "$env:APPDATA\com.photoorganizer.desktop"
+npm.cmd run start:desktop
+```
+
+不设置该变量时，推荐使用默认的隔离开发数据目录。
 
 正式 Windows 验证和打包使用下列脚本；它会先检查 MSVC、Windows SDK、`link.exe` 与 `cl.exe`：
 
@@ -51,7 +65,7 @@ npm.cmd run tauri build -- --target x86_64-pc-windows-msvc
 真实语义 CPU 基准入口：
 
 ```powershell
-cargo run --manifest-path src-tauri/Cargo.toml --no-default-features --bin semantic-benchmark -- --images src-tauri/icons --model tinyclip --backend cpu --batch-size 1
+cargo run --manifest-path src-tauri/Cargo.toml --no-default-features --bin semantic-benchmark -- --images src-tauri/icons --model siglip2-base --backend cpu --batch-size 8
 ```
 
 授权真实摄影集的质量评估入口（`evaluation-data/` 与输出均不会进入 Git）：

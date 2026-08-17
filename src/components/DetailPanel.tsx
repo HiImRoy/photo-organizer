@@ -2,6 +2,7 @@ import { useState } from "react";
 
 import {
   auxiliaryTagOptions,
+  canonicalClassificationValue,
   classificationSourceLabel,
   classificationValueLabel,
   classificationValuesLabel,
@@ -138,6 +139,21 @@ export function DetailPanel({
                 <strong>{asset.dominantColor ?? "—"}</strong>
                 <small>{classificationValueLabel(asset.dominantColorCategory, "color")}</small>
               </div>
+              {asset.colorPalette ? (
+                <div className="accent-palette-detail">
+                  <PaletteDetailRow
+                    label="强调色"
+                    candidates={asset.colorPalette.prominentPalette}
+                  />
+                  <PaletteDetailRow
+                    label="面积色"
+                    candidates={asset.colorPalette.coveragePalette}
+                  />
+                  <small className="accent-palette-version">
+                    {asset.colorPalette.algorithmVersion}
+                  </small>
+                </div>
+              ) : null}
             </DetailSection>
 
             <ClassificationEditor
@@ -153,14 +169,14 @@ export function DetailPanel({
             <DetailSection title="语义标签" trailing={semanticStateLabel(asset.semanticStatus)}>
               {asset.semanticLabels.length ? (
                 <div className="semantic-detail-list">
-                  {isVirtualUnknown(asset) ? (
+                  {isVirtualAbstract(asset) ? (
                     <div className="semantic-rejection-state">
                       <span>
-                        未知
-                        <small>拒识状态</small>
+                        抽象艺术
+                        <small>低置信归类</small>
                       </span>
                       <strong>—</strong>
-                      <p>没有任何模型相似度分数达到可靠拍摄题材条件。</p>
+                      <p>没有任何模型相似度分数达到可靠题材条件，已归入抽象艺术。</p>
                     </div>
                   ) : null}
                   {asset.semanticLabels.map((label) => (
@@ -181,8 +197,8 @@ export function DetailPanel({
                 <div className="semantic-empty">
                   {asset.semanticStatus === "failed"
                     ? asset.semanticError
-                    : isVirtualUnknown(asset)
-                      ? "分析完成，但没有达到可靠置信度；未知不是模型标签。"
+                    : isVirtualAbstract(asset)
+                      ? "分析完成，但没有达到可靠置信度；已归入抽象艺术。"
                       : "尚无真实语义分析结果"}
                 </div>
               )}
@@ -197,6 +213,7 @@ export function DetailPanel({
                     asset.semanticLabels[0]?.modelVersion ?? semanticStatus?.model.version ?? "—"
                   }
                 />
+                <Property label="题材候选" value={semanticStatus?.topicModel?.name ?? "未启用"} />
                 <Property
                   label="后端"
                   value={semanticStatus?.selectedBackend ? "本地计算" : "未启用"}
@@ -225,6 +242,33 @@ export function DetailPanel({
         )}
       </div>
     </aside>
+  );
+}
+
+function PaletteDetailRow({
+  label,
+  candidates,
+}: {
+  label: string;
+  candidates: NonNullable<AssetListItem["colorPalette"]>["prominentPalette"];
+}) {
+  if (!candidates.length) return null;
+  return (
+    <div className="accent-palette-row">
+      <span>{label}</span>
+      <div className="accent-palette-candidates">
+        {candidates.map((candidate) => (
+          <span className="accent-palette-candidate" key={`${label}-${candidate.rank}`}>
+            <i style={{ background: candidate.color }} title={candidate.color} />
+            <strong>{classificationValueLabel(candidate.category, "color")}</strong>
+            <small>
+              面积 {formatPercent(candidate.areaCoverage)} · 显著{" "}
+              {formatPercent(candidate.saliencyCoverage)}
+            </small>
+          </span>
+        ))}
+      </div>
+    </div>
   );
 }
 
@@ -320,7 +364,9 @@ function ClassificationEditor({
         ],
   );
   const [editing, setEditing] = useState(false);
-  const [primary, setPrimary] = useState(classification.primaryCategory.effective ?? "");
+  const [primary, setPrimary] = useState(
+    canonicalClassificationValue(classification.primaryCategory.effective, "primary") ?? "",
+  );
   const [tone, setTone] = useState(classification.tone.effective ?? "");
   const [colors, setColors] = useState<string[]>(
     classification.dominantColorCategories.effective ?? [],
@@ -647,10 +693,10 @@ function semanticGroupLabel(group: string) {
   }
 }
 
-function isVirtualUnknown(asset: AssetListItem) {
+function isVirtualAbstract(asset: AssetListItem) {
   return (
     asset.semanticStatus === "completed" &&
-    asset.classification.primaryCategory.effective === "unknown" &&
+    asset.classification.primaryCategory.effective === "photo_abstract" &&
     !asset.semanticLabels.some((label) => label.isPrimary)
   );
 }

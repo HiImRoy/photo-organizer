@@ -23,7 +23,8 @@ use crate::scanner::{
     discover_import_source_roots, scan_library, scan_library_tree, validate_scan_root_with_app_data,
 };
 use crate::semantic::{
-    Places365Classifier, SemanticClassifier, SemanticLabelDescriptor, SemanticRuntimeStatus,
+    Places365Classifier, SIGLIP2_ANALYSIS_VERSION, SIGLIP2_MODEL_NAME, SIGLIP2_MODEL_VERSION,
+    SemanticClassifier, SemanticLabelDescriptor, SemanticRuntimeStatus, TopicModelKind,
     semantic_catalog,
 };
 use crate::semantic_tasks::spawn_semantic_job;
@@ -62,6 +63,113 @@ impl AppState {
             semantic: Arc::new(RwLock::new(semantic)),
             subject: Arc::new(RwLock::new(subject)),
         }
+    }
+}
+
+/// Restore a model that was explicitly prepared in an earlier session.
+///
+/// Loading is intentionally performed after the Tauri state has been
+/// installed and on a background thread. This keeps the WebView responsive on
+/// cold start while allowing the next session to reuse the user's last model
+/// choice without another button click.
+pub fn restore_persisted_models(app: tauri::AppHandle, state: &AppState) {
+    let active_model = match state.repository.active_semantic_model_key() {
+        Ok(active_model) => active_model,
+        Err(error) => {
+            log::warn!("could not inspect persisted semantic model: {error}");
+            return;
+        }
+    };
+    let Some((name, version, analysis_version)) = active_model else {
+        return;
+    };
+    if name != SIGLIP2_MODEL_NAME
+        || version != SIGLIP2_MODEL_VERSION
+        || analysis_version != SIGLIP2_ANALYSIS_VERSION
+    {
+        log::warn!(
+            "migrating persisted semantic model {name} {version} {analysis_version} to the bundled SigLIP 2 model"
+        );
+    }
+
+    let paths = state.paths.clone();
+    let repository = state.repository.clone();
+    let tasks = state.tasks.clone();
+    let source_scans = state.source_scans.clone();
+    let semantic_tasks = state.semantic_tasks.clone();
+    let semantic = state.semantic.clone();
+    let subject = state.subject.clone();
+    let thread_app = app.clone();
+    if let Err(error) = std::thread::Builder::new()
+        .name("restore-photo-models".into())
+        .spawn(move || {
+            let classifier = match Places365Classifier::load_with_topic_model(
+                &paths.semantic_model_dir,
+                &paths.siglip2_model_dir,
+                &paths.onnx_runtime_path,
+                TopicModelKind::Siglip2Base,
+            ) {
+                Ok(classifier) => classifier,
+                Err(error) => {
+                    log::warn!("could not restore persisted semantic model: {error}");
+                    return;
+                }
+            };
+            let semantic_status = classifier.status();
+            if let Some(topic_model) = semantic_status.topic_model.as_ref() {
+                let model_path = paths
+                    .siglip2_model_dir
+                    .join(crate::semantic::SIGLIP2_MODEL_FILE);
+                let tokenizer_path = paths
+                    .siglip2_model_dir
+                    .join(crate::semantic::SIGLIP2_TOKENIZER_FILE);
+                if let Err(error) = repository.register_active_semantic_model(
+                    topic_model,
+                    &model_path,
+                    &tokenizer_path,
+                    "https://huggingface.co/onnx-community/siglip2-base-patch16-224-ONNX",
+                ) {
+                    log::warn!("could not persist restored semantic model: {error}");
+                }
+            }
+            *semantic.write() = Arc::new(classifier);
+            if let Err(error) = thread_app.emit("semantic-status", semantic_status) {
+                log::warn!("could not emit restored semantic status: {error}");
+            }
+
+            match SubjectModel::load(
+                &paths.subject_model_dir,
+                &paths.face_model_dir,
+                &paths.onnx_runtime_path,
+            ) {
+                Ok(classifier) => {
+                    let subject_status = classifier.status();
+                    *subject.write() = Arc::new(classifier);
+                    if let Err(error) = thread_app.emit("subject-status", subject_status) {
+                        log::warn!("could not emit restored subject status: {error}");
+                    }
+                }
+                Err(error) => {
+                    log::warn!("could not restore persisted subject model: {error}");
+                }
+            }
+
+            // Pending jobs must be resumed only after the classifier has been
+            // restored; otherwise the old startup path would mark them as
+            // failed against the unavailable placeholder.
+            let resume_state = AppState {
+                repository,
+                paths,
+                tasks,
+                source_scans,
+                semantic_tasks,
+                semantic,
+                subject,
+            };
+            resume_pending_semantic_jobs(thread_app, &resume_state);
+        })
+    {
+        log::error!("could not start persisted model restore thread: {error}");
     }
 }
 
@@ -285,6 +393,18 @@ pub fn rescan_library(
         .source_scans
         .try_acquire(&source_identity.identity_key)
         .ok_or_else(|| "该图库或其嵌套图库正在扫描，请稍后重试".to_owned())?;
+    let mut structured_roots = state
+        .repository
+        .nested_source_roots(library_id)
+        .map_err(ipc_error)?;
+    structured_roots.insert(
+        0,
+        LibrarySourceRoot {
+            library_id,
+            source_path: source_identity.source_path.clone(),
+            identity_key: source_identity.identity_key.clone(),
+        },
+    );
     let (task_id, cancellation) = state.tasks.create();
     let response = StartScanResponse {
         task_id: task_id.clone(),
@@ -299,7 +419,7 @@ pub fn rescan_library(
         root: source_identity.source_path,
         scan_guard,
         library_id_hint: Some(library_id),
-        structured_roots: None,
+        structured_roots: Some(structured_roots),
     })
     .map_err(ipc_error)
     .inspect_err(|_| {
@@ -495,13 +615,28 @@ pub fn get_semantic_status(state: State<'_, AppState>) -> Result<SemanticRuntime
 }
 
 #[tauri::command]
-pub fn prepare_semantic_model(state: State<'_, AppState>) -> Result<SemanticRuntimeStatus, String> {
-    let classifier = Places365Classifier::load(
+pub fn prepare_semantic_model(
+    topic_model: Option<String>,
+    state: State<'_, AppState>,
+) -> Result<SemanticRuntimeStatus, String> {
+    let topic_model = crate::semantic::TopicModelKind::parse(
+        topic_model
+            .as_deref()
+            .unwrap_or(crate::semantic::DEFAULT_TOPIC_MODEL.id()),
+    )
+    .ok_or_else(|| "不支持的题材模型，当前 MVP 仅支持 SigLIP 2 Base。".to_string())?;
+    let classifier = Places365Classifier::load_with_topic_model(
         &state.paths.semantic_model_dir,
-        &state.paths.tinyclip_model_dir,
+        &state.paths.siglip2_model_dir,
         &state.paths.onnx_runtime_path,
+        topic_model,
     )
     .map_err(|error| error.to_string())?;
+    let status = classifier.status();
+    let selected_topic_model = status
+        .topic_model
+        .as_ref()
+        .ok_or_else(|| "题材模型未能装载，请检查模型资源和 ONNX Runtime。".to_string())?;
     state
         .repository
         .register_semantic_model(
@@ -515,8 +650,25 @@ pub fn prepare_semantic_model(state: State<'_, AppState>) -> Result<SemanticRunt
                 .join(crate::semantic::TOKENIZER_FILE),
         )
         .map_err(ipc_error)?;
+    let model_path = state
+        .paths
+        .siglip2_model_dir
+        .join(crate::semantic::SIGLIP2_MODEL_FILE);
+    let tokenizer_path = state
+        .paths
+        .siglip2_model_dir
+        .join(crate::semantic::SIGLIP2_TOKENIZER_FILE);
+    let source_url = "https://huggingface.co/onnx-community/siglip2-base-patch16-224-ONNX";
+    state
+        .repository
+        .register_active_semantic_model(
+            selected_topic_model,
+            &model_path,
+            &tokenizer_path,
+            source_url,
+        )
+        .map_err(ipc_error)?;
     let classifier: Arc<dyn SemanticClassifier> = Arc::new(classifier);
-    let status = classifier.status();
     *state.semantic.write() = classifier;
     Ok(status)
 }
@@ -610,12 +762,14 @@ pub fn start_semantic_analysis_selected(
     let job_id = uuid::Uuid::new_v4().to_string();
     let subject_model = state.subject.read().metadata();
     let subject_model = subject_model.installed.then_some(subject_model);
+    let semantic_model = classifier.result_metadata();
     let candidates = state
         .repository
-        .create_semantic_job_for_assets_with_model(
+        .create_semantic_job_for_assets_with_semantic_model(
             &job_id,
             library_id,
             &asset_ids,
+            &semantic_model,
             subject_model.as_ref(),
         )
         .map_err(ipc_error)?;
@@ -1076,13 +1230,15 @@ fn start_semantic_job(
     let job_id = uuid::Uuid::new_v4().to_string();
     let subject_model = state.subject.read().metadata();
     let subject_model = subject_model.installed.then_some(subject_model);
+    let semantic_model = classifier.result_metadata();
     let candidates = state
         .repository
-        .create_semantic_job_with_models(
+        .create_semantic_job_with_semantic_model(
             &job_id,
             library_id,
             force,
             only_asset_id,
+            &semantic_model,
             subject_model.as_ref(),
         )
         .map_err(ipc_error)?;
@@ -1110,6 +1266,7 @@ fn spawn_with_app(
         job_id,
         library_id,
         candidates,
+        state.paths.thumbnail_dir.clone(),
         move |progress| {
             if let Err(error) = app.emit("semantic-progress", progress) {
                 log::warn!("could not emit semantic progress: {error}");
@@ -1177,7 +1334,8 @@ fn load_preview_data_url(
     let bytes = if cache_path.is_file() {
         fs::read(&cache_path)?
     } else {
-        let image = crate::imaging::load_oriented_image(&source)?;
+        let image =
+            crate::imaging::load_oriented_bounded_image(&source, max_width.max(max_height))?;
         let preview = image.resize(max_width, max_height, FilterType::Lanczos3);
         let mut encoded = Vec::new();
         JpegEncoder::new_with_quality(&mut encoded, 91).encode_image(&preview)?;

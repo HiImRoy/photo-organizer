@@ -21,6 +21,29 @@ or analysis.
 6. The application should work locally without requiring a cloud service.
 7. Do not add accounts, cloud synchronization, or a remote backend unless requested.
 8. Do not silently change architecture or add production dependencies.
+9. Import, thumbnail generation, image decoding for analysis, feature extraction,
+   and model inference must use application-owned thumbnails or bounded thumbnail
+   derivatives. The original file may only be touched for filesystem metadata,
+   fingerprinting, EXIF/embedded-preview metadata, and a controlled decoder path
+   that emits the requested thumbnail size; a full-resolution source pixel buffer
+   must never enter the import, analysis, or model pipeline.
+
+### Thumbnail-only processing invariant
+
+This is a cross-checkpoint project rule, not an optimization that may be
+relaxed for convenience. Every import, analysis, and decode path must consume
+an application-owned thumbnail or a bounded thumbnail derivative. A source
+image may be opened only to read metadata/fingerprint data or to ask a bounded
+decoder for the target thumbnail; it must not be fully decoded, resized from a
+full-resolution pixel buffer, or passed to a feature extractor or model. The
+only explicit exception is a user-initiated `original` preview in the current
+viewer, which is never reused by import, analysis, or model inference.
+
+Implementation review must be able to identify the thumbnail input at every
+import/analysis/decode boundary. Passing an original-image path to a feature
+extractor, preprocessor, model, batch retry, or recovery task is a violation;
+tests must cover the boundary with a high-resolution fixture and verify that no
+full-resolution source pixel buffer is created.
 
 ## Tentative architecture
 

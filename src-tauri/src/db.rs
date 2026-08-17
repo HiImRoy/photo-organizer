@@ -1,10 +1,13 @@
 use std::collections::HashMap;
+use std::fs::File;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use chrono::{SecondsFormat, Utc};
 use rusqlite::types::Value;
 use rusqlite::{Connection, OptionalExtension, Transaction, params, params_from_iter};
+use sha2::{Digest, Sha256};
 
 use crate::classification::{
     AutoClassification, EffectiveClassification, FIELD_AUXILIARY_TAGS,
@@ -14,13 +17,15 @@ use crate::classification::{
 use crate::error::{AppError, AppResult};
 use crate::models::{
     AssetDetail, AssetFilter, AssetGridItem, AssetListItem, AssetPage, AssetSortField,
-    ExistingAssetSnapshot, FileSnapshot, FolderSummary, LibrarySummary, OrganizationIssue,
-    OrganizationIssueSeverity, OrganizationPlan, OrganizationPlanRecord, ProcessedImage,
-    SemanticGroupSummary, SemanticLabelResult, SemanticMatchMode, SemanticProgress, SortDirection,
+    ColorPalette, ExistingAssetSnapshot, FileSnapshot, FolderSummary, LibrarySummary,
+    OrganizationIssue, OrganizationIssueSeverity, OrganizationPlan, OrganizationPlanRecord,
+    ProcessedImage, SemanticGroupSummary, SemanticLabelResult, SemanticMatchMode, SemanticProgress,
+    SortDirection,
 };
 use crate::semantic::{
     ANALYSIS_VERSION as SEMANTIC_ANALYSIS_VERSION, MODEL_NAME, MODEL_VERSION, ModelMetadata,
-    SemanticAnalysisOutput, TAXONOMY_VERSION, category_group_for_label_id,
+    SIGLIP2_ANALYSIS_VERSION, SIGLIP2_MODEL_NAME, SIGLIP2_MODEL_VERSION, SemanticAnalysisOutput,
+    TAXONOMY_VERSION, canonical_label_id, category_group_for_label_id,
     known_display_name_for_label_id,
 };
 use crate::source_identity::{SourceIdentity, identity_key, is_same_or_descendant};
@@ -63,6 +68,10 @@ pub struct SemanticAssetCandidate {
     pub absolute_path: PathBuf,
     pub analysis_path: PathBuf,
     pub fingerprint: String,
+    pub model_name: String,
+    pub model_version: String,
+    pub analysis_version: String,
+    pub taxonomy_version: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -70,6 +79,21 @@ pub struct LibrarySourceRoot {
     pub library_id: i64,
     pub source_path: PathBuf,
     pub identity_key: String,
+}
+
+pub struct ProcessedAssetWrite<'a> {
+    pub library_id: i64,
+    pub generation: i64,
+    pub snapshot: &'a FileSnapshot,
+    pub fingerprint: &'a str,
+    pub processed: &'a ProcessedImage,
+}
+
+pub struct SeenAssetWrite {
+    pub asset_id: i64,
+    pub library_id: i64,
+    pub relative_path: String,
+    pub generation: i64,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -806,6 +830,33 @@ impl Repository {
         Ok(())
     }
 
+    pub fn touch_assets_seen_batch(&self, items: Vec<SeenAssetWrite>) -> AppResult<()> {
+        if items.is_empty() {
+            return Ok(());
+        }
+        let mut connection = self.open()?;
+        let transaction = connection.transaction()?;
+        let timestamp = now();
+        for item in items {
+            transaction.execute(
+                "UPDATE assets
+                     SET library_id = ?2, relative_path = ?3,
+                     file_status = 'present', scan_status = 'indexed', error_message = NULL,
+                     last_seen_at = ?4, last_seen_scan = ?5
+                 WHERE id = ?1",
+                params![
+                    item.asset_id,
+                    item.library_id,
+                    item.relative_path,
+                    timestamp,
+                    item.generation,
+                ],
+            )?;
+        }
+        transaction.commit()?;
+        Ok(())
+    }
+
     pub fn upsert_processed_asset(
         &self,
         library_id: i64,
@@ -816,6 +867,49 @@ impl Repository {
     ) -> AppResult<i64> {
         let mut connection = self.open()?;
         let transaction = connection.transaction()?;
+        let asset_id = Self::upsert_processed_asset_in_transaction(
+            &transaction,
+            library_id,
+            generation,
+            snapshot,
+            fingerprint,
+            processed,
+        )?;
+        transaction.commit()?;
+        Ok(asset_id)
+    }
+
+    pub fn upsert_processed_assets_batch(
+        &self,
+        items: &[ProcessedAssetWrite<'_>],
+    ) -> AppResult<()> {
+        if items.is_empty() {
+            return Ok(());
+        }
+        let mut connection = self.open()?;
+        let transaction = connection.transaction()?;
+        for item in items {
+            Self::upsert_processed_asset_in_transaction(
+                &transaction,
+                item.library_id,
+                item.generation,
+                item.snapshot,
+                item.fingerprint,
+                item.processed,
+            )?;
+        }
+        transaction.commit()?;
+        Ok(())
+    }
+
+    fn upsert_processed_asset_in_transaction(
+        transaction: &Transaction<'_>,
+        library_id: i64,
+        generation: i64,
+        snapshot: &FileSnapshot,
+        fingerprint: &str,
+        processed: &ProcessedImage,
+    ) -> AppResult<i64> {
         let timestamp = now();
         let asset_identity_key = identity_key(Path::new(&snapshot.absolute_path));
         transaction.execute(
@@ -1003,7 +1097,6 @@ impl Repository {
                 timestamp,
             ],
         )?;
-        transaction.commit()?;
         Ok(asset_id)
     }
 
@@ -1349,7 +1442,7 @@ impl Repository {
                     cf.saturation_mean, cf.chroma_mean, cf.saturation_label, cf.dominant_color_rgb,
                     cf.dominant_color_category, cf.neutral_ratio, cf.dominant_color_coverage,
                     a.semantic_status, a.semantic_error,
-                    a.semantic_analyzed_at, a.rating, a.color_label
+                    a.semantic_analyzed_at, a.rating, a.color_label, cf.dominant_colors_json
              FROM assets a
              LEFT JOIN thumbnails t ON t.asset_id=a.id AND t.spec=?
              LEFT JOIN tone_features tf ON tf.asset_id=a.id
@@ -1403,6 +1496,7 @@ impl Repository {
                 saturation_label: row.get(29)?,
                 dominant_color: row.get(30)?,
                 dominant_color_category: row.get(31)?,
+                color_palette: parse_color_palette(row.get(39)?),
                 neutral_ratio: row.get(32)?,
                 dominant_color_coverage: row.get(33)?,
                 semantic_status: row.get(34)?,
@@ -1415,9 +1509,20 @@ impl Repository {
             })
         })?;
         let mut items = rows.collect::<Result<Vec<_>, _>>()?;
+        let asset_ids = items.iter().map(|item| item.id).collect::<Vec<_>>();
+        let mut labels_by_asset = semantic_labels_for_assets(&connection, &asset_ids)?;
+        let mut manual_by_asset = manual_classifications_for_assets(&connection, &asset_ids)?;
+        let revisions_by_asset = classification_revisions_for_assets(&connection, &asset_ids)?;
         for item in &mut items {
-            item.semantic_labels = semantic_labels_for_asset(&connection, item.id)?;
-            item.classification = effective_classification_for_asset(&connection, item)?;
+            item.semantic_labels = labels_by_asset.remove(&item.id).unwrap_or_default();
+            let semantic_labels = item.semantic_labels.clone();
+            let revision = revisions_by_asset
+                .get(&item.id)
+                .copied()
+                .unwrap_or_default();
+            let manual = manual_by_asset.remove(&item.id).unwrap_or_default();
+            item.classification =
+                resolve_effective_classification(item, revision, &semantic_labels, manual);
             apply_effective_fields(item);
         }
         Ok(FullAssetPage {
@@ -1775,6 +1880,75 @@ impl Repository {
         Ok(())
     }
 
+    pub fn register_active_semantic_model(
+        &self,
+        metadata: &ModelMetadata,
+        model_path: &Path,
+        tokenizer_path: &Path,
+        source_url: &str,
+    ) -> AppResult<()> {
+        let tokenizer_sha256 = sha256_file(tokenizer_path)?;
+        let model_sha256 = metadata
+            .model_sha256
+            .clone()
+            .unwrap_or_else(|| String::from("unknown"));
+        let license = metadata
+            .license
+            .clone()
+            .unwrap_or_else(|| String::from("unknown"));
+        let mut connection = self.open()?;
+        let transaction = connection.transaction()?;
+        transaction.execute("UPDATE semantic_models SET is_active=0", [])?;
+        transaction.execute(
+            "INSERT INTO semantic_models(
+                name, version, analysis_version, license, source_url, model_sha256,
+                tokenizer_sha256, model_path, tokenizer_path, execution_backend,
+                installed_at, is_active
+             ) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 'cpu', ?10, 1)
+             ON CONFLICT(name, version, analysis_version) DO UPDATE SET
+                license=excluded.license, source_url=excluded.source_url,
+                model_path=excluded.model_path, tokenizer_path=excluded.tokenizer_path,
+                model_sha256=excluded.model_sha256, tokenizer_sha256=excluded.tokenizer_sha256,
+                execution_backend='cpu', installed_at=excluded.installed_at, is_active=1",
+            params![
+                metadata.name,
+                metadata.version,
+                metadata.analysis_version,
+                license,
+                source_url,
+                model_sha256,
+                tokenizer_sha256,
+                model_path.to_string_lossy().into_owned(),
+                tokenizer_path.to_string_lossy().into_owned(),
+                now(),
+            ],
+        )?;
+        transaction.commit()?;
+        Ok(())
+    }
+
+    pub fn active_semantic_model_key(&self) -> AppResult<Option<(String, String, String)>> {
+        let connection = self.open()?;
+        connection
+            .query_row(
+                "SELECT name, version, analysis_version
+                 FROM semantic_models
+                 WHERE is_active=1
+                 ORDER BY id DESC
+                 LIMIT 1",
+                [],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                    ))
+                },
+            )
+            .optional()
+            .map_err(AppError::from)
+    }
+
     pub fn create_semantic_job(
         &self,
         job_id: &str,
@@ -1782,7 +1956,15 @@ impl Repository {
         force: bool,
         only_asset_id: Option<i64>,
     ) -> AppResult<Vec<SemanticAssetCandidate>> {
-        self.create_semantic_job_with_models(job_id, library_id, force, only_asset_id, None)
+        let semantic_model = default_semantic_model_metadata();
+        self.create_semantic_job_with_semantic_model(
+            job_id,
+            library_id,
+            force,
+            only_asset_id,
+            &semantic_model,
+            None,
+        )
     }
 
     pub fn create_semantic_job_with_models(
@@ -1793,12 +1975,33 @@ impl Repository {
         only_asset_id: Option<i64>,
         subject_model: Option<&ModelMetadata>,
     ) -> AppResult<Vec<SemanticAssetCandidate>> {
+        let semantic_model = default_semantic_model_metadata();
+        self.create_semantic_job_with_semantic_model(
+            job_id,
+            library_id,
+            force,
+            only_asset_id,
+            &semantic_model,
+            subject_model,
+        )
+    }
+
+    pub fn create_semantic_job_with_semantic_model(
+        &self,
+        job_id: &str,
+        library_id: i64,
+        force: bool,
+        only_asset_id: Option<i64>,
+        semantic_model: &ModelMetadata,
+        subject_model: Option<&ModelMetadata>,
+    ) -> AppResult<Vec<SemanticAssetCandidate>> {
         self.create_semantic_job_with_ids(
             job_id,
             library_id,
             force,
             only_asset_id,
             None,
+            semantic_model,
             subject_model,
         )
     }
@@ -1809,7 +2012,14 @@ impl Repository {
         library_id: i64,
         asset_ids: &[i64],
     ) -> AppResult<Vec<SemanticAssetCandidate>> {
-        self.create_semantic_job_with_ids(job_id, library_id, false, None, Some(asset_ids), None)
+        let semantic_model = default_semantic_model_metadata();
+        self.create_semantic_job_for_assets_with_semantic_model(
+            job_id,
+            library_id,
+            asset_ids,
+            &semantic_model,
+            None,
+        )
     }
 
     pub fn create_semantic_job_for_assets_with_model(
@@ -1819,16 +2029,36 @@ impl Repository {
         asset_ids: &[i64],
         subject_model: Option<&ModelMetadata>,
     ) -> AppResult<Vec<SemanticAssetCandidate>> {
+        let semantic_model = default_semantic_model_metadata();
+        self.create_semantic_job_for_assets_with_semantic_model(
+            job_id,
+            library_id,
+            asset_ids,
+            &semantic_model,
+            subject_model,
+        )
+    }
+
+    pub fn create_semantic_job_for_assets_with_semantic_model(
+        &self,
+        job_id: &str,
+        library_id: i64,
+        asset_ids: &[i64],
+        semantic_model: &ModelMetadata,
+        subject_model: Option<&ModelMetadata>,
+    ) -> AppResult<Vec<SemanticAssetCandidate>> {
         self.create_semantic_job_with_ids(
             job_id,
             library_id,
             false,
             None,
             Some(asset_ids),
+            semantic_model,
             subject_model,
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn create_semantic_job_with_ids(
         &self,
         job_id: &str,
@@ -1836,6 +2066,7 @@ impl Repository {
         force: bool,
         only_asset_id: Option<i64>,
         only_asset_ids: Option<&[i64]>,
+        semantic_model: &ModelMetadata,
         subject_model: Option<&ModelMetadata>,
     ) -> AppResult<Vec<SemanticAssetCandidate>> {
         let mut connection = self.open()?;
@@ -1919,9 +2150,9 @@ impl Repository {
             } else {
                 sql.push_str(&format!(" AND {scene_not_exists}"));
             }
-            values.push(Value::Text(MODEL_NAME.into()));
-            values.push(Value::Text(MODEL_VERSION.into()));
-            values.push(Value::Text(SEMANTIC_ANALYSIS_VERSION.into()));
+            values.push(Value::Text(semantic_model.name.clone()));
+            values.push(Value::Text(semantic_model.version.clone()));
+            values.push(Value::Text(semantic_model.analysis_version.clone()));
             values.push(Value::Text(TAXONOMY_VERSION.into()));
             if let Some(subject_model) = subject_model {
                 values.push(Value::Text(subject_model.name.clone()));
@@ -1941,6 +2172,10 @@ impl Repository {
                         absolute_path: absolute_path.clone(),
                         analysis_path: PathBuf::from(row.get::<_, String>(3)?),
                         fingerprint: row.get(2)?,
+                        model_name: semantic_model.name.clone(),
+                        model_version: semantic_model.version.clone(),
+                        analysis_version: semantic_model.analysis_version.clone(),
+                        taxonomy_version: TAXONOMY_VERSION.into(),
                     })
                 })?
                 .collect::<Result<Vec<_>, _>>()?
@@ -1957,9 +2192,9 @@ impl Repository {
                 job_id,
                 library_id,
                 candidates.len() as i64,
-                MODEL_NAME,
-                MODEL_VERSION,
-                SEMANTIC_ANALYSIS_VERSION,
+                semantic_model.name,
+                semantic_model.version,
+                semantic_model.analysis_version,
                 timestamp,
             ],
         )?;
@@ -2063,9 +2298,9 @@ impl Repository {
                  WHERE asset_id=?1 AND model_name=?2 AND model_version=?3 AND analysis_version=?4",
                 params![
                     candidate.id,
-                    MODEL_NAME,
-                    MODEL_VERSION,
-                    SEMANTIC_ANALYSIS_VERSION
+                    &candidate.model_name,
+                    &candidate.model_version,
+                    &candidate.analysis_version
                 ],
             )?;
             transaction.execute(
@@ -2073,9 +2308,9 @@ impl Repository {
                  WHERE asset_id=?1 AND model_name=?2 AND model_version=?3 AND analysis_version=?4",
                 params![
                     candidate.id,
-                    MODEL_NAME,
-                    MODEL_VERSION,
-                    SEMANTIC_ANALYSIS_VERSION
+                    &candidate.model_name,
+                    &candidate.model_version,
+                    &candidate.analysis_version
                 ],
             )?;
             let timestamp = now();
@@ -2092,10 +2327,10 @@ impl Repository {
                         prediction.display_name,
                         prediction.similarity,
                         prediction.threshold,
-                        MODEL_NAME,
-                        MODEL_VERSION,
-                        SEMANTIC_ANALYSIS_VERSION,
-                        TAXONOMY_VERSION,
+                        &candidate.model_name,
+                        &candidate.model_version,
+                        &candidate.analysis_version,
+                        &candidate.taxonomy_version,
                         prediction.category_group,
                         candidate.fingerprint,
                         if prediction.is_primary { 1_i64 } else { 0_i64 },
@@ -2112,10 +2347,10 @@ impl Repository {
                      ) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
                     params![
                         candidate.id,
-                        MODEL_NAME,
-                        MODEL_VERSION,
-                        SEMANTIC_ANALYSIS_VERSION,
-                        TAXONOMY_VERSION,
+                        &candidate.model_name,
+                        &candidate.model_version,
+                        &candidate.analysis_version,
+                        &candidate.taxonomy_version,
                         candidate.fingerprint,
                         rank as i64,
                         evidence.label_id,
@@ -2140,9 +2375,9 @@ impl Repository {
                                generated_at=excluded.generated_at",
                 params![
                     candidate.id,
-                    MODEL_NAME,
-                    MODEL_VERSION,
-                    SEMANTIC_ANALYSIS_VERSION,
+                    &candidate.model_name,
+                    &candidate.model_version,
+                    &candidate.analysis_version,
                     candidate.fingerprint,
                     output.embedding.len() as i64,
                     embedding_bytes,
@@ -2316,23 +2551,19 @@ impl Repository {
         )?;
         transaction.execute(
             "DELETE FROM semantic_labels
-             WHERE asset_id=?1 AND model_name=?2 AND model_version=?3 AND analysis_version=?4",
-            params![
-                asset_id,
-                MODEL_NAME,
-                MODEL_VERSION,
-                SEMANTIC_ANALYSIS_VERSION
-            ],
+             WHERE asset_id=?1
+               AND model_name=(SELECT model_name FROM analysis_jobs WHERE id=?2)
+               AND model_version=(SELECT model_version FROM analysis_jobs WHERE id=?2)
+               AND analysis_version=(SELECT analysis_version FROM analysis_jobs WHERE id=?2)",
+            params![asset_id, job_id],
         )?;
         transaction.execute(
             "DELETE FROM semantic_evidence
-             WHERE asset_id=?1 AND model_name=?2 AND model_version=?3 AND analysis_version=?4",
-            params![
-                asset_id,
-                MODEL_NAME,
-                MODEL_VERSION,
-                SEMANTIC_ANALYSIS_VERSION
-            ],
+             WHERE asset_id=?1
+               AND model_name=(SELECT model_name FROM analysis_jobs WHERE id=?2)
+               AND model_version=(SELECT model_version FROM analysis_jobs WHERE id=?2)
+               AND analysis_version=(SELECT analysis_version FROM analysis_jobs WHERE id=?2)",
+            params![asset_id, job_id],
         )?;
         transaction.execute(
             "UPDATE assets SET semantic_status='failed', semantic_error=?2,
@@ -2433,8 +2664,10 @@ impl Repository {
         let connection = self.open()?;
         let thumbnail_spec = sql_literal(crate::imaging::THUMBNAIL_SPEC);
         let mut statement = connection.prepare(&format!(
-            "SELECT a.id, a.absolute_path, ji.source_fingerprint, t.cache_path
+            "SELECT a.id, a.absolute_path, ji.source_fingerprint, t.cache_path,
+                    aj.model_name, aj.model_version, aj.analysis_version
              FROM analysis_job_items ji
+             JOIN analysis_jobs aj ON aj.id=ji.job_id
              JOIN assets a ON a.id=ji.asset_id
              LEFT JOIN thumbnails t
                ON t.asset_id=a.id AND t.spec={thumbnail_spec} AND t.status='ready'
@@ -2455,6 +2688,10 @@ impl Repository {
                     .map(PathBuf::from)
                     .unwrap_or_default(),
                 fingerprint: row.get(2)?,
+                model_name: row.get(4)?,
+                model_version: row.get(5)?,
+                analysis_version: row.get(6)?,
+                taxonomy_version: TAXONOMY_VERSION.into(),
             })
         })?;
         rows.collect::<Result<Vec<_>, _>>().map_err(AppError::from)
@@ -2743,7 +2980,7 @@ fn load_asset_by_id(connection: &Connection, asset_id: i64) -> AppResult<AssetLi
                     cf.saturation_mean, cf.chroma_mean, cf.saturation_label, cf.dominant_color_rgb,
                     cf.dominant_color_category, cf.neutral_ratio, cf.dominant_color_coverage,
                     a.semantic_status, a.semantic_error,
-                    a.semantic_analyzed_at, a.rating, a.color_label
+                    a.semantic_analyzed_at, a.rating, a.color_label, cf.dominant_colors_json
              FROM assets a
              LEFT JOIN thumbnails t ON t.asset_id=a.id AND t.spec=?1
              LEFT JOIN tone_features tf ON tf.asset_id=a.id
@@ -2788,6 +3025,7 @@ fn load_asset_by_id(connection: &Connection, asset_id: i64) -> AppResult<AssetLi
                     saturation_label: row.get(29)?,
                     dominant_color: row.get(30)?,
                     dominant_color_category: row.get(31)?,
+                    color_palette: parse_color_palette(row.get(39)?),
                     neutral_ratio: row.get(32)?,
                     dominant_color_coverage: row.get(33)?,
                     semantic_status: row.get(34)?,
@@ -2805,6 +3043,10 @@ fn load_asset_by_id(connection: &Connection, asset_id: i64) -> AppResult<AssetLi
 }
 
 fn asset_filter_sql(library_id: i64, filter: &AssetFilter) -> (String, Vec<Value>) {
+    let active_model_name = active_semantic_model_sql("name", SIGLIP2_MODEL_NAME);
+    let active_model_version = active_semantic_model_sql("version", SIGLIP2_MODEL_VERSION);
+    let active_analysis_version =
+        active_semantic_model_sql("analysis_version", SIGLIP2_ANALYSIS_VERSION);
     let mut clauses = vec![
         "COALESCE(
             (SELECT assignment.library_id
@@ -2824,6 +3066,27 @@ fn asset_filter_sql(library_id: i64, filter: &AssetFilter) -> (String, Vec<Value
         .to_string(),
     ];
     let mut values = vec![Value::Integer(library_id)];
+    if filter.favorite_only {
+        clauses.push("a.is_favorite=1".into());
+    }
+    if let Some(collection_id) = filter.collection_id {
+        clauses.push(
+            "EXISTS(SELECT 1 FROM collection_assets source_collection
+                    WHERE source_collection.collection_id=? AND source_collection.asset_id=a.id)"
+                .into(),
+        );
+        values.push(Value::Integer(collection_id));
+    }
+    let primary_categories = filter
+        .primary_categories
+        .iter()
+        .map(|value| canonical_label_id(value).to_owned())
+        .collect::<Vec<_>>();
+    let auxiliary_tags = filter
+        .auxiliary_tags
+        .iter()
+        .map(|value| canonical_label_id(value).to_owned())
+        .collect::<Vec<_>>();
     if let Some(search) = filter
         .search
         .as_deref()
@@ -2836,7 +3099,7 @@ fn asset_filter_sql(library_id: i64, filter: &AssetFilter) -> (String, Vec<Value
         values.push(Value::Text(value.clone()));
         values.push(Value::Text(value));
     }
-    if !filter.primary_categories.is_empty() {
+    if !primary_categories.is_empty() {
         let expression = effective_scalar_expression(
             FIELD_PRIMARY_CATEGORY,
             &format!(
@@ -2849,7 +3112,7 @@ fn asset_filter_sql(library_id: i64, filter: &AssetFilter) -> (String, Vec<Value
                            AND current_scene.model_version={model_version}
                            AND current_scene.analysis_version={analysis_version}
                            AND current_scene.taxonomy_version={taxonomy_version}
-                       ) THEN 'unknown'
+                       ) THEN 'photo_abstract'
                        ELSE (SELECT sl.label FROM semantic_labels sl
                              WHERE sl.asset_id=a.id AND sl.source_fingerprint=a.fingerprint
                                AND sl.is_manual=0 AND sl.is_primary=1
@@ -2858,21 +3121,20 @@ fn asset_filter_sql(library_id: i64, filter: &AssetFilter) -> (String, Vec<Value
                                AND sl.taxonomy_version={taxonomy_version}
                              ORDER BY sl.similarity DESC, sl.label ASC LIMIT 1)
                   END",
-                model_name = sql_literal(MODEL_NAME),
-                model_version = sql_literal(MODEL_VERSION),
-                analysis_version = sql_literal(SEMANTIC_ANALYSIS_VERSION),
+                model_name = active_model_name,
+                model_version = active_model_version,
+                analysis_version = active_analysis_version,
                 taxonomy_version = sql_literal(TAXONOMY_VERSION),
             ),
         );
         clauses.push(format!(
             "{expression} IN ({})",
-            placeholders(filter.primary_categories.len())
+            placeholders(primary_categories.len())
         ));
-        values.extend(filter.primary_categories.iter().cloned().map(Value::Text));
+        values.extend(primary_categories.into_iter().map(Value::Text));
     }
-    if !filter.auxiliary_tags.is_empty() {
-        let predicates = filter
-            .auxiliary_tags
+    if !auxiliary_tags.is_empty() {
+        let predicates = auxiliary_tags
             .iter()
             .map(|_| {
                 format!(
@@ -2895,9 +3157,9 @@ fn asset_filter_sql(library_id: i64, filter: &AssetFilter) -> (String, Vec<Value
                          AND NOT EXISTS(SELECT 1 FROM manual_tag_overrides remove_tag
                                         WHERE remove_tag.asset_id=a.id AND remove_tag.tag_id=?
                                            AND remove_tag.state='remove')))" ,
-                    model_name = sql_literal(MODEL_NAME),
-                     model_version = sql_literal(MODEL_VERSION),
-                     analysis_version = sql_literal(SEMANTIC_ANALYSIS_VERSION),
+                    model_name = active_model_name,
+                     model_version = active_model_version,
+                     analysis_version = active_analysis_version,
                      taxonomy_version = sql_literal(TAXONOMY_VERSION),
                      subject_model_name = sql_literal(SUBJECT_MODEL_NAME),
                      subject_model_version = sql_literal(SUBJECT_MODEL_VERSION),
@@ -2911,7 +3173,7 @@ fn asset_filter_sql(library_id: i64, filter: &AssetFilter) -> (String, Vec<Value
             SemanticMatchMode::All => " AND ",
         };
         clauses.push(format!("({})", predicates.join(joiner)));
-        for tag in &filter.auxiliary_tags {
+        for tag in &auxiliary_tags {
             values.push(Value::Text(tag.clone()));
             values.push(Value::Text(tag.clone()));
             values.push(Value::Text(tag.clone()));
@@ -2925,6 +3187,13 @@ fn asset_filter_sql(library_id: i64, filter: &AssetFilter) -> (String, Vec<Value
         &filter.tone_labels,
     );
     add_palette_filter(&mut clauses, &mut values, &filter.color_categories);
+    add_hue_range_filter(
+        &mut clauses,
+        &mut values,
+        filter.color_hue_center,
+        filter.color_hue_width,
+        filter.color_hue_strictness,
+    );
     add_rating_threshold_filter(&mut clauses, &mut values, "a.rating", &filter.ratings);
     add_string_in_filter(
         &mut clauses,
@@ -3016,18 +3285,109 @@ fn add_palette_filter(clauses: &mut Vec<String>, values: &mut Vec<Value>, select
             COALESCE(
                 (SELECT mco.value_json FROM manual_classification_overrides mco
                  WHERE mco.asset_id=a.id AND mco.field='{}'),
-                json_array(cf.dominant_color_category)
+                CASE
+                    WHEN json_type(cf.dominant_colors_json, '$.coveragePalette')='array'
+                         AND json_array_length(cf.dominant_colors_json, '$.coveragePalette') > 0
+                    THEN json_extract(cf.dominant_colors_json, '$.coveragePalette')
+                    ELSE json_array(cf.dominant_color_category)
+                END
             )
-        ) palette WHERE palette.value IN ({}))",
+        ) palette WHERE CASE
+            WHEN palette.type='object' THEN json_extract(palette.value, '$.category')
+            ELSE palette.value
+        END IN ({})
+        AND (palette.type <> 'object'
+             OR COALESCE(CAST(json_extract(palette.value, '$.areaCoverage') AS REAL), 1.0) >= ?))",
         FIELD_DOMINANT_COLOR_CATEGORY,
         placeholders(selected.len()),
     );
     clauses.push(expression);
     values.extend(selected.iter().cloned().map(Value::Text));
+    values.push(Value::Real(crate::imaging::MIN_MAIN_COLOR_AREA));
+}
+
+fn add_hue_range_filter(
+    clauses: &mut Vec<String>,
+    values: &mut Vec<Value>,
+    center: Option<f64>,
+    width: Option<f64>,
+    strictness: Option<f64>,
+) {
+    let (Some(center), Some(width)) = (center, width) else {
+        return;
+    };
+    let bins = hue_bins_for_range(center, width);
+    if bins.is_empty() {
+        return;
+    }
+
+    let placeholders = placeholders(bins.len());
+    clauses.push(format!(
+        "(SELECT COALESCE(SUM(CASE WHEN CAST(selected_hue.key AS INTEGER) IN ({placeholders})\n                                  THEN CAST(selected_hue.value AS REAL) ELSE 0 END), 0.0)\n          FROM json_each(COALESCE(cf.hue_histogram_json, '[]')) selected_hue)\n         >= ? *\n        (SELECT COALESCE(SUM(CAST(all_hue.value AS REAL)), 0.0)\n          FROM json_each(COALESCE(cf.hue_histogram_json, '[]')) all_hue)\n       AND (SELECT COALESCE(SUM(CAST(non_empty_hue.value AS REAL)), 0.0)\n          FROM json_each(COALESCE(cf.hue_histogram_json, '[]')) non_empty_hue) > 0"
+    ));
+    values.extend(bins.into_iter().map(|bin| Value::Integer(bin as i64)));
+    values.push(Value::Real(color_hue_match_threshold(strictness)));
+}
+
+const DEFAULT_COLOR_HUE_STRICTNESS: f64 = 0.5;
+const MIN_COLOR_HUE_MATCH_RATIO: f64 = 0.08;
+const MAX_COLOR_HUE_MATCH_RATIO: f64 = 0.75;
+
+fn color_hue_match_threshold(strictness: Option<f64>) -> f64 {
+    let normalized = strictness
+        .unwrap_or(DEFAULT_COLOR_HUE_STRICTNESS)
+        .clamp(0.0, 1.0);
+    MIN_COLOR_HUE_MATCH_RATIO + (MAX_COLOR_HUE_MATCH_RATIO - MIN_COLOR_HUE_MATCH_RATIO) * normalized
+}
+
+fn hue_bins_for_range(center: f64, width: f64) -> Vec<usize> {
+    let center = normalize_hue(center);
+    let width = width.clamp(15.0, 330.0);
+    let half_width = width / 2.0;
+    (0..12)
+        .filter(|bin| {
+            let bin_center = *bin as f64 * 30.0 + 15.0;
+            circular_distance(center, bin_center) <= half_width + 15.0
+        })
+        .collect()
+}
+
+fn normalize_hue(value: f64) -> f64 {
+    value.rem_euclid(360.0)
+}
+
+fn circular_distance(left: f64, right: f64) -> f64 {
+    let difference = (left - right).abs().rem_euclid(360.0);
+    difference.min(360.0 - difference)
 }
 
 fn sql_literal(value: &str) -> String {
     format!("'{}'", value.replace('\'', "''"))
+}
+
+fn active_semantic_model_sql(column: &str, fallback: &str) -> String {
+    format!(
+        "COALESCE((SELECT {column} FROM semantic_models WHERE is_active=1 ORDER BY id DESC LIMIT 1), {})",
+        sql_literal(fallback)
+    )
+}
+
+fn default_semantic_model_metadata() -> ModelMetadata {
+    crate::semantic::default_topic_model_metadata()
+}
+
+fn sha256_file(path: &Path) -> AppResult<String> {
+    let mut file = File::open(path)?;
+    let mut hasher = Sha256::new();
+    let mut buffer = [0_u8; 64 * 1024];
+    loop {
+        let bytes = file.read(&mut buffer)?;
+        if bytes == 0 {
+            break;
+        }
+        hasher.update(&buffer[..bytes]);
+    }
+    Ok(format!("{:x}", hasher.finalize()))
 }
 
 fn add_string_in_filter(
@@ -3084,6 +3444,11 @@ fn semantic_labels_for_asset(
     connection: &Connection,
     asset_id: i64,
 ) -> AppResult<Vec<SemanticLabelResult>> {
+    let active_model_name = active_semantic_model_sql("name", SIGLIP2_MODEL_NAME);
+    let active_model_version = active_semantic_model_sql("version", SIGLIP2_MODEL_VERSION);
+    let active_analysis_version =
+        active_semantic_model_sql("analysis_version", SIGLIP2_ANALYSIS_VERSION);
+    let semantic_taxonomy_version = sql_literal(TAXONOMY_VERSION);
     let subject_model_name = sql_literal(SUBJECT_MODEL_NAME);
     let subject_model_version = sql_literal(SUBJECT_MODEL_VERSION);
     let subject_analysis_version = sql_literal(SUBJECT_ANALYSIS_VERSION);
@@ -3097,8 +3462,10 @@ fn semantic_labels_for_asset(
                     analysis_version, category_group, taxonomy_version, generated_at,
                     is_manual, is_primary, asset_id, source_fingerprint
              FROM semantic_labels
-             WHERE asset_id=?1 AND model_name=?2 AND model_version=?3
-               AND analysis_version=?4 AND taxonomy_version=?5
+             WHERE asset_id=?1 AND model_name={active_model_name}
+               AND model_version={active_model_version}
+               AND analysis_version={active_analysis_version}
+               AND taxonomy_version={semantic_taxonomy_version}
              UNION ALL
              SELECT label, display_name, similarity, threshold, model_name, model_version,
                     analysis_version, 'subject' AS category_group, taxonomy_version,
@@ -3112,36 +3479,228 @@ fn semantic_labels_for_asset(
          JOIN assets a ON a.id=sl.asset_id AND sl.source_fingerprint=a.fingerprint
          ORDER BY sl.is_primary DESC, sl.similarity DESC, sl.label ASC"
     ))?;
-    let rows = statement.query_map(
-        params![
+    let rows = statement.query_map(params![asset_id], |row| {
+        let stored_label_id: String = row.get(0)?;
+        let label_id = canonical_label_id(&stored_label_id).to_owned();
+        let stored_display_name: String = row.get(1)?;
+        Ok(SemanticLabelResult {
+            display_name: known_display_name_for_label_id(&label_id)
+                .unwrap_or(stored_display_name.as_str())
+                .to_owned(),
+            label_id,
+            category_group: row.get(7)?,
+            similarity: row.get(2)?,
+            threshold: row.get(3)?,
+            model_name: row.get(4)?,
+            model_version: row.get(5)?,
+            analysis_version: row.get(6)?,
+            taxonomy_version: row.get(8)?,
+            analyzed_at: row.get(9)?,
+            is_manual: row.get::<_, i64>(10)? != 0,
+            is_primary: row.get::<_, i64>(11)? != 0,
+        })
+    })?;
+    rows.collect::<Result<Vec<_>, _>>().map_err(AppError::from)
+}
+
+fn semantic_labels_for_assets(
+    connection: &Connection,
+    asset_ids: &[i64],
+) -> AppResult<HashMap<i64, Vec<SemanticLabelResult>>> {
+    if asset_ids.is_empty() {
+        return Ok(HashMap::new());
+    }
+    let active_model_name = active_semantic_model_sql("name", SIGLIP2_MODEL_NAME);
+    let active_model_version = active_semantic_model_sql("version", SIGLIP2_MODEL_VERSION);
+    let active_analysis_version =
+        active_semantic_model_sql("analysis_version", SIGLIP2_ANALYSIS_VERSION);
+    let semantic_taxonomy_version = sql_literal(TAXONOMY_VERSION);
+    let subject_model_name = sql_literal(SUBJECT_MODEL_NAME);
+    let subject_model_version = sql_literal(SUBJECT_MODEL_VERSION);
+    let subject_analysis_version = sql_literal(SUBJECT_ANALYSIS_VERSION);
+    let subject_taxonomy_version = sql_literal(SUBJECT_TAXONOMY_VERSION);
+    let ids = placeholders(asset_ids.len());
+    let sql = format!(
+        "SELECT sl.asset_id, sl.label, sl.display_name, sl.similarity, sl.threshold,
+                sl.model_name, sl.model_version, sl.analysis_version, sl.category_group,
+                sl.taxonomy_version, sl.generated_at, sl.is_manual, sl.is_primary
+         FROM (
+             SELECT asset_id, label, display_name, similarity, threshold, model_name,
+                    model_version, analysis_version, category_group, taxonomy_version,
+                    generated_at, is_manual, is_primary, source_fingerprint
+             FROM semantic_labels
+             WHERE asset_id IN ({ids}) AND model_name={active_model_name}
+               AND model_version={active_model_version}
+               AND analysis_version={active_analysis_version}
+               AND taxonomy_version={semantic_taxonomy_version}
+             UNION ALL
+             SELECT asset_id, label, display_name, similarity, threshold, model_name,
+                    model_version, analysis_version, 'subject' AS category_group,
+                    taxonomy_version, generated_at, 0 AS is_manual, 0 AS is_primary,
+                    source_fingerprint
+             FROM subject_labels
+             WHERE asset_id IN ({ids}) AND model_name={subject_model_name}
+               AND model_version={subject_model_version}
+               AND analysis_version={subject_analysis_version}
+               AND taxonomy_version={subject_taxonomy_version}
+         ) sl
+         JOIN assets a ON a.id=sl.asset_id AND sl.source_fingerprint=a.fingerprint
+         ORDER BY sl.asset_id, sl.is_primary DESC, sl.similarity DESC, sl.label ASC",
+        ids = ids,
+        active_model_name = active_model_name,
+        active_model_version = active_model_version,
+        active_analysis_version = active_analysis_version,
+        semantic_taxonomy_version = semantic_taxonomy_version,
+        subject_model_name = subject_model_name,
+        subject_model_version = subject_model_version,
+        subject_analysis_version = subject_analysis_version,
+        subject_taxonomy_version = subject_taxonomy_version,
+    );
+    let mut query_values = Vec::with_capacity(asset_ids.len() * 2);
+    query_values.extend(asset_ids.iter().copied().map(Value::Integer));
+    query_values.extend(asset_ids.iter().copied().map(Value::Integer));
+    let mut statement = connection.prepare(&sql)?;
+    let rows = statement.query_map(params_from_iter(query_values.iter()), |row| {
+        let asset_id: i64 = row.get(0)?;
+        let stored_label_id: String = row.get(1)?;
+        let label_id = canonical_label_id(&stored_label_id).to_owned();
+        let stored_display_name: String = row.get(2)?;
+        Ok((
             asset_id,
-            MODEL_NAME,
-            MODEL_VERSION,
-            SEMANTIC_ANALYSIS_VERSION,
-            TAXONOMY_VERSION,
-        ],
-        |row| {
-            let label_id: String = row.get(0)?;
-            let stored_display_name: String = row.get(1)?;
-            Ok(SemanticLabelResult {
+            SemanticLabelResult {
                 display_name: known_display_name_for_label_id(&label_id)
                     .unwrap_or(stored_display_name.as_str())
                     .to_owned(),
                 label_id,
-                category_group: row.get(7)?,
-                similarity: row.get(2)?,
-                threshold: row.get(3)?,
-                model_name: row.get(4)?,
-                model_version: row.get(5)?,
-                analysis_version: row.get(6)?,
-                taxonomy_version: row.get(8)?,
-                analyzed_at: row.get(9)?,
-                is_manual: row.get::<_, i64>(10)? != 0,
-                is_primary: row.get::<_, i64>(11)? != 0,
-            })
-        },
-    )?;
-    rows.collect::<Result<Vec<_>, _>>().map_err(AppError::from)
+                category_group: row.get(8)?,
+                similarity: row.get(3)?,
+                threshold: row.get(4)?,
+                model_name: row.get(5)?,
+                model_version: row.get(6)?,
+                analysis_version: row.get(7)?,
+                taxonomy_version: row.get(9)?,
+                analyzed_at: row.get(10)?,
+                is_manual: row.get::<_, i64>(11)? != 0,
+                is_primary: row.get::<_, i64>(12)? != 0,
+            },
+        ))
+    })?;
+    let mut result = HashMap::<i64, Vec<SemanticLabelResult>>::new();
+    for row in rows {
+        let (asset_id, label) = row?;
+        result.entry(asset_id).or_default().push(label);
+    }
+    Ok(result)
+}
+
+fn manual_classifications_for_assets(
+    connection: &Connection,
+    asset_ids: &[i64],
+) -> AppResult<HashMap<i64, ManualClassification>> {
+    if asset_ids.is_empty() {
+        return Ok(HashMap::new());
+    }
+    let ids = placeholders(asset_ids.len());
+    let mut result = HashMap::<i64, ManualClassification>::new();
+    let mut values = asset_ids
+        .iter()
+        .copied()
+        .map(Value::Integer)
+        .collect::<Vec<_>>();
+    let mut statement = connection.prepare(&format!(
+        "SELECT asset_id, field, value_json
+         FROM manual_classification_overrides
+         WHERE asset_id IN ({ids})
+         ORDER BY asset_id, field",
+        ids = ids,
+    ))?;
+    let rows = statement.query_map(params_from_iter(values.iter()), |row| {
+        Ok((
+            row.get::<_, i64>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, String>(2)?,
+        ))
+    })?;
+    for row in rows {
+        let (asset_id, field, value_json) = row?;
+        let value: serde_json::Value = serde_json::from_str(&value_json)?;
+        let manual = result.entry(asset_id).or_default();
+        match field.as_str() {
+            FIELD_PRIMARY_CATEGORY => {
+                manual.primary_category = value
+                    .as_str()
+                    .map(|value| canonical_label_id(value).to_owned())
+            }
+            FIELD_TONE => manual.tone = value.as_str().map(str::to_owned),
+            FIELD_SATURATION_LEVEL => manual.saturation_level = value.as_str().map(str::to_owned),
+            FIELD_DOMINANT_COLOR_CATEGORY => {
+                manual.dominant_color_categories = Some(
+                    value
+                        .as_array()
+                        .ok_or_else(|| {
+                            AppError::InvalidArgument(
+                                "stored dominant color override is not an array".to_owned(),
+                            )
+                        })?
+                        .iter()
+                        .filter_map(|value| value.as_str().map(str::to_owned))
+                        .collect(),
+                )
+            }
+            _ => {}
+        }
+    }
+
+    values = asset_ids.iter().copied().map(Value::Integer).collect();
+    let mut statement = connection.prepare(&format!(
+        "SELECT asset_id, tag_id, state
+         FROM manual_tag_overrides
+         WHERE asset_id IN ({ids})
+         ORDER BY asset_id, tag_id",
+        ids = ids,
+    ))?;
+    let rows = statement.query_map(params_from_iter(values.iter()), |row| {
+        Ok((
+            row.get::<_, i64>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, String>(2)?,
+        ))
+    })?;
+    for row in rows {
+        let (asset_id, tag_id, state) = row?;
+        let manual = result.entry(asset_id).or_default();
+        let tag_id = canonical_label_id(&tag_id).to_owned();
+        match state.as_str() {
+            "add" => manual.auxiliary_tag_additions.push(tag_id),
+            "remove" => manual.auxiliary_tag_removals.push(tag_id),
+            _ => {}
+        }
+    }
+    Ok(result)
+}
+
+fn classification_revisions_for_assets(
+    connection: &Connection,
+    asset_ids: &[i64],
+) -> AppResult<HashMap<i64, i64>> {
+    if asset_ids.is_empty() {
+        return Ok(HashMap::new());
+    }
+    let ids = placeholders(asset_ids.len());
+    let values = asset_ids
+        .iter()
+        .copied()
+        .map(Value::Integer)
+        .collect::<Vec<_>>();
+    let mut statement = connection.prepare(&format!(
+        "SELECT id, classification_revision FROM assets WHERE id IN ({ids})",
+        ids = ids,
+    ))?;
+    let rows = statement.query_map(params_from_iter(values.iter()), |row| {
+        Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?))
+    })?;
+    rows.collect::<Result<HashMap<_, _>, _>>()
+        .map_err(AppError::from)
 }
 
 fn delete_subject_identity(transaction: &Transaction<'_>, asset_id: i64) -> AppResult<()> {
@@ -3181,32 +3740,46 @@ fn effective_classification_for_asset(
         [asset.id],
         |row| row.get(0),
     )?;
+    let semantic_labels = semantic_labels_for_asset(connection, asset.id)?;
+    let manual = manual_classification_for_asset(connection, asset.id)?;
+    Ok(resolve_effective_classification(
+        asset,
+        revision,
+        &semantic_labels,
+        manual,
+    ))
+}
+
+fn resolve_effective_classification(
+    asset: &AssetListItem,
+    revision: i64,
+    semantic_labels: &[SemanticLabelResult],
+    manual: ManualClassification,
+) -> EffectiveClassification {
     let mut auto = AutoClassification {
-        primary_category: asset
-            .semantic_labels
+        primary_category: semantic_labels
             .iter()
             .find(|label| label.is_primary)
-            .map(|label| label.label_id.clone()),
-        auxiliary_tags: asset
-            .semantic_labels
+            .map(|label| canonical_label_id(&label.label_id).to_owned()),
+        auxiliary_tags: semantic_labels
             .iter()
             .filter(|label| !label.is_primary)
-            .map(|label| label.label_id.clone())
-            .collect(),
+            .map(|label| canonical_label_id(&label.label_id).to_owned())
+            .collect::<Vec<_>>(),
         tone: asset.tone_label.clone(),
-        dominant_color_categories: asset.dominant_color_category.clone().into_iter().collect(),
+        dominant_color_categories: dominant_color_categories_for_asset(asset),
         saturation_level: asset.saturation_label.clone(),
     };
     if auto.primary_category.is_none()
         && asset.semantic_status == "completed"
         && asset.semantic_error.is_none()
     {
-        // UNKNOWN is a virtual rejection state. It is intentionally not a
-        // semantic_labels row and therefore has no model similarity score.
-        auto.primary_category = Some("unknown".to_owned());
+        // A rejected/low-confidence topic is intentionally not stored as a
+        // model label. It is still grouped under the photographer-facing
+        // abstract bucket so the UI never exposes a redundant "未知" class.
+        auto.primary_category = Some("photo_abstract".to_owned());
     }
-    let manual = manual_classification_for_asset(connection, asset.id)?;
-    Ok(resolve_classification(revision, auto, manual))
+    resolve_classification(revision, auto, manual)
 }
 
 fn manual_classification_for_asset(
@@ -3227,7 +3800,11 @@ fn manual_classification_for_asset(
         let (field, value_json) = row?;
         let value: serde_json::Value = serde_json::from_str(&value_json)?;
         match field.as_str() {
-            FIELD_PRIMARY_CATEGORY => manual.primary_category = value.as_str().map(str::to_owned),
+            FIELD_PRIMARY_CATEGORY => {
+                manual.primary_category = value
+                    .as_str()
+                    .map(|value| canonical_label_id(value).to_owned())
+            }
             FIELD_TONE => manual.tone = value.as_str().map(str::to_owned),
             FIELD_SATURATION_LEVEL => manual.saturation_level = value.as_str().map(str::to_owned),
             FIELD_DOMINANT_COLOR_CATEGORY => {
@@ -3259,6 +3836,7 @@ fn manual_classification_for_asset(
     })?;
     for row in rows {
         let (tag_id, state) = row?;
+        let tag_id = canonical_label_id(&tag_id).to_owned();
         match state.as_str() {
             "add" => manual.auxiliary_tag_additions.push(tag_id),
             "remove" => manual.auxiliary_tag_removals.push(tag_id),
@@ -3269,6 +3847,10 @@ fn manual_classification_for_asset(
 }
 
 fn apply_effective_fields(asset: &mut AssetListItem) {
+    if let Some(candidate) = asset.color_palette.as_ref().and_then(main_color_candidate) {
+        asset.dominant_color = Some(candidate.color.clone());
+        asset.dominant_color_category = Some(candidate.category.clone());
+    }
     asset.tone_label = asset.classification.tone.effective.clone();
     asset.saturation_label = asset.classification.saturation_level.effective.clone();
     asset.dominant_color_category = asset
@@ -3277,6 +3859,47 @@ fn apply_effective_fields(asset: &mut AssetListItem) {
         .effective
         .as_ref()
         .and_then(|values| values.first().cloned());
+}
+
+fn dominant_color_categories_for_asset(asset: &AssetListItem) -> Vec<String> {
+    let mut categories = Vec::new();
+    if let Some(palette) = &asset.color_palette {
+        let meaningful = palette
+            .coverage_palette
+            .iter()
+            .filter(|candidate| candidate.area_coverage >= crate::imaging::MIN_MAIN_COLOR_AREA)
+            .take(2)
+            .collect::<Vec<_>>();
+        let candidates = if meaningful.is_empty() {
+            palette.coverage_palette.first().into_iter().collect()
+        } else {
+            meaningful
+        };
+        for candidate in candidates {
+            if !categories.iter().any(|value| value == &candidate.category) {
+                categories.push(candidate.category.clone());
+            }
+        }
+    }
+    if categories.is_empty()
+        && let Some(category) = &asset.dominant_color_category
+    {
+        categories.push(category.clone());
+    }
+    categories
+}
+
+fn main_color_candidate(palette: &ColorPalette) -> Option<&crate::models::ColorCandidate> {
+    palette
+        .coverage_palette
+        .iter()
+        .find(|candidate| candidate.area_coverage >= crate::imaging::MIN_MAIN_COLOR_AREA)
+        .or_else(|| palette.coverage_palette.first())
+        .or_else(|| palette.prominent_palette.first())
+}
+
+fn parse_color_palette(value: Option<String>) -> Option<ColorPalette> {
+    value.and_then(|value| serde_json::from_str::<ColorPalette>(&value).ok())
 }
 
 fn semantic_progress_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<SemanticProgress> {
@@ -3888,6 +4511,21 @@ mod tests {
     use super::*;
 
     #[test]
+    fn hue_range_bins_wrap_around_the_red_boundary() {
+        assert_eq!(hue_bins_for_range(0.0, 15.0), vec![0, 11]);
+        assert_eq!(hue_bins_for_range(45.0, 30.0), vec![0, 1, 2]);
+        assert_eq!(hue_bins_for_range(-30.0, 15.0), vec![10, 11]);
+    }
+
+    #[test]
+    fn hue_match_threshold_scales_with_strictness() {
+        assert!((color_hue_match_threshold(None) - 0.415).abs() < 1e-9);
+        assert!((color_hue_match_threshold(Some(0.0)) - 0.08).abs() < 1e-9);
+        assert!((color_hue_match_threshold(Some(1.0)) - 0.75).abs() < 1e-9);
+        assert!((color_hue_match_threshold(Some(2.0)) - 0.75).abs() < 1e-9);
+    }
+
+    #[test]
     fn initialization_and_migration_are_idempotent() {
         let temp = tempfile::tempdir().expect("temp dir");
         let repository = Repository::new(temp.path().join("database.sqlite3"));
@@ -3925,6 +4563,42 @@ mod tests {
                 .expect("column lookup");
             assert_eq!(exists, 1, "missing asset column {column}");
         }
+    }
+
+    #[test]
+    fn active_semantic_model_key_is_persisted_for_startup_restore() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let repository = Repository::new(temp.path().join("database.sqlite3"));
+        repository.initialize().expect("initialize");
+        let connection = repository.open().expect("open database");
+        connection
+            .execute(
+                "INSERT INTO semantic_models(
+                    name, version, analysis_version, license, source_url,
+                    model_sha256, tokenizer_sha256, model_path, tokenizer_path,
+                    execution_backend, installed_at, is_active
+                 ) VALUES(?1, ?2, ?3, 'Apache-2.0', 'https://example.test/model',
+                          'model-sha', 'tokenizer-sha', 'model.onnx', 'tokenizer.json',
+                          'cpu', '2026-08-17T00:00:00Z', 1)",
+                params![
+                    SIGLIP2_MODEL_NAME,
+                    SIGLIP2_MODEL_VERSION,
+                    SIGLIP2_ANALYSIS_VERSION
+                ],
+            )
+            .expect("insert active semantic model");
+        drop(connection);
+
+        assert_eq!(
+            repository
+                .active_semantic_model_key()
+                .expect("read active semantic model"),
+            Some((
+                SIGLIP2_MODEL_NAME.into(),
+                SIGLIP2_MODEL_VERSION.into(),
+                SIGLIP2_ANALYSIS_VERSION.into()
+            ))
+        );
     }
 
     #[test]
@@ -4042,8 +4716,8 @@ mod tests {
             .expect("create semantic job");
         let output = SubjectAnalysisOutput {
             predictions: vec![crate::subject::SubjectPrediction {
-                label_id: "person".into(),
-                display_name: "人物".into(),
+                label_id: "single_person".into(),
+                display_name: "单人".into(),
                 category_group: "subject".into(),
                 similarity: 0.91,
                 threshold: 0.45,
@@ -4066,14 +4740,14 @@ mod tests {
             .asset
             .semantic_labels
             .iter()
-            .find(|label| label.label_id == "person")
+            .find(|label| label.label_id == "single_person")
             .expect("person label");
-        assert_eq!(person.display_name, "人物");
+        assert_eq!(person.display_name, "单人");
         assert_eq!(person.category_group, "subject");
         assert!(!person.is_primary);
         assert_eq!(
             detail.asset.classification.auxiliary_tags.effective,
-            vec!["person"]
+            vec!["single_person"]
         );
 
         let filtered = repository
@@ -4084,7 +4758,7 @@ mod tests {
                 1,
                 100,
                 &AssetFilter {
-                    auxiliary_tags: vec!["person".into()],
+                    auxiliary_tags: vec!["single_person".into()],
                     ..AssetFilter::default()
                 },
             )
@@ -4499,7 +5173,13 @@ mod tests {
                 "INSERT INTO color_features(
                     asset_id, saturation_mean, chroma_mean, dominant_color_category,
                     dominant_colors_json, saturation_label, algorithm_version, analyzed_at
-                 ) VALUES(?1, 0.6, 0.5, 'blue', '[\"blue\"]', 'high', 'test', ?2)",
+                 ) VALUES(?1, 0.6, 0.5, 'blue',
+                    '{\"algorithmVersion\":\"accent-oklab-v3\",\"coveragePalette\":[
+                        {\"rank\":1,\"color\":\"#376BB5\",\"category\":\"blue\",\"areaCoverage\":0.62,\"saliencyCoverage\":0.50,\"localContrast\":0.3,\"chroma\":0.14,\"spatialCoherence\":0.8}
+                    ],\"prominentPalette\":[
+                        {\"rank\":1,\"color\":\"#E83A2F\",\"category\":\"red\",\"areaCoverage\":0.34,\"saliencyCoverage\":0.46,\"localContrast\":0.5,\"chroma\":0.18,\"spatialCoherence\":0.7},
+                        {\"rank\":2,\"color\":\"#376BB5\",\"category\":\"blue\",\"areaCoverage\":0.28,\"saliencyCoverage\":0.29,\"localContrast\":0.3,\"chroma\":0.14,\"spatialCoherence\":0.6}
+                    ]}', 'high', 'test', ?2)",
                 params![asset_id, timestamp],
             )
             .expect("seed color");
@@ -4512,9 +5192,9 @@ mod tests {
                  ) VALUES(?1, 'landscape', 'Landscape', 0.9, 0.2, ?2, ?3, ?4, ?5, 'scene', ?6, ?7, 1, 0)",
                 params![
                     asset_id,
-                    MODEL_NAME,
-                    MODEL_VERSION,
-                    SEMANTIC_ANALYSIS_VERSION,
+                    SIGLIP2_MODEL_NAME,
+                    SIGLIP2_MODEL_VERSION,
+                    SIGLIP2_ANALYSIS_VERSION,
                     TAXONOMY_VERSION,
                     timestamp,
                     fingerprint
@@ -4530,9 +5210,9 @@ mod tests {
                  ) VALUES(?1, 'outdoor', 'Outdoor', 0.8, 0.2, ?2, ?3, ?4, ?5, 'context', ?6, ?7, 0, 0)",
                 params![
                     asset_id,
-                    MODEL_NAME,
-                    MODEL_VERSION,
-                    SEMANTIC_ANALYSIS_VERSION,
+                    SIGLIP2_MODEL_NAME,
+                    SIGLIP2_MODEL_VERSION,
+                    SIGLIP2_ANALYSIS_VERSION,
                     TAXONOMY_VERSION,
                     timestamp,
                     fingerprint
@@ -4546,6 +5226,105 @@ mod tests {
             )
             .expect("finish seed library");
         (library_id, asset_id)
+    }
+
+    #[test]
+    fn hue_range_filter_respects_user_strictness_threshold() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let repository = Repository::new(temp.path().join("database.sqlite3"));
+        repository.initialize().expect("initialize");
+        let (library_id, asset_id) = seed_classifiable_asset(&repository, "hue-strictness");
+        let connection = repository.open().expect("open database");
+        connection
+            .execute(
+                "UPDATE color_features
+                 SET hue_histogram_json=?1
+                 WHERE asset_id=?2",
+                params!["[0.5,0.5,0,0,0,0,0,0,0,0,0,0]", asset_id],
+            )
+            .expect("seed hue histogram");
+        drop(connection);
+
+        let list_with_strictness = |strictness| {
+            repository
+                .list_assets(
+                    library_id,
+                    AssetSortField::FileName,
+                    SortDirection::Asc,
+                    1,
+                    100,
+                    &AssetFilter {
+                        color_hue_center: Some(0.0),
+                        color_hue_width: Some(15.0),
+                        color_hue_strictness: Some(strictness),
+                        ..AssetFilter::default()
+                    },
+                )
+                .expect("hue range filter")
+                .total
+        };
+
+        assert_eq!(list_with_strictness(0.0), 1);
+        assert_eq!(list_with_strictness(0.5), 1);
+        assert_eq!(list_with_strictness(1.0), 0);
+    }
+
+    #[test]
+    fn favorite_and_collection_sources_share_the_asset_query_contract() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let repository = Repository::new(temp.path().join("database.sqlite3"));
+        repository.initialize().expect("initialize");
+        let (library_id, asset_id) = seed_classifiable_asset(&repository, "sources");
+        let connection = repository.open().expect("open database");
+        connection
+            .execute("UPDATE assets SET is_favorite=1 WHERE id=?1", [asset_id])
+            .expect("mark favorite");
+
+        let favorite_page = repository
+            .list_assets(
+                library_id,
+                AssetSortField::FileName,
+                SortDirection::Asc,
+                1,
+                100,
+                &AssetFilter {
+                    favorite_only: true,
+                    ..AssetFilter::default()
+                },
+            )
+            .expect("favorite source");
+        assert_eq!(favorite_page.total, 1);
+
+        connection
+            .execute(
+                "INSERT INTO collections(name, description, created_at, updated_at)
+                 VALUES('Source collection', '', ?1, ?1)",
+                [now()],
+            )
+            .expect("create collection");
+        let collection_id = connection.last_insert_rowid();
+        connection
+            .execute(
+                "INSERT INTO collection_assets(collection_id, asset_id, added_at)
+                 VALUES(?1, ?2, ?3)",
+                params![collection_id, asset_id, now()],
+            )
+            .expect("add collection member");
+
+        let collection_page = repository
+            .list_assets(
+                library_id,
+                AssetSortField::FileName,
+                SortDirection::Asc,
+                1,
+                100,
+                &AssetFilter {
+                    collection_id: Some(collection_id),
+                    ..AssetFilter::default()
+                },
+            )
+            .expect("collection source");
+        assert_eq!(collection_page.total, 1);
     }
 
     #[test]
@@ -4642,6 +5421,24 @@ mod tests {
             detail.asset.classification.auxiliary_tags.effective,
             vec!["outdoor"]
         );
+        assert_eq!(
+            detail.asset.classification.dominant_color_categories.auto,
+            Some(vec!["blue".to_owned()])
+        );
+        let auto_palette_filter = repository
+            .list_assets(
+                library_id,
+                AssetSortField::FileName,
+                SortDirection::Asc,
+                1,
+                100,
+                &AssetFilter {
+                    color_categories: vec!["red".into()],
+                    ..AssetFilter::default()
+                },
+            )
+            .expect("automatic palette filter");
+        assert_eq!(auto_palette_filter.total, 0);
 
         let detail = repository
             .update_classification_override(
@@ -4779,7 +5576,7 @@ mod tests {
     }
 
     #[test]
-    fn completed_without_current_scene_is_virtual_unknown_and_filterable() {
+    fn completed_without_current_scene_is_virtual_abstract_and_filterable() {
         let temp = tempfile::tempdir().expect("temp dir");
         let repository = Repository::new(temp.path().join("database.sqlite3"));
         repository.initialize().expect("initialize");
@@ -4813,11 +5610,11 @@ mod tests {
             .expect("seed stale taxonomy label");
         let detail = repository
             .get_asset_detail(asset_id)
-            .expect("load virtual unknown detail");
+            .expect("load virtual abstract detail");
         assert!(detail.asset.semantic_labels.is_empty());
         assert_eq!(
             detail.asset.classification.primary_category.auto.as_deref(),
-            Some("unknown")
+            Some("photo_abstract")
         );
         assert_eq!(
             detail
@@ -4826,10 +5623,10 @@ mod tests {
                 .primary_category
                 .effective
                 .as_deref(),
-            Some("unknown")
+            Some("photo_abstract")
         );
 
-        let unknown_filter = repository
+        let abstract_filter = repository
             .list_assets(
                 library_id,
                 AssetSortField::FileName,
@@ -4837,17 +5634,19 @@ mod tests {
                 1,
                 100,
                 &AssetFilter {
-                    primary_categories: vec!["unknown".into()],
+                    primary_categories: vec!["photo_abstract".into()],
                     ..AssetFilter::default()
                 },
             )
-            .expect("filter virtual unknown");
-        assert_eq!(unknown_filter.total, 1);
+            .expect("filter virtual abstract");
+        assert_eq!(abstract_filter.total, 1);
         let groups = repository
             .list_semantic_groups(library_id)
-            .expect("list virtual unknown group");
+            .expect("list virtual abstract group");
         assert!(groups.iter().any(|group| {
-            group.label_id == "unknown" && group.category_group == "scene" && group.asset_count == 1
+            group.label_id == "photo_abstract"
+                && group.category_group == "scene"
+                && group.asset_count == 1
         }));
     }
 

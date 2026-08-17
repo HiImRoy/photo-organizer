@@ -11,11 +11,11 @@
 
 ## 文件完整性
 
-| 文件 | SHA-256 |
-| --- | --- |
-| `resnet18_places365.onnx` | `3c3cd0d42693e2957fcaa0bc365ce78e169a2e1162356742adfbd11077e8f7bf` |
+| 文件                       | SHA-256                                                            |
+| -------------------------- | ------------------------------------------------------------------ |
+| `resnet18_places365.onnx`  | `3c3cd0d42693e2957fcaa0bc365ce78e169a2e1162356742adfbd11077e8f7bf` |
 | `categories_places365.txt` | `6cc3f1f8eae85b7016dc634e2d333cdcce5fd16cfada4afd87977fff5f8b12ba` |
-| `IO_places365.txt` | `d7e6abfeb228d789720326e630bedd231a7eaedcae8fd13d6d9dcd8eca95f59e` |
-| `PLACES365-LICENSE.txt` | `0443593167099f156685221339c6e876cccd02ae5f2bec3e588c5231a14c1062` |
+| `IO_places365.txt`         | `d7e6abfeb228d789720326e630bedd231a7eaedcae8fd13d6d9dcd8eca95f59e` |
+| `PLACES365-LICENSE.txt`    | `0443593167099f156685221339c6e876cccd02ae5f2bec3e588c5231a14c1062` |
 
 英文叶子 ID 只用于模型对齐和内部证据，不直接在图库界面展示；界面使用 `src-tauri/src/places365.rs` 中的中文场景簇名称。

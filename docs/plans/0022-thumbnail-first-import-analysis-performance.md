@@ -2,18 +2,19 @@
 
 ## Status
 
-Completed — thumbnail-first implementation, isolated benchmarks, regression
-tests, documentation, and frontend/Rust verification are complete.
+Superseded — see `docs/plans/0036-thumbnail-only-decode.md` for the current
+strict contract and measurements.
+
+> 本计划记录的是过渡阶段。文中“首次导入允许完整源图解码”的表述是历史
+> 基线，不能作为当前实现、性能目标或回归测试的许可。
 
 ## Problem statement
 
-Cold import is still allowed to decode a full-resolution source image in order
-to create the first application thumbnail. That work is necessary only when no
-usable preview cache exists; it must not be repeated for basic-feature
-reanalysis, recovered jobs, or semantic classification. Semantic classification
-already receives the `grid-640-v1` cache path, but the worker uses a small batch
-and can turn one missing cache path into a batch failure followed by one model
-retry per item.
+Cold import previously decoded a full-resolution source image in order to create
+the first application thumbnail. That historical path was removed by plan 0036:
+current import must use an embedded preview or a platform bounded decoder. Basic
+feature reanalysis and semantic classification continue to use only the
+`grid-640-v1` cache path.
 
 ## Baseline evidence
 
@@ -36,7 +37,8 @@ retry per item.
    cache for basic features and read only source metadata/dimensions; never
    decode source pixels again.
 2. Reuse a valid embedded JPEG EXIF thumbnail when one exists, falling back to a
-   single source decode only when no usable preview is available.
+   single bounded source-thumbnail extraction only when no usable preview is
+   available; never materialize full-resolution source pixels.
 3. Keep semantic input strict: only a current `grid-640-v1` file may reach the
    model; missing cache entries fail visibly without invoking a full-resolution
    fallback or a retry storm.
@@ -68,10 +70,9 @@ retry per item.
 
 ## Implemented evidence (2026-08-10)
 
-- Isolated release import benchmark with two generated 4000x3000 JPEG fixtures:
-  cold import was approximately 360ms, including 223ms source decoding and
-  117ms resizing; fingerprinting was approximately 5ms and database writes
-  approximately 29ms.
+- The old isolated release import benchmark with two generated 4000x3000 JPEG
+  fixtures recorded 223ms of source decoding. This is historical evidence for
+  why the strict bounded decoder was required, not a current acceptance target.
 - The same isolated database after removing only the basic-feature rows reused
   the cached thumbnails in approximately 204ms: source pixel decode was 0ms,
   cached-thumbnail decode was approximately 14ms, source-dimension reads were
@@ -83,6 +84,6 @@ retry per item.
   fixtures, with zero failures. The run is still subject to model/runtime
   variance; the key correctness guarantee is that semantic candidates are
   cache-only and are persisted per batch.
-- Verification passed: Rust 57 library tests plus all binary-target tests,
+- Verification passed at the time of this transition: Rust 57 library tests plus all binary-target tests,
   Rust formatting, Clippy with warnings denied, frontend format/lint/typecheck,
   36 frontend tests, and the production build.

@@ -40,7 +40,7 @@ import {
   type WorkflowAsset,
 } from "../types";
 
-type WorkflowTab =
+export type WorkflowTool =
   "favorites" | "collections" | "search" | "duplicates" | "similar" | "compare" | "edit";
 
 interface WorkflowWorkspaceProps {
@@ -52,14 +52,18 @@ interface WorkflowWorkspaceProps {
   onSelectAsset: (assetId: number) => void;
   onBack: () => void;
   onFavoriteChange: (assetId: number, favorite: boolean) => void;
+  onCollectionSourceChange?: (collectionId: number) => void;
+  onCollectionsChange?: () => void;
+  initialTool?: WorkflowTool;
+  embedded?: boolean;
 }
 
-const tabs: ReadonlyArray<{ id: WorkflowTab; label: string; note: string }> = [
+const tabs: ReadonlyArray<{ id: WorkflowTool; label: string; note: string }> = [
   { id: "favorites", label: "收藏", note: "独立于星级" },
   { id: "collections", label: "集合", note: "虚拟分组" },
   { id: "search", label: "AI 搜索", note: "完全本地" },
   { id: "duplicates", label: "重复清理", note: "只生成审阅集" },
-  { id: "similar", label: "相似聚类", note: "TinyCLIP 向量" },
+  { id: "similar", label: "相似聚类", note: "当前题材模型向量" },
   { id: "compare", label: "比较", note: "最多四张" },
   { id: "edit", label: "图像编辑", note: "非破坏性" },
 ];
@@ -73,8 +77,12 @@ export function WorkflowWorkspace({
   onSelectAsset,
   onBack,
   onFavoriteChange,
+  onCollectionSourceChange,
+  onCollectionsChange,
+  initialTool = "search",
+  embedded = false,
 }: WorkflowWorkspaceProps) {
-  const [tab, setTab] = useState<WorkflowTab>("search");
+  const [tab, setTab] = useState<WorkflowTool>(initialTool);
   const [favorites, setFavorites] = useState<WorkflowAsset[]>([]);
   const [collections, setCollections] = useState<CollectionSummary[]>([]);
   const [collection, setCollection] = useState<CollectionDetail | null>(null);
@@ -85,6 +93,7 @@ export function WorkflowWorkspace({
   const [busy, setBusy] = useState(true);
   const [message, setMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const activeTab = tabs.find((item) => item.id === tab) ?? tabs[0];
 
   useEffect(() => {
     let cancelled = false;
@@ -130,60 +139,79 @@ export function WorkflowWorkspace({
     (collectionId: number) =>
       run(async () => {
         setCollection(await fetchCollection(collectionId));
+        if (!embedded) onCollectionSourceChange?.(collectionId);
       }),
-    [run],
+    [embedded, onCollectionSourceChange, run],
   );
 
   return (
-    <section className="workflow-workspace" aria-label="查找与审阅">
-      <aside className="workflow-nav">
-        <div className="workflow-nav-heading">
-          <small>QUERY / REVIEW CONTEXT</small>
-          <h2>查找与审阅</h2>
-          <p>原图只读，收藏与集合只写入本地数据库。</p>
-        </div>
-        <div className="workflow-scope-summary">
-          <strong>{scopeDescription.label}</strong>
-          <span>
-            {scopeDescription.count.toLocaleString()} 张 ·
-            {scope.kind === "selection" ? "当前选择范围" : "当前查询范围"}
-          </span>
-          <small>{scope.kind === "selection" ? "显式选择范围" : "动态查询范围"}</small>
-        </div>
-        <nav aria-label="工作流工具">
-          {tabs.map((item) => (
-            <button
-              type="button"
-              key={item.id}
-              className={tab === item.id ? "is-active" : ""}
-              onClick={() => {
-                setTab(item.id);
-                setError(null);
-                setMessage(null);
-              }}
-            >
-              <span>{item.label}</span>
-              <small>{item.note}</small>
-            </button>
-          ))}
-        </nav>
-        <div className="workflow-selection-note">
-          <strong>{selectedAssetIds.length}</strong>
-          <span>张已选择</span>
-          <small>比较、集合和编辑会复用当前范围中的显式选择。</small>
-        </div>
-        <button type="button" className="workflow-back-button" onClick={onBack}>
-          返回图库
-        </button>
-      </aside>
+    <section
+      className={`workflow-workspace${embedded ? " workflow-workspace-embedded" : ""}`}
+      aria-label="查找与审阅"
+    >
+      {!embedded ? (
+        <aside className="workflow-nav">
+          <div className="workflow-nav-heading">
+            <small>QUERY / REVIEW CONTEXT</small>
+            <h2>查找与审阅</h2>
+            <p>原图只读，收藏与集合只写入本地数据库。</p>
+          </div>
+          <div className="workflow-scope-summary">
+            <strong>{scopeDescription.label}</strong>
+            <span>
+              {scopeDescription.count.toLocaleString()} 张 ·
+              {scope.kind === "selection" ? "当前选择范围" : "当前查询范围"}
+            </span>
+            <small>{scope.kind === "selection" ? "显式选择范围" : "动态查询范围"}</small>
+          </div>
+          <nav aria-label="工作流工具">
+            {tabs.map((item) => (
+              <button
+                type="button"
+                key={item.id}
+                className={tab === item.id ? "is-active" : ""}
+                onClick={() => {
+                  setTab(item.id);
+                  setError(null);
+                  setMessage(null);
+                }}
+              >
+                <span>{item.label}</span>
+                <small>{item.note}</small>
+              </button>
+            ))}
+          </nav>
+          <div className="workflow-selection-note">
+            <strong>{selectedAssetIds.length}</strong>
+            <span>张已选择</span>
+            <small>比较、集合和编辑会复用当前范围中的显式选择。</small>
+          </div>
+          <button type="button" className="workflow-back-button" onClick={onBack}>
+            返回图库
+          </button>
+        </aside>
+      ) : null}
 
       <div className="workflow-content">
         <header className="workflow-header">
           <div>
-            <small>{tabs.find((item) => item.id === tab)?.note}</small>
-            <h1>{tabs.find((item) => item.id === tab)?.label}</h1>
+            <small>{embedded ? `当前范围 · ${scopeDescription.label}` : activeTab.note}</small>
+            <h1>{activeTab.label}</h1>
+            {embedded ? (
+              <span className="workflow-context-scope">
+                {scopeDescription.count.toLocaleString()} 张 ·
+                {scope.kind === "selection" ? "显式选择范围" : "当前查询范围"}
+              </span>
+            ) : null}
           </div>
-          <span className="workflow-safety-pill">LOCAL · SOURCE READ-ONLY</span>
+          <div className="workflow-header-actions">
+            <span className="workflow-safety-pill">LOCAL · SOURCE READ-ONLY</span>
+            {embedded ? (
+              <button type="button" className="workflow-back-button" onClick={onBack}>
+                返回图库
+              </button>
+            ) : null}
+          </div>
         </header>
         {error ? <div className="workflow-banner is-error">{error}</div> : null}
         {message ? <div className="workflow-banner">{message}</div> : null}
@@ -216,6 +244,8 @@ export function WorkflowWorkspace({
                 const created = await createCollection(name);
                 setCollections(await fetchCollections());
                 setCollection(await fetchCollection(created.id));
+                if (!embedded) onCollectionSourceChange?.(created.id);
+                onCollectionsChange?.();
                 setMessage(`已创建虚拟集合“${created.name}”。`);
               })
             }
@@ -224,6 +254,7 @@ export function WorkflowWorkspace({
                 await deleteCollection(collectionId);
                 setCollection(null);
                 setCollections(await fetchCollections());
+                onCollectionsChange?.();
                 setMessage("集合已删除，原始图片未发生变化。");
               })
             }
@@ -232,6 +263,7 @@ export function WorkflowWorkspace({
                 await addAssetsToCollection(collectionId, selectedAssetIds);
                 setCollection(await fetchCollection(collectionId));
                 setCollections(await fetchCollections());
+                onCollectionsChange?.();
                 setMessage(`已加入 ${selectedAssetIds.length} 张图片。`);
               })
             }
@@ -240,6 +272,7 @@ export function WorkflowWorkspace({
                 await removeAssetsFromCollection(collectionId, [assetId]);
                 setCollection(await fetchCollection(collectionId));
                 setCollections(await fetchCollections());
+                onCollectionsChange?.();
               })
             }
           />
@@ -473,7 +506,7 @@ function SearchView({
     <div className="workflow-section">
       <SectionIntro
         title="用自然语言找图"
-        body="查询和图片向量均在本机 TinyCLIP 中计算。支持常见中文主题词映射，不发送到网络。"
+        body="查询和图片向量均在本机当前题材模型中计算，默认使用 SigLIP 2 Base。支持常见中文主题词映射，不发送到网络。"
         metric={result ? `${result.items.length} 个结果` : "LOCAL AI"}
       />
       <form
@@ -577,7 +610,7 @@ function SimilarityView({
     <div className="workflow-section">
       <SectionIntro
         title="视觉相似图片"
-        body="复用当前 TinyCLIP 图像向量；单图搜索使用精确余弦，相似组先按向量主维度召回再精排。"
+        body="复用当前题材模型的图像向量；单图搜索使用精确余弦，相似组先按向量主维度召回再精排。"
         metric={clusters ? `${clusters.clusters.length} 组` : `${similarAssets.length} 张`}
       />
       <div className="workflow-actions similarity-actions">

@@ -7,11 +7,15 @@
 ### 2026-08-10 执行记录
 
 - 新增执行计划 [0025-semantic-taxonomy-and-open-set](../plans/0025-semantic-taxonomy-and-open-set.md) 和 ADR 0006。
+- 新增执行计划 [0028-checkpoint-d-accent-color](../plans/0028-checkpoint-d-accent-color.md)，明确多强调色的缩略图-only、感知颜色空间和可解释排序方案。
 - `semantic_labels` 通过 migration 0012 增加 `category_group` 与 `taxonomy_version`；旧结果保留但不会混入当前 taxonomy。
 - 当前自动标签分为 `scene`（互斥且最多一个）、`subject`（多选）和 `context`（多选）。旧 `primary_category` 继续作为 scene 的兼容槽位。
 - `unknown` 已从 TinyCLIP prompt 和相似度榜单移除；完成但没有可靠 scene 的结果由 Effective Resolver 生成虚拟拒识状态，FAILED 仍不生成自动分类。
 - 侧栏、详情、场景分组和筛选已消费同一分组元数据；未知筛选使用虚拟状态条件。
-- Rust 58 个库测试 + 3 个二进制测试、clippy、fmt check，以及前端 38 个测试、typecheck、format check 已通过；尚未完成人工语义质量验收。
+- D8 的颜色链路已完成一次职责修订，当前版本为 `basic-color-v6` / `accent-oklab-v3`：分析只使用现有 `grid-640-v1` 缩略图，在 OKLab 中执行确定性的加权聚类，并输出 `coveragePalette` 与 `prominentPalette`。
+- 调色板候选保存面积占比、显著性占比、局部对比度、色度和空间连续性；`coveragePalette` 负责兼容主色、自动颜色类别和颜色筛选，`prominentPalette` 只负责强调色视觉展示。大面积彩色区域可优先于黑色剪影，小面积高对比主体仍只进入强调色；手动分类覆盖仍保持优先级。
+- Rust 图像/数据库回归测试和前端多调色板展示测试已加入；D4-D7、D9-D10 的数据集、阈值校准、独立 pipeline 过期判断和人工视觉复核仍未完成。
+- 当前增量验证：Rust `--lib --no-default-features` 78 个库测试、`clippy --all-features --all-targets -D warnings`，以及前端 40 个测试、lint、typecheck 和 build 已通过；尚未完成人工语义和颜色质量验收。
 
 ## 1. Goal
 
@@ -117,9 +121,16 @@ Imaging / Color：
   - semantic_labels_for_asset 通过当前模型、分析版本、taxonomy 和 fingerprint 读取结果。
   - list_semantic_groups 同时返回 scene、subject、context 的有效标签计数，并包含虚拟 unknown。
 - [src-tauri/src/imaging.rs](E:/Code/Codex/photo-organizer/src-tauri/src/imaging.rs)
-  - ANALYSIS_VERSION 当前同时承担基础 imaging 版本。
-  - analyze_rgba 计算 brightness、saturation、chroma、neutral ratio、dominant color 和 coverage。
-  - 当前颜色候选来自量化 RGB bin 的权重排序，没有显式 saliency map、感知空间聚类或空间连续性约束；虽然保存 top colors，但业务结果仍以单一 dominant color category 为主。
+  - `ANALYSIS_VERSION` 当前为 `basic-color-v6`，`COLOR_ALGORITHM_VERSION` 为 `accent-oklab-v3`；本版本将面积主色与视觉强调色分离，保留低饱和但有明确色相的照片颜色，并对大面积彩色区域与暗色剪影增加明确的主色决策规则；独立 tone/imaging stale 拆分仍是 D7 的未完成项。
+  - `analyze_rgba` 计算 brightness、saturation、chroma、neutral ratio、兼容主色字段和多候选 palette。
+  - 颜色候选先按 12-bit RGB 桶聚合，再在 OKLab 中执行确定性的加权 K-means；排序综合面积、缩略图局部对比度、色度、构图中心先验和空间连续性，并以感知距离合并近似颜色、过滤孤立噪点。
+  - `dominant_colors_json` 现在保存带 `algorithmVersion` 的 `ColorPalette` 对象，其中 `coveragePalette` 最多 5 个、`prominentPalette` 最多 3 个；旧的 `dominant_color_rgb/category` 由面积主色候选回填，保证旧查询和整理模板兼容。
+  - 所有计算只读取 `grid-640-v1` 缩略图，不新增模型或运行时依赖。
+- [src-tauri/src/db.rs](E:/Code/Codex/photo-organizer/src-tauri/src/db.rs)
+  - `AssetListItem` 读取并返回 `colorPalette`；Effective 分类解析 `coveragePalette` 中达到主色覆盖率阈值的多个稳定颜色类别，`prominentPalette` 不参与自动主色分类。
+  - 主色筛选读取 `coveragePalette` 中达到主色覆盖率阈值的候选，手动 `dominant_color_category` override 仍覆盖自动结果；旧数据没有面积调色板时回退到兼容标量字段。
+- [src/components/AssetCard.tsx](E:/Code/Codex/photo-organizer/src/components/AssetCard.tsx)、[src/components/DetailPanel.tsx](E:/Code/Codex/photo-organizer/src/components/DetailPanel.tsx)
+  - 图片卡片显示最多三个强调色圆点；详情显示强调色和面积色两组候选、中文类别、面积/显著性占比及算法版本。
   - tone_label 当前返回 low_key、mid_tone、high_key。
 - [src-tauri/src/bin/semantic-evaluate.rs](E:/Code/Codex/photo-organizer/src-tauri/src/bin/semantic-evaluate.rs)
   - 当前提供 Semantic evaluation 工具。
@@ -134,7 +145,7 @@ Imaging / Color：
 - subject：车辆、花卉、山、水体、森林。
 - context：室内、街道、夜景、日落。
 - 未知不出现在 catalog；前端用虚拟 descriptor 提供筛选和手动恢复入口，但不显示模型分数。
-- 这不代表 D4-D10 已完成，完整阈值校准、evaluation dataset、Color pipeline 和人工视觉复核仍按本 Checkpoint 的剩余任务执行。
+- 这不代表 D4-D10 已完成；完整阈值校准、evaluation dataset、Color/Tone 独立 pipeline 版本、before/after 报告和人工视觉复核仍按本 Checkpoint 的剩余任务执行。
 
 ## 6. Target State
 

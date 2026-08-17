@@ -1,6 +1,8 @@
 # Import Performance Optimization Plan
 
-Status: IMPLEMENTED_PENDING_MANUAL
+Status: SUPERSEDED — see `docs/plans/0036-thumbnail-only-decode.md`
+
+> 本计划中关于“完整源图解码”的内容是 2026-08-08 以前的历史基线，不再是当前实现或验收标准。当前硬规则是：导入、分析和模型推理只能使用应用私有缩略图或有界缩略图派生输入；原文件仅用于元数据、指纹和受控的目标尺寸缩略图提取。
 
 ## Goal
 
@@ -51,10 +53,11 @@ the authoritative full-content fingerprint.
 
 Before changing image or database algorithms again, record cumulative microsecond
 timings for directory discovery, library ownership lookup, metadata/cache lookup,
-full-content fingerprinting, EXIF/decode, resize, feature extraction, thumbnail
-encoding/write, and SQLite writes. The snapshot is attached to throttled scan
-progress events and written to the application log at scan completion so a real
-library import can identify its dominant stage without touching source files.
+full-content fingerprinting, bounded thumbnail extraction/decode, feature
+extraction, thumbnail encoding/write, and SQLite writes. The snapshot is attached
+to throttled scan progress events and written to the application log at scan
+completion so a real library import can identify its dominant stage without
+materializing source pixels.
 
 ## Latest log diagnosis (2026-08-08)
 
@@ -83,12 +86,10 @@ cause of the observed import delay. The existing shared 640px buffer already
 avoids a second feature-analysis resize; changing the feature algorithm will not
 address this bottleneck.
 
-This log was produced by the current `target/debug/photo-organizer.exe`. No
-Release executable was present in `src-tauri/target/release` during diagnosis,
-so the first comparison must establish an optimized Release baseline. The
-current scanner also processes candidates serially, and the `resize` timer
-includes full-resolution EXIF orientation transforms and RGBA conversion, so
-the next measurement must split those substeps before selecting an algorithm.
+This log was produced by the historical `target/debug/photo-organizer.exe`
+before the thumbnail-only decoder was introduced. It is retained only to explain
+why the bounded WIC path was necessary; it must not be used as a description of
+the current importer.
 
 ## Targeted follow-up plan (P0 completed; mainline resumed)
 
@@ -179,17 +180,20 @@ classification semantics.
   no longer upscaled for small source images.
 - `ANALYSIS_VERSION` is now `basic-color-v3`; features sample the shared 640px buffer
   instead of creating a separate 320px image.
-- Sources up to and including 32MB are read once and reuse the same bytes for full BLAKE3 hashing,
-  EXIF parsing, and image decode. Larger sources retain streaming fingerprinting to
-  bound memory use.
+- Sources up to and including 32MB may be read once for full BLAKE3 hashing,
+  EXIF/embedded-preview metadata, and a controlled bounded-thumbnail request.
+  Larger sources retain streaming fingerprinting and path-based bounded
+  thumbnail extraction to bound memory use; no source-sized pixel buffer is
+  created.
 - Phase 2 coalesces scan events and job progress, throttles frontend refreshes, and
   avoids per-thumbnail physical disk flushes.
 - Phase 3 exposes cumulative scan-stage timings in scan progress; the temporary
-  final timing log used during diagnosis has been removed. Single-image preview
-  requests the original source first, falls back to a bounded screen preview on
-  read failure, and keeps heavy preview generation on a blocking worker.
-- Latest diagnosis showed that the earlier slow result came from the Debug build's
-  full-resolution image processing, not fingerprinting or SQLite. Release import
-  speed was manually accepted, and the temporary diagnostic log code has been
-  removed. P1-P3 remain available only as a future regression path.
+  final timing log used during diagnosis has been removed. Screen preview uses a
+  bounded preview cache. An explicitly requested `original` viewer tier remains
+  a viewing-only exception and must never be reused by import, analysis, or model
+  code.
+- The earlier slow result came from the Debug build's full-resolution image
+  processing, not fingerprinting or SQLite. That diagnosis led to the
+  thumbnail-only decoder in plan 0036; P1-P3 remain only as coordination and
+  regression follow-up work under the new contract.
 - Rust and frontend validation pass; source-integrity tests remain green.

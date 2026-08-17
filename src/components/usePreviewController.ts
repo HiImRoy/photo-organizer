@@ -4,6 +4,7 @@ import { fetchPreview } from "../api";
 import type { AssetListItem } from "../types";
 import { formatZoomPercent, smoothZoomLevel } from "./previewZoom";
 import type { NavigatorFrame, PreviewNavigatorProps } from "./PreviewNavigator";
+import { requestThumbnail } from "./thumbnailSource";
 
 const PREVIEW_TIMEOUT_MS = 15_000;
 const ORIGINAL_PREFETCH_DELAY_MS = 300;
@@ -46,6 +47,7 @@ function calculateFitScale(
 export interface PreviewController {
   asset: AssetListItem | null;
   stageRef: React.RefObject<HTMLDivElement | null>;
+  thumbnailSource: string | null;
   screenSource: string | null;
   displaySource: string | null;
   loadState: "loading" | "loaded" | "error";
@@ -74,6 +76,7 @@ export function usePreviewController(
   prefetchAssets: AssetListItem[] = [],
 ): PreviewController {
   const stageRef = useRef<HTMLDivElement | null>(null);
+  const [thumbnailSource, setThumbnailSource] = useState<string | null>(null);
   const [screenSource, setScreenSource] = useState<string | null>(null);
   const [originalSource, setOriginalSource] = useState<string | null>(null);
   const [loadState, setLoadState] = useState<"loading" | "loaded" | "error">("loading");
@@ -154,6 +157,7 @@ export function usePreviewController(
     const requestGeneration = ++generation.current;
     // The preview source is an async resource; clear it when the asset identity changes.
     // eslint-disable-next-line react-hooks/set-state-in-effect
+    setThumbnailSource(null);
     setScreenSource(null);
     setOriginalSource(null);
     setLoadState(assetId !== null ? "loading" : "loaded");
@@ -170,15 +174,26 @@ export function usePreviewController(
 
     if (assetId === null) return undefined;
 
+    const requestAsset = assetRef.current;
+    if (!requestAsset) return undefined;
+
+    void requestThumbnail(requestAsset.id)
+      .then((thumbnail) => {
+        if (generation.current !== requestGeneration) return;
+        setThumbnailSource(thumbnail);
+        // A cached thumbnail is already a valid visible preview.  The larger
+        // preview continues loading in the background without covering it
+        // with a loading state.
+        setLoadState("loaded");
+      })
+      .catch(() => undefined);
+
     const timeout = window.setTimeout(() => {
       if (generation.current !== requestGeneration) return;
-      generation.current += 1;
-      setLoadState("error");
+      setLoadState((current) => (current === "loaded" ? current : "error"));
     }, PREVIEW_TIMEOUT_MS);
     void (async () => {
       try {
-        const requestAsset = assetRef.current;
-        if (!requestAsset) return;
         const original = await loadOriginalForAsset(requestAsset);
         if (generation.current !== requestGeneration) return;
         setOriginalSource(original);
@@ -343,6 +358,11 @@ export function usePreviewController(
   }
 
   function onImageLoad(size: { width: number; height: number }) {
+    // Asset dimensions are already normalized for EXIF orientation during
+    // import.  Replacing them with HTMLImageElement.naturalWidth/Height
+    // after the original arrives can swap the axes for rotated JPEGs and
+    // briefly animate the preview to the wrong fit scale.
+    if (assetWidth > 1 && assetHeight > 1) return;
     if (!Number.isFinite(size.width) || !Number.isFinite(size.height)) return;
     const nextSize = {
       width: Math.max(1, size.width),
@@ -367,7 +387,9 @@ export function usePreviewController(
 
   const displayScale = currentScale();
   const displaySource =
-    zoom !== "fit" && zoom >= 1 && originalSource ? originalSource : screenSource;
+    zoom !== "fit" && zoom >= 1 && originalSource
+      ? originalSource
+      : (screenSource ?? thumbnailSource);
   const zoomLabel = zoom === "fit" ? formatZoomPercent(fitScale) : formatZoomPercent(zoom);
   const navigatorFrame = useMemo(() => {
     const scale = Math.max(displayScale, 0.0001);
@@ -400,6 +422,7 @@ export function usePreviewController(
   return {
     asset,
     stageRef,
+    thumbnailSource,
     screenSource,
     displaySource,
     loadState,

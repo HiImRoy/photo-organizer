@@ -6,7 +6,7 @@ import type { AssetListItem } from "../types";
 const thumbnailCache = new Map<number, string>();
 const thumbnailRequests = new Map<number, Promise<string>>();
 
-function requestThumbnail(assetId: number) {
+export function requestThumbnail(assetId: number) {
   const cached = thumbnailCache.get(assetId);
   if (cached) return Promise.resolve(cached);
 

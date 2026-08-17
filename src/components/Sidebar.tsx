@@ -2,13 +2,14 @@ import { useEffect, useRef, useState } from "react";
 
 import type {
   AssetFilter,
+  CollectionSummary,
   LibrarySummary,
   SemanticGroupSummary,
   SemanticLabelDescriptor,
   SemanticRuntimeStatus,
   SubjectRuntimeStatus,
 } from "../types";
-import { UNKNOWN_SEMANTIC_LABEL } from "../classificationLabels";
+import { ColorRangeFilter } from "./ColorRangeFilter";
 import { ChevronIcon, LibraryIcon, ShieldIcon } from "./Icons";
 
 interface SidebarProps {
@@ -19,6 +20,9 @@ interface SidebarProps {
   filter: AssetFilter;
   semanticStatus: SemanticRuntimeStatus | null;
   subjectStatus?: SubjectRuntimeStatus | null;
+  collections?: CollectionSummary[];
+  activeCollectionId?: number | null;
+  favoriteSourceActive?: boolean;
   onImportLibrary: () => void;
   onSelectLibrary: (id: number) => void;
   onRescanLibrary: (library: LibrarySummary) => void;
@@ -28,23 +32,15 @@ interface SidebarProps {
   onChangeLibraryParent: (library: LibrarySummary, parentLibraryId: number | null) => void;
   assetDropTargetLibraryId: number | null;
   onFilterChange: (filter: AssetFilter) => void;
+  onSelectFavorites?: () => void;
+  onSelectCollection?: (collectionId: number) => void;
+  onOpenWorkflowTool?: (tool: "collections" | "search") => void;
 }
 
 const tones = [
   ["low_key", "低调"],
   ["balanced", "均衡"],
   ["high_key", "高调"],
-] as const;
-
-const colors = [
-  ["red", "红"],
-  ["orange", "橙"],
-  ["yellow", "黄"],
-  ["green", "绿"],
-  ["cyan", "青"],
-  ["blue", "蓝"],
-  ["purple", "紫"],
-  ["neutral", "中性"],
 ] as const;
 
 const saturationLevels = [
@@ -62,6 +58,9 @@ export function Sidebar(props: SidebarProps) {
     filter,
     semanticStatus,
     subjectStatus,
+    collections = [],
+    activeCollectionId = null,
+    favoriteSourceActive = false,
     onImportLibrary,
     onSelectLibrary,
     onRescanLibrary,
@@ -71,6 +70,9 @@ export function Sidebar(props: SidebarProps) {
     onChangeLibraryParent,
     assetDropTargetLibraryId,
     onFilterChange,
+    onSelectFavorites,
+    onSelectCollection,
+    onOpenWorkflowTool,
   } = props;
   const [collapsedLibraryIds, setCollapsedLibraryIds] = useState<Set<number>>(new Set());
   const [openLibraryMenuId, setOpenLibraryMenuId] = useState<number | null>(null);
@@ -281,6 +283,48 @@ export function Sidebar(props: SidebarProps) {
       </section>
 
       <section
+        className="sidebar-module sidebar-source-module"
+        aria-labelledby="sidebar-source-title"
+      >
+        <div className="sidebar-area-heading">
+          <strong id="sidebar-source-title">来源筛选</strong>
+          <span>收藏与虚拟集合</span>
+        </div>
+        <p className="sidebar-source-note">只改变当前图库的显示，不移动或复制原文件。</p>
+        <div className="sidebar-source-list">
+          <button
+            type="button"
+            className={favoriteSourceActive ? "source-chip is-active" : "source-chip"}
+            onClick={onSelectFavorites}
+          >
+            <span>收藏</span>
+            <small>仅收藏照片</small>
+          </button>
+          {collections.map((collection) => (
+            <button
+              type="button"
+              key={collection.id}
+              className={
+                activeCollectionId === collection.id ? "source-chip is-active" : "source-chip"
+              }
+              onClick={() => onSelectCollection?.(collection.id)}
+            >
+              <span>{collection.name}</span>
+              <small>{collection.assetCount} 张 · 虚拟</small>
+            </button>
+          ))}
+          <button
+            type="button"
+            className="source-chip source-chip-action"
+            onClick={() => onOpenWorkflowTool?.("collections")}
+          >
+            <span>管理集合</span>
+            <small>新建 / 编辑</small>
+          </button>
+        </div>
+      </section>
+
+      <section
         className="sidebar-module sidebar-filter-module"
         aria-labelledby="sidebar-filter-title"
       >
@@ -293,10 +337,7 @@ export function Sidebar(props: SidebarProps) {
           <SemanticFilterSection
             title="拍摄题材"
             categoryGroup="scene"
-            labels={[
-              ...catalog.filter((label) => label.categoryGroup === "scene"),
-              ...(catalog.some((label) => label.id === "unknown") ? [] : [UNKNOWN_SEMANTIC_LABEL]),
-            ]}
+            labels={catalog.filter((label) => label.categoryGroup === "scene")}
             filter={filter}
             groups={groups}
             onFilterChange={onFilterChange}
@@ -306,15 +347,6 @@ export function Sidebar(props: SidebarProps) {
             title="主体标签"
             categoryGroup="subject"
             labels={catalog.filter((label) => label.categoryGroup === "subject")}
-            filter={filter}
-            groups={groups}
-            onFilterChange={onFilterChange}
-          />
-
-          <SemanticFilterSection
-            title="环境属性"
-            categoryGroup="context"
-            labels={catalog.filter((label) => label.categoryGroup === "context")}
             filter={filter}
             groups={groups}
             onFilterChange={onFilterChange}
@@ -361,34 +393,32 @@ export function Sidebar(props: SidebarProps) {
             </div>
           </PanelSection>
 
-          <PanelSection title="主色">
-            <div className="color-filter-list">
-              {colors.map(([id, label]) => (
-                <button
-                  type="button"
-                  className={
-                    filter.colorCategories.includes(id) ? "color-filter is-active" : "color-filter"
-                  }
-                  key={id}
-                  onClick={() =>
-                    onFilterChange({
-                      ...filter,
-                      colorCategories: toggleValue(filter.colorCategories, id),
-                    })
-                  }
-                  aria-label={`${label}色`}
-                  title={`${label}色`}
-                >
-                  <i data-color={id} />
-                </button>
-              ))}
-            </div>
+          <PanelSection title="颜色范围">
+            <ColorRangeFilter
+              center={filter.colorHueCenter}
+              width={filter.colorHueWidth}
+              strictness={filter.colorHueStrictness}
+              onChange={(colorHueCenter, colorHueWidth) =>
+                onFilterChange({
+                  ...filter,
+                  colorCategories: [],
+                  colorHueCenter,
+                  colorHueWidth,
+                })
+              }
+              onStrictnessChange={(colorHueStrictness) =>
+                onFilterChange({ ...filter, colorHueStrictness })
+              }
+            />
           </PanelSection>
 
-          <PanelSection title="数值与时间范围">
+          <PanelSection title="影调范围">
             <div className="range-filters">
               <RangePair
                 label="亮度"
+                description="按画面平均亮度筛选"
+                minHint="最暗"
+                maxHint="最亮"
                 min={filter.brightnessMin}
                 max={filter.brightnessMax}
                 onChange={(brightnessMin, brightnessMax) =>
@@ -397,33 +427,26 @@ export function Sidebar(props: SidebarProps) {
               />
               <RangePair
                 label="饱和度"
+                description="按画面平均色彩强度筛选"
+                minHint="近灰阶"
+                maxHint="高彩"
                 min={filter.saturationMin}
                 max={filter.saturationMax}
                 onChange={(saturationMin, saturationMax) =>
                   onFilterChange({ ...filter, saturationMin, saturationMax })
                 }
               />
-              <label className="date-filter">
-                <span>拍摄日期从</span>
-                <input
-                  type="date"
-                  value={filter.capturedFrom?.slice(0, 10) ?? ""}
-                  onChange={(event) =>
-                    onFilterChange({ ...filter, capturedFrom: event.target.value || null })
-                  }
-                />
-              </label>
-              <label className="date-filter">
-                <span>至</span>
-                <input
-                  type="date"
-                  value={filter.capturedTo?.slice(0, 10) ?? ""}
-                  onChange={(event) =>
-                    onFilterChange({ ...filter, capturedTo: event.target.value || null })
-                  }
-                />
-              </label>
             </div>
+          </PanelSection>
+
+          <PanelSection title="拍摄日期">
+            <DateRangeFilter
+              from={filter.capturedFrom}
+              to={filter.capturedTo}
+              onChange={(capturedFrom, capturedTo) =>
+                onFilterChange({ ...filter, capturedFrom, capturedTo })
+              }
+            />
           </PanelSection>
 
           <div className="left-panel-footer">
@@ -432,7 +455,11 @@ export function Sidebar(props: SidebarProps) {
               <strong>原图只读</strong> · 索引与模型数据保存在应用目录
             </span>
             <small className={semanticStatus?.status === "ready" ? "status-ready" : ""}>
-              {semanticStatus?.status === "ready" ? "本地语义模型 · 本地计算" : "语义模型未就绪"}
+              {semanticStatus?.status === "ready"
+                ? semanticStatus.topicModel
+                  ? `题材候选 · ${semanticStatus.topicModel.name}`
+                  : "环境模型 · Places365"
+                : "语义模型未就绪"}
             </small>
             <small
               className={
@@ -784,45 +811,146 @@ function toggleValue<T>(values: T[], value: T) {
 
 function RangePair({
   label,
+  description,
+  minHint,
+  maxHint,
   min,
   max,
   onChange,
 }: {
   label: string;
+  description: string;
+  minHint: string;
+  maxHint: string;
   min: number | null;
   max: number | null;
   onChange: (min: number | null, max: number | null) => void;
 }) {
+  const minPercent = Math.round((min ?? 0) * 100);
+  const maxPercent = Math.round((max ?? 1) * 100);
+  const rangeText = formatPercentRange(min, max);
+
+  function updateMin(value: string) {
+    const next = Math.min(Number(value) / 100, maxPercent / 100);
+    onChange(next <= 0 ? null : next, max);
+  }
+
+  function updateMax(value: string) {
+    const next = Math.max(Number(value) / 100, minPercent / 100);
+    onChange(min, next >= 1 ? null : next);
+  }
+
   return (
-    <div className="range-pair">
-      <span>{label}</span>
-      <input
-        aria-label={`${label}最小值`}
-        type="number"
-        min="0"
-        max="1"
-        step="0.05"
-        placeholder="0"
-        value={min ?? ""}
-        onChange={(event) => onChange(numberOrNull(event.target.value), max)}
-      />
-      <i>—</i>
-      <input
-        aria-label={`${label}最大值`}
-        type="number"
-        min="0"
-        max="1"
-        step="0.05"
-        placeholder="1"
-        value={max ?? ""}
-        onChange={(event) => onChange(min, numberOrNull(event.target.value))}
-      />
+    <div className="range-filter-card">
+      <div className="range-filter-heading">
+        <div>
+          <strong>{label}</strong>
+          <span>{description}</span>
+        </div>
+        <output aria-live="polite">{rangeText}</output>
+      </div>
+      <div className="range-slider" aria-label={`${label}筛选范围`}>
+        <span
+          className="range-slider-fill"
+          style={{ left: `${minPercent}%`, width: `${Math.max(0, maxPercent - minPercent)}%` }}
+        />
+        <input
+          className="range-slider-input range-slider-min"
+          aria-label={`${label}最低百分比`}
+          aria-valuetext={`${minPercent}%（${minHint}方向）`}
+          type="range"
+          min="0"
+          max="100"
+          step="5"
+          value={minPercent}
+          onChange={(event) => updateMin(event.target.value)}
+        />
+        <input
+          className="range-slider-input range-slider-max"
+          aria-label={`${label}最高百分比`}
+          aria-valuetext={`${maxPercent}%（${maxHint}方向）`}
+          type="range"
+          min="0"
+          max="100"
+          step="5"
+          value={maxPercent}
+          onChange={(event) => updateMax(event.target.value)}
+        />
+      </div>
+      <div className="range-slider-scale" aria-hidden="true">
+        <span>{minHint}</span>
+        <span>0% — 100%</span>
+        <span>{maxHint}</span>
+      </div>
+      <div className="range-filter-summary">
+        {min === null && max === null ? "未设置：显示全部图片" : `当前显示：${rangeText}范围内`}
+      </div>
     </div>
   );
 }
 
-function numberOrNull(value: string) {
-  if (!value) return null;
-  const number = Number(value);
-  return Number.isFinite(number) ? Math.max(0, Math.min(1, number)) : null;
+function DateRangeFilter({
+  from,
+  to,
+  onChange,
+}: {
+  from: string | null;
+  to: string | null;
+  onChange: (from: string | null, to: string | null) => void;
+}) {
+  const fromDate = from?.slice(0, 10) ?? "";
+  const toDate = to?.slice(0, 10) ?? "";
+
+  return (
+    <div className="date-range-filter">
+      <p>按照片记录的拍摄日期筛选，包含开始和结束当天。</p>
+      <div className="date-range-fields">
+        <label>
+          <span>从</span>
+          <input
+            type="date"
+            aria-label="拍摄日期开始"
+            value={fromDate}
+            max={toDate || undefined}
+            onChange={(event) => onChange(event.target.value || null, to)}
+          />
+        </label>
+        <span className="date-range-separator">至</span>
+        <label>
+          <span>到</span>
+          <input
+            type="date"
+            aria-label="拍摄日期结束"
+            value={toDate}
+            min={fromDate || undefined}
+            onChange={(event) => onChange(from, event.target.value || null)}
+          />
+        </label>
+      </div>
+      <div className="date-range-footer">
+        <span>
+          {fromDate || toDate
+            ? `${formatDateValue(fromDate, "最早")} — ${formatDateValue(toDate, "最近")}`
+            : "未设置日期范围"}
+        </span>
+        {fromDate || toDate ? (
+          <button type="button" onClick={() => onChange(null, null)}>
+            清除
+          </button>
+        ) : null}
+      </div>
+    </div>
+  );
+}
+
+function formatPercentRange(min: number | null, max: number | null) {
+  const format = (value: number) => `${Math.round(value * 100)}%`;
+  if (min !== null && max !== null) return `${format(min)} — ${format(max)}`;
+  if (min !== null) return `≥ ${format(min)}`;
+  if (max !== null) return `≤ ${format(max)}`;
+  return "全部";
+}
+
+function formatDateValue(value: string, fallback: string) {
+  return value ? value.replace(/-/g, "/") : fallback;
 }

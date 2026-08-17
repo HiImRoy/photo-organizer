@@ -112,6 +112,23 @@ export interface SemanticLabelResult {
   isPrimary: boolean;
 }
 
+export interface ColorCandidate {
+  rank: number;
+  color: string;
+  category: string;
+  areaCoverage: number;
+  saliencyCoverage: number;
+  localContrast: number;
+  chroma: number;
+  spatialCoherence: number;
+}
+
+export interface ColorPalette {
+  algorithmVersion: string;
+  coveragePalette: ColorCandidate[];
+  prominentPalette: ColorCandidate[];
+}
+
 export interface AssetListItem {
   id: number;
   libraryId: number;
@@ -145,6 +162,7 @@ export interface AssetListItem {
   saturationLabel: string | null;
   dominantColor: string | null;
   dominantColorCategory: string | null;
+  colorPalette: ColorPalette | null;
   neutralRatio: number | null;
   dominantColorCoverage: number | null;
   semanticStatus: string;
@@ -203,6 +221,10 @@ export interface AssetFilter {
   saturationLevels: string[];
   ratings: number[];
   colorLabels: ManualColorLabel[];
+  colorHueCenter: number | null;
+  colorHueWidth: number | null;
+  /** Minimum expected share of chromatic pixels inside the selected hue range. */
+  colorHueStrictness: number;
   brightnessMin: number | null;
   brightnessMax: number | null;
   saturationMin: number | null;
@@ -210,6 +232,10 @@ export interface AssetFilter {
   capturedFrom: string | null;
   capturedTo: string | null;
   analysisStatus: "not_analyzed" | "failed" | "completed" | null;
+  /** Restrict the browse surface to the user's local favorites. */
+  favoriteOnly: boolean;
+  /** Restrict the browse surface to one virtual collection. */
+  collectionId: number | null;
 }
 
 export const emptyAssetFilter: AssetFilter = {
@@ -222,6 +248,9 @@ export const emptyAssetFilter: AssetFilter = {
   saturationLevels: [],
   ratings: [],
   colorLabels: [],
+  colorHueCenter: null,
+  colorHueWidth: null,
+  colorHueStrictness: 0.5,
   brightnessMin: null,
   brightnessMax: null,
   saturationMin: null,
@@ -229,6 +258,8 @@ export const emptyAssetFilter: AssetFilter = {
   capturedFrom: null,
   capturedTo: null,
   analysisStatus: null,
+  favoriteOnly: false,
+  collectionId: null,
 };
 
 export interface FolderSummary {
@@ -294,6 +325,7 @@ export interface SemanticRuntimeStatus {
   status: string;
   message: string;
   model: ModelMetadata;
+  topicModel?: ModelMetadata | null;
   selectedBackend: string | null;
 }
 

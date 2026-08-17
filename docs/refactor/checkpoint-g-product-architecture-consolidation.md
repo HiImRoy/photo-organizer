@@ -1,6 +1,6 @@
 # Checkpoint G — Product Architecture Consolidation
 
-状态：UI_REMEDIATION_REQUIRED；N1 暂停，LAP-derived 工作台 IA 不接受
+状态：IMPLEMENTED_PENDING_MANUAL；G-UI 已实现，N1 仍暂停等待桌面验收
 
 日期：2026-08-10
 
@@ -31,16 +31,18 @@
 
 本轮没有实现 Smart Album、Pick/Reject、Backup、HNSW、HEIC、RAW、Video、GPS、Face、Organization 新功能或 Safe Copy。
 
+随后按本 Checkpoint 选定的唯一里程碑执行了 Plan 0021；G-UI 的主界面整合已实现，当前仅剩桌面端人工验收，不改变 A–F 的独立状态。
+
 ## 3. A–F reconciled status
 
-| Checkpoint                                   | 旧状态记录                                       | 当前真实代码                                                                                                               | G 的结论                                                                                      |
-| -------------------------------------------- | ------------------------------------------------ | -------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------- |
-| A — Source Boundary + Nested Library         | `BLOCKED_FOR_REVIEW`；文件头仍误写 `NOT_STARTED` | 0005–0008 和自动化已实现；人工 Parent/Child 流程未完成。后续又加入 manual Library parent 和 virtual asset assignment。     | 保留安全基础，但物理 Library 与虚拟组织边界需要重新审查；不能标 Completed。                   |
-| B — Manual Classification + Effective Filter | `IMPLEMENTED_PENDING_MANUAL`                     | 0009、manual override、Effective resolver、UI/SQL 已存在。                                                                 | 保持 Pending Manual；作为 Query predicate 复用。                                              |
-| C — Preview                                  | `NOT_STARTED`                                    | 已有 screen/original preview、filmstrip、zoom/Navigator 和 stale guard；仍同时维护 `activeAssetId`/`previewAssetId`。      | `PARTIAL_REQUIRES_RECONCILIATION`，不按旧状态假装未实现或已完成。                             |
-| D — Semantic + Dominant Color                | `NOT_STARTED`                                    | TinyCLIP、thumbnail-only batch、Tone/Color、manual override 已存在；完整质量评测/版本 Exit Criteria 未全验收。             | `PARTIAL_REQUIRES_RECONCILIATION`。                                                           |
-| E — Export Preview                           | `NOT_STARTED`                                    | Organization Dry-run、rules、mapping、issues、manifest 已存在。DB snapshot 不含完整执行事实，plan retrieval 不返回 items。 | `PARTIAL_REQUIRES_RECONCILIATION`；未来重命名为 immutable Organization Dry-run。              |
-| F — COPY Export                              | `NOT_STARTED`                                    | Organization COPY 未实现；但 Edit 已独立实现派生 copy 和 rollback。                                                        | Organization F 仍未开始；现有 Edit file mutation 必须在未来统一 FileOperationService 中收编。 |
+| Checkpoint                                   | 旧状态记录                                       | 当前真实代码                                                                                                                          | G 的结论                                                                                      |
+| -------------------------------------------- | ------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------- |
+| A — Source Boundary + Nested Library         | `BLOCKED_FOR_REVIEW`；文件头仍误写 `NOT_STARTED` | 0005–0008 和自动化已实现；人工 Parent/Child 流程未完成。后续又加入 manual Library parent 和 virtual asset assignment。                | 保留安全基础，但物理 Library 与虚拟组织边界需要重新审查；不能标 Completed。                   |
+| B — Manual Classification + Effective Filter | `IMPLEMENTED_PENDING_MANUAL`                     | 0009、manual override、Effective resolver、UI/SQL 已存在。                                                                            | 保持 Pending Manual；作为 Query predicate 复用。                                              |
+| C — Preview                                  | `NOT_STARTED`                                    | 已有 screen/original preview、filmstrip、zoom/Navigator 和 stale guard；仍同时维护 `activeAssetId`/`previewAssetId`。                 | `PARTIAL_REQUIRES_RECONCILIATION`，不按旧状态假装未实现或已完成。                             |
+| D — Semantic + Dominant Color                | `NOT_STARTED`                                    | 历史 TinyCLIP 与当前 SigLIP 2 均有过缩略图 batch 记录；Tone/Color、manual override 已存在，完整质量评测/版本 Exit Criteria 未全验收。 | `PARTIAL_REQUIRES_RECONCILIATION`。                                                           |
+| E — Export Preview                           | `NOT_STARTED`                                    | Organization Dry-run、rules、mapping、issues、manifest 已存在。DB snapshot 不含完整执行事实，plan retrieval 不返回 items。            | `PARTIAL_REQUIRES_RECONCILIATION`；未来重命名为 immutable Organization Dry-run。              |
+| F — COPY Export                              | `NOT_STARTED`                                    | Organization COPY 未实现；但 Edit 已独立实现派生 copy 和 rollback。                                                                   | Organization F 仍未开始；现有 Edit file mutation 必须在未来统一 FileOperationService 中收编。 |
 
 旧 Checkpoint 文档继续作为历史约束和详细测试清单，不再作为机械的唯一执行顺序。任何旧 Exit Criteria 未通过的阶段都不能因功能“看起来存在”而标 Completed。
 
@@ -60,6 +62,7 @@
 10. 文件写操作遵循 Plan -> Validate -> Journal -> Execute -> Verify -> Commit。
 11. 第一阶段文件输出只允许 copy/no-overwrite；Move/Delete/overwrite 更晚。
 12. 测试只使用 `test-data/` 或隔离临时 fixture，并验证源 hash/mtime/目录项。
+13. 导入、图像解码、基础特征、题材/环境/主体分析和模型推理只使用应用私有缩略图或有界缩略图派生输入；原文件仅允许参与元数据、指纹、EXIF/内嵌预览元数据和受控的目标尺寸缩略图提取。显式 `original` 只属于用户主动查看的预览例外。
 
 ## 5. New findings
 
@@ -97,7 +100,7 @@ Organization DB 记录是 compact audit snapshot，migration 注释明确允许�
 
 ### 5.6 Performance evidence gap
 
-- Import/TinyCLIP 有小型数据。
+- Import 有小型数据；TinyCLIP 基准仅为历史记录，当前 SigLIP 2 仍需独立性能证据。
 - Thumbnail browsing 没有 1k/10k/50k 数据。
 - Vector query 没有 1k/10k/50k/100k 分段数据，当前还存在 10,001/5,000 hard cap。
 
@@ -151,19 +154,23 @@ Asset metadata projection、thumbnail、preview、Tone/Color、semantic labels/e
 
 ## 10. Verification for this checkpoint
 
-本次 Checkpoint 本轮只更新治理文档和整改计划；不宣称界面修复已完成：
+本轮已完成 G-UI 自动化实现切片；桌面端人工验收仍未完成：
 
 - [x] `npm run format:check`
 - [x] 旧 A–F 状态与真实代码人工复核
 - [x] LAP 主界面集成方式对照复核
 - [x] G-UI 计划、范围和验收条件建立
 - [x] `git diff --check`
-- [ ] G-UI 前端实现和桌面验收
-- [ ] `npm run test:rust` / `npm run clippy`（当前环境未安装 `cargo`）
+- [x] G-UI 前端实现
+- [x] 嵌入工具区移除七个平级工作台 Tab，改为由当前来源、查询、选择或图片上下文单独打开
+- [ ] G-UI 桌面验收
+- [x] `cargo fmt --manifest-path src-tauri/Cargo.toml --all -- --check`
+- [x] `cargo test --manifest-path src-tauri/Cargo.toml --no-default-features --all-targets --quiet`
+- [x] `cargo clippy --manifest-path src-tauri/Cargo.toml --no-default-features --all-targets -- -D warnings`
 - [x] 链接和状态人工复核
 - [x] 确认本次切片没有 migration、生产依赖或真实源文件写操作；工作区原有吞吐修正保持不动
 
-因此本 Checkpoint 当前记为 `UI_REMEDIATION_REQUIRED`；不得标记 N1_COMPLETE，也不得把 A–F 标记为完成。
+因此本 Checkpoint 当前记为 `IMPLEMENTED_PENDING_MANUAL`；不得标记 N1_COMPLETE，也不得把 A–F 标记为完成。
 
 ## 11. Unresolved risks
 
@@ -174,9 +181,9 @@ Asset metadata projection、thumbnail、preview、Tone/Color、semantic labels/e
 - `styles.css` 存在多层重复 selector/cascade，IA 拆分时容易出现视觉回归。
 - Saved View 的 schema 没有 query version/checksum；开放写入前必须先确定 contract。
 - 性能 baseline 尚未执行；当前不具备引入 thumbnail batch、virtualization、resident vector cache 或 HNSW 的证据。
-- LAP-derived 功能的独立工作台 IA 仍未修复；此前改名只属于临时兼容措施。
-- Rust test/clippy 受本机缺少 cargo 阻塞，需在具备 Rust toolchain 的环境补跑。
+- `WorkflowWorkspace` 的历史渲染器仍作为上下文工具内部复用；它不再替换主界面，但如果人工验收发现工具区仍过于拥挤，下一步只做拆分和布局修复，不恢复独立工作台。
+- G-UI 的 collection source 使用 `AssetFilter.collectionId`，需要在桌面脚本中验证父图库/子图库 scope 与集合成员计数一致。
 
 ## 12. Stop condition
 
-当前停止在 G-UI 计划阶段。下一步只允许执行主界面 IA 整改；在 G-UI 验收前不恢复 N1 benchmark，不进入 N2、Backup、Immutable Organization 或 Safe Copy。
+当前已完成 G-UI 的自动化实现切片，但尚未通过桌面人工验收。下一步只允许执行 G-UI 验收与回归修复；在 G-UI 验收前不恢复 N1 benchmark，不进入 N2、Backup、Immutable Organization 或 Safe Copy。

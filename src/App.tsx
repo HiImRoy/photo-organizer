@@ -10,6 +10,7 @@ import {
   fetchAssets,
   fetchAssetDetail,
   fetchClassificationRegistry,
+  fetchCollections,
   fetchFavoriteAssetIds,
   fetchLibraries,
   fetchSemanticCatalog,
@@ -35,7 +36,9 @@ import {
   updateTagOverride,
   restoreAutoClassification,
   subscribeScanProgress,
+  subscribeSemanticStatus,
   subscribeSemanticProgress,
+  subscribeSubjectStatus,
 } from "./api";
 import {
   classificationValueLabel,
@@ -67,8 +70,9 @@ import {
 import { ProgressPanel } from "./components/ProgressPanel";
 import { Sidebar } from "./components/Sidebar";
 import { Thumbnail } from "./components/Thumbnail";
-import { WorkflowWorkspace } from "./components/WorkflowWorkspace";
+import { WorkflowWorkspace, type WorkflowTool } from "./components/WorkflowWorkspace";
 import { usePreviewController, type PreviewController } from "./components/usePreviewController";
+import { colorHueMatchThresholdPercent } from "./colorFilter";
 import { formatDate } from "./format";
 import {
   createAssetQueryV1,
@@ -88,6 +92,7 @@ import {
   type AssetQueryV1,
   type AssetScopeInputV1,
   type ClassificationFieldDescriptor,
+  type CollectionSummary,
   type LibrarySummary,
   type ManualColorLabel,
   type ScanProgress,
@@ -111,6 +116,14 @@ const LEFT_PANEL_MAX_WIDTH = 420;
 const RIGHT_PANEL_MIN_WIDTH = 256;
 const RIGHT_PANEL_MAX_WIDTH = 460;
 const THEME_STORAGE_KEY = "photo-organizer-theme";
+const TOPIC_MODEL_ID = "siglip2-base";
+
+function topicModelIdFromStatus(status: SemanticRuntimeStatus | null): string | null {
+  const name = status?.topicModel?.name ?? status?.model?.name;
+  if (!name) return null;
+  if (name === "SigLIP2-Base-Patch16-224") return "siglip2-base";
+  return null;
+}
 
 type ThemeMode = "dark" | "light";
 
@@ -168,6 +181,29 @@ type AssetPointerDragState = {
 
 type ValueUpdater<T> = T | ((current: T) => T);
 
+function descendantLibraries(parentLibraryId: number, libraries: LibrarySummary[]) {
+  const childrenByParent = new Map<number, LibrarySummary[]>();
+  for (const library of libraries) {
+    if (library.parentLibraryId === null) continue;
+    const children = childrenByParent.get(library.parentLibraryId) ?? [];
+    children.push(library);
+    childrenByParent.set(library.parentLibraryId, children);
+  }
+
+  const descendants: LibrarySummary[] = [];
+  const visited = new Set<number>();
+  const visit = (libraryId: number) => {
+    for (const child of childrenByParent.get(libraryId) ?? []) {
+      if (visited.has(child.id)) continue;
+      visited.add(child.id);
+      descendants.push(child);
+      visit(child.id);
+    }
+  };
+  visit(parentLibraryId);
+  return descendants;
+}
+
 const sortLabels: Record<SortField, string> = {
   file_name: "文件名",
   capture_time: "拍摄时间",
@@ -211,9 +247,11 @@ export default function App() {
   const [semanticStatus, setSemanticStatus] = useState<SemanticRuntimeStatus | null>(null);
   const [subjectStatus, setSubjectStatus] = useState<SubjectRuntimeStatus | null>(null);
   const [refreshKey, setRefreshKey] = useState(0);
-  const [workspaceMode, setWorkspaceMode] = useState<"library" | "organization" | "workflows">(
+  const [workspaceMode, setWorkspaceMode] = useState<"library" | "organization">(
     visualOrganizationMode ? "organization" : "library",
   );
+  const [workflowTool, setWorkflowTool] = useState<WorkflowTool | null>(null);
+  const [collections, setCollections] = useState<CollectionSummary[]>([]);
   const [favoriteAssetIds, setFavoriteAssetIds] = useState<Set<number>>(new Set());
   const [selectedAssetIds, setSelectedAssetIds] = useState<number[]>([]);
   const [pendingImportPath, setPendingImportPath] = useState<string | null>(null);
@@ -236,6 +274,7 @@ export default function App() {
   const setCurrentLibraryId = useCallback((next: ValueUpdater<number | null>) => {
     setAssetQuery((current) => {
       const libraryId = typeof next === "function" ? next(current.libraryId) : next;
+      if (libraryId === current.libraryId) return current;
       return updateAssetQueryLibrary(current, libraryId);
     });
   }, []);
@@ -270,6 +309,30 @@ export default function App() {
   }
 
   useEffect(() => {
+    let active = true;
+    let unlistenSemantic: (() => void) | null = null;
+    let unlistenSubject: (() => void) | null = null;
+    void subscribeSemanticStatus((status) => {
+      if (!active) return;
+      setSemanticStatus(status);
+    }).then((nextUnlisten) => {
+      if (active) unlistenSemantic = nextUnlisten;
+      else nextUnlisten();
+    });
+    void subscribeSubjectStatus((status) => {
+      if (active) setSubjectStatus(status);
+    }).then((nextUnlisten) => {
+      if (active) unlistenSubject = nextUnlisten;
+      else nextUnlisten();
+    });
+    return () => {
+      active = false;
+      unlistenSemantic?.();
+      unlistenSubject?.();
+    };
+  }, []);
+
+  useEffect(() => {
     let cancelled = false;
     if (currentLibraryId === null) {
       return;
@@ -277,6 +340,23 @@ export default function App() {
     void fetchFavoriteAssetIds(currentLibraryId)
       .then((ids) => {
         if (!cancelled) setFavoriteAssetIds(new Set(ids));
+      })
+      .catch((reason) => {
+        if (!cancelled) setError(messageFrom(reason));
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [currentLibraryId, refreshKey]);
+
+  useEffect(() => {
+    let cancelled = false;
+    if (currentLibraryId === null) {
+      return undefined;
+    }
+    void fetchCollections()
+      .then((items) => {
+        if (!cancelled) setCollections(items);
       })
       .catch((reason) => {
         if (!cancelled) setError(messageFrom(reason));
@@ -433,11 +513,15 @@ export default function App() {
   );
   const detailBaseAsset = activeAsset ?? (viewMode === "grid" ? (assets[0] ?? null) : null);
   const detailPanelAsset =
-    detailAsset !== null && detailBaseAsset !== null && detailAsset.id === detailBaseAsset.id
+    detailAsset !== null &&
+    (detailBaseAsset === null ||
+      detailAsset.id === detailBaseAsset.id ||
+      detailAsset.id === activeAssetId)
       ? {
           ...detailAsset,
-          rating: detailBaseAsset.rating,
-          colorLabel: detailBaseAsset.colorLabel,
+          ...(detailBaseAsset && detailAsset.id === detailBaseAsset.id
+            ? { rating: detailBaseAsset.rating, colorLabel: detailBaseAsset.colorLabel }
+            : {}),
         }
       : detailBaseAsset;
   const scanRunning =
@@ -503,7 +587,9 @@ export default function App() {
       } else {
         setError(messageFrom(libraryResult.reason));
       }
-      if (statusResult.status === "fulfilled") setSemanticStatus(statusResult.value);
+      if (statusResult.status === "fulfilled") {
+        setSemanticStatus(statusResult.value);
+      }
       if (subjectResult.status === "fulfilled") setSubjectStatus(subjectResult.value);
       if (catalogResult.status === "fulfilled") setSemanticCatalog(catalogResult.value);
       if (registryResult.status === "fulfilled") setClassificationRegistry(registryResult.value);
@@ -603,8 +689,10 @@ export default function App() {
       if (disposed) return;
       setScanProgress(progress);
       if (progress.libraryId !== null) setCurrentLibraryId(progress.libraryId);
-      requestDataRefresh(progress.status !== "running");
-      if (["completed", "cancelled", "failed"].includes(progress.status)) setCancellingScan(false);
+      if (["completed", "cancelled", "failed"].includes(progress.status)) {
+        setCancellingScan(false);
+        requestDataRefresh(true);
+      }
     }).then((stop) => {
       if (disposed) stop();
       else stopScan = stop;
@@ -612,7 +700,9 @@ export default function App() {
     void subscribeSemanticProgress((progress) => {
       if (disposed) return;
       setSemanticProgress(progress);
-      requestDataRefresh(progress.status !== "running");
+      if (["completed", "cancelled", "failed", "interrupted"].includes(progress.status)) {
+        requestDataRefresh(true);
+      }
     }).then((stop) => {
       if (disposed) stop();
       else stopSemantic = stop;
@@ -704,14 +794,17 @@ export default function App() {
     try {
       let nextSemanticStatus = semanticStatus;
       let nextSubjectStatus = subjectStatus;
-      if (nextSemanticStatus?.status !== "ready") {
-        nextSemanticStatus = await prepareSemanticModel();
+      if (
+        nextSemanticStatus?.status !== "ready" ||
+        topicModelIdFromStatus(nextSemanticStatus) !== TOPIC_MODEL_ID
+      ) {
+        nextSemanticStatus = await prepareSemanticModel(TOPIC_MODEL_ID);
         setSemanticStatus(nextSemanticStatus);
       }
       if (
         nextSubjectStatus &&
-        !nextSubjectStatus.model.installed &&
-        nextSubjectStatus.status !== "model_unavailable"
+        nextSubjectStatus.status !== "ready" &&
+        nextSubjectStatus.status !== "partial"
       ) {
         try {
           nextSubjectStatus = await prepareSubjectModel();
@@ -731,6 +824,10 @@ export default function App() {
       setError(messageFrom(reason));
     }
   }
+
+  const loadedTopicModel = topicModelIdFromStatus(semanticStatus);
+  const semanticReadyForSelection =
+    semanticStatus?.status === "ready" && loadedTopicModel === TOPIC_MODEL_ID;
 
   async function analyzeOne(asset: AssetListItem) {
     try {
@@ -928,8 +1025,32 @@ export default function App() {
     setSelectionAnchorId(null);
     setSelectedAssetIds([]);
     setWorkspaceMode("library");
+    setWorkflowTool(null);
     setFilterState(emptyAssetFilter);
     setPage(1);
+  }
+
+  function selectFavoriteSource() {
+    setWorkflowTool(null);
+    setActiveAssetId(null);
+    setSelectionAnchorId(null);
+    setSelectedAssetIds([]);
+    setFilterState({ ...emptyAssetFilter, favoriteOnly: true });
+    setPage(1);
+  }
+
+  function selectCollectionSource(collectionId: number) {
+    setWorkflowTool(null);
+    setActiveAssetId(null);
+    setSelectionAnchorId(null);
+    setSelectedAssetIds([]);
+    setFilterState({ ...emptyAssetFilter, collectionId });
+    setPage(1);
+  }
+
+  function openWorkflowTool(tool: WorkflowTool) {
+    setWorkspaceMode("library");
+    setWorkflowTool(tool);
   }
 
   function changeView(next: ViewMode) {
@@ -965,10 +1086,10 @@ export default function App() {
   }
 
   function selectWorkflowAsset(assetId: number) {
-    setWorkspaceMode("library");
+    // Workflow result clicks change the focused asset, not the user's explicit
+    // selection. This keeps the current AssetScope intact while the DetailPanel
+    // follows the review result.
     setActiveAssetId(assetId);
-    setSelectionAnchorId(assetId);
-    setSelectedAssetIds([assetId]);
   }
 
   function selectionRange(targetId: number): number[] | null {
@@ -1030,19 +1151,33 @@ export default function App() {
       "从 PhotoOrganizer 中移除此图库？\n\n这只会移除 PhotoOrganizer 中的索引、缩略图和分析结果，不会删除或修改磁盘中的任何原始图片。",
     );
     if (!confirmed) return;
+
+    const descendants = descendantLibraries(library.id, libraries);
+    const removeDescendants =
+      descendants.length > 0 &&
+      window.confirm(
+        `${library.name || library.sourcePath} 包含 ${descendants.length} 个子图库（包括嵌套子图库）。\n\n` +
+          "是否同时移除这些子图库？\n\n确定：移除当前图库和全部子图库。\n取消：仅移除当前图库，保留子图库。",
+      );
+    const targets = removeDescendants ? [...descendants].reverse().concat(library) : [library];
+    const removedIds: number[] = [];
     try {
-      await removeLibrary(library.id);
-      const remaining = libraries.filter((item) => item.id !== library.id);
+      for (const target of targets) {
+        if (await removeLibrary(target.id)) removedIds.push(target.id);
+      }
+      const remaining = libraries.filter((item) => !removedIds.includes(item.id));
       setLibraries(remaining);
-      if (currentLibraryId === library.id) {
+      if (currentLibraryId !== null && removedIds.includes(currentLibraryId)) {
         setCurrentLibraryId(remaining[0]?.id ?? null);
         setActiveAssetId(null);
         setSelectedAssetIds([]);
         setSelectionAnchorId(null);
         setPage(1);
       }
+      requestDataRefresh(true);
     } catch (reason) {
       setError(messageFrom(reason));
+      requestDataRefresh(true);
     }
   }
 
@@ -1192,6 +1327,44 @@ export default function App() {
               >
                 批量修正
               </button>
+              <button
+                className="tool-button"
+                type="button"
+                onClick={() => openWorkflowTool("collections")}
+              >
+                加入集合
+              </button>
+              <button
+                className="tool-button"
+                type="button"
+                disabled={selectedAssetIds.length < 2}
+                onClick={() => openWorkflowTool("compare")}
+              >
+                比较
+              </button>
+              <button
+                className="tool-button"
+                type="button"
+                onClick={() => openWorkflowTool("similar")}
+              >
+                找相似
+              </button>
+              <button
+                className="tool-button"
+                type="button"
+                onClick={() => openWorkflowTool("duplicates")}
+              >
+                重复审阅
+              </button>
+              {selectedAssetIds.length === 1 ? (
+                <button
+                  className="tool-button"
+                  type="button"
+                  onClick={() => openWorkflowTool("edit")}
+                >
+                  编辑副本
+                </button>
+              ) : null}
             </div>
           ) : null}
           <div className="segmented" aria-label="视图模式">
@@ -1283,16 +1456,14 @@ export default function App() {
             disabled={!selectedLibrary || semanticRunning}
           >
             <PlayIcon width="14" height="14" />
-            {semanticStatus?.status === "ready" ? "分析" : "准备模型"}
+            {semanticReadyForSelection ? "分析" : "装载模型"}
           </button>
           {selectedLibrary ? (
             <>
               <button
-                className={workspaceMode === "workflows" ? "tool-button is-active" : "tool-button"}
+                className={workflowTool ? "tool-button is-active" : "tool-button"}
                 type="button"
-                onClick={() =>
-                  setWorkspaceMode((value) => (value === "workflows" ? "library" : "workflows"))
-                }
+                onClick={() => openWorkflowTool(workflowTool ?? "search")}
               >
                 查找与审阅
               </button>
@@ -1406,27 +1577,7 @@ export default function App() {
           } as CSSProperties
         }
       >
-        {workspaceMode === "workflows" && selectedLibrary ? (
-          <main className="center-workspace workflow-mode-shell">
-            <WorkflowWorkspace
-              libraryId={selectedLibrary.id}
-              selectedAssetIds={selectedAssetIds}
-              activeAsset={detailPanelAsset}
-              scope={currentScope}
-              scopeDescription={currentScopeDescription}
-              onSelectAsset={selectWorkflowAsset}
-              onBack={() => setWorkspaceMode("library")}
-              onFavoriteChange={(assetId, favorite) =>
-                setFavoriteAssetIds((current) => {
-                  const next = new Set(current);
-                  if (favorite) next.add(assetId);
-                  else next.delete(assetId);
-                  return next;
-                })
-              }
-            />
-          </main>
-        ) : workspaceMode === "organization" && selectedLibrary ? (
+        {workspaceMode === "organization" && selectedLibrary ? (
           <main className="center-workspace organization-mode-shell">
             <OrganizationWorkspace
               library={selectedLibrary}
@@ -1447,6 +1598,9 @@ export default function App() {
               filter={filter}
               semanticStatus={semanticStatus}
               subjectStatus={subjectStatus}
+              collections={collections}
+              favoriteSourceActive={filter.favoriteOnly}
+              activeCollectionId={filter.collectionId}
               assetDropTargetLibraryId={assetDropTargetLibraryId}
               onImportLibrary={() => void importFolder()}
               onSelectLibrary={selectLibrary}
@@ -1466,6 +1620,9 @@ export default function App() {
                 void changeLibraryParent(library, parentLibraryId)
               }
               onFilterChange={updateFilter}
+              onSelectFavorites={selectFavoriteSource}
+              onSelectCollection={selectCollectionSource}
+              onOpenWorkflowTool={openWorkflowTool}
             />
 
             <PanelResizeHandle
@@ -1609,6 +1766,34 @@ export default function App() {
                   </section>
                 ) : null}
               </main>
+              {workflowTool && selectedLibrary ? (
+                <WorkflowWorkspace
+                  key={workflowTool}
+                  embedded
+                  initialTool={workflowTool}
+                  libraryId={selectedLibrary.id}
+                  selectedAssetIds={selectedAssetIds}
+                  activeAsset={detailPanelAsset}
+                  scope={currentScope}
+                  scopeDescription={currentScopeDescription}
+                  onSelectAsset={selectWorkflowAsset}
+                  onBack={() => setWorkflowTool(null)}
+                  onFavoriteChange={(assetId, favorite) => {
+                    setFavoriteAssetIds((current) => {
+                      const next = new Set(current);
+                      if (favorite) next.add(assetId);
+                      else next.delete(assetId);
+                      return next;
+                    });
+                    if (filter.favoriteOnly && !favorite) requestDataRefresh(true);
+                  }}
+                  onCollectionsChange={() => {
+                    void fetchCollections()
+                      .then(setCollections)
+                      .catch((reason) => setError(messageFrom(reason)));
+                  }}
+                />
+              ) : null}
             </div>
 
             <PanelResizeHandle
@@ -1859,7 +2044,9 @@ function GridWorkspace({
       {[...sections].map(([id, items]) => {
         const label =
           items[0]?.semanticLabels.find((item) => item.isPrimary)?.displayName ??
-          (items[0]?.classification.primaryCategory.effective === "unknown" ? "未知" : "未分析");
+          (items[0]?.classification.primaryCategory.effective === "photo_abstract"
+            ? "抽象艺术"
+            : "未分析");
         return (
           <section key={id}>
             <div className="group-heading">
@@ -1990,7 +2177,7 @@ function ZoomablePreview({
 }) {
   const {
     stageRef,
-    screenSource,
+    thumbnailSource,
     displaySource,
     loadState,
     originalState,
@@ -2031,10 +2218,25 @@ function ZoomablePreview({
         onLostPointerCapture={onPointerCancel}
         onDoubleClick={onDoubleClick}
       >
-        {screenSource ? (
+        {thumbnailSource && displaySource && displaySource !== thumbnailSource ? (
           <img
-            className="preview-image"
-            src={displaySource ?? screenSource}
+            className="preview-image is-thumbnail"
+            src={thumbnailSource}
+            alt=""
+            draggable={false}
+            style={{
+              width: `${naturalSize.width}px`,
+              height: `${naturalSize.height}px`,
+              left: "50%",
+              top: "50%",
+              transform: `translate3d(calc(-50% + ${controller.offset.x}px), calc(-50% + ${controller.offset.y}px), 0) scale(${displayScale})`,
+            }}
+          />
+        ) : null}
+        {displaySource ? (
+          <img
+            className={`preview-image${displaySource === thumbnailSource ? " is-thumbnail" : ""}`}
+            src={displaySource}
             alt={asset.fileName}
             draggable={false}
             style={{
@@ -2044,15 +2246,20 @@ function ZoomablePreview({
               top: "50%",
               transform: `translate3d(calc(-50% + ${controller.offset.x}px), calc(-50% + ${controller.offset.y}px), 0) scale(${displayScale})`,
             }}
-            onLoad={(event) =>
-              onImageLoad({
-                width: event.currentTarget.naturalWidth,
-                height: event.currentTarget.naturalHeight,
-              })
+            onLoad={
+              displaySource === thumbnailSource
+                ? undefined
+                : (event) =>
+                    onImageLoad({
+                      width: event.currentTarget.naturalWidth,
+                      height: event.currentTarget.naturalHeight,
+                    })
             }
           />
         ) : (
-          <Thumbnail asset={asset} />
+          <div className="preview-thumbnail-fallback">
+            <Thumbnail asset={asset} />
+          </div>
         )}
         {loadState === "loading" ? <span className="preview-loading">正在加载原图…</span> : null}
         {loadState === "error" ? (
@@ -2195,6 +2402,23 @@ function buildFilterConditions(
 ): FilterCondition[] {
   const conditions: FilterCondition[] = [];
 
+  if (filter.favoriteOnly) {
+    conditions.push({
+      id: "favorite-source",
+      label: "来源",
+      value: "收藏",
+      remove: (current) => ({ ...current, favoriteOnly: false }),
+    });
+  }
+  if (filter.collectionId !== null) {
+    conditions.push({
+      id: "collection-source",
+      label: "集合",
+      value: `集合 #${filter.collectionId}`,
+      remove: (current) => ({ ...current, collectionId: null }),
+    });
+  }
+
   if (filter.search) {
     conditions.push({
       id: "search",
@@ -2260,6 +2484,17 @@ function buildFilterConditions(
       label: "拍摄日期",
       value: formatDateCondition(filter.capturedFrom, filter.capturedTo),
       remove: (current) => ({ ...current, capturedFrom: null, capturedTo: null }),
+    });
+  }
+
+  if (filter.colorHueCenter !== null && filter.colorHueWidth !== null) {
+    const start = normalizeHue(filter.colorHueCenter - filter.colorHueWidth / 2);
+    const end = normalizeHue(filter.colorHueCenter + filter.colorHueWidth / 2);
+    conditions.push({
+      id: "color-hue-range",
+      label: "颜色范围",
+      value: `${formatHue(start)}° — ${formatHue(end)}°（宽度 ${formatHue(filter.colorHueWidth)}°；匹配 ≥ ${colorHueMatchThresholdPercent(filter.colorHueStrictness)}%）`,
+      remove: (current) => ({ ...current, colorHueCenter: null, colorHueWidth: null }),
     });
   }
 
@@ -2333,8 +2568,18 @@ function formatDateCondition(from: string | null, to: string | null) {
   return `${format(from, "最早")} — ${format(to, "最近")}`;
 }
 
+function normalizeHue(value: number) {
+  return ((value % 360) + 360) % 360;
+}
+
+function formatHue(value: number) {
+  return String(Math.round(normalizeHue(value)));
+}
+
 function countActiveFilters(filter: AssetFilter) {
   return (
+    Number(filter.favoriteOnly) +
+    Number(filter.collectionId !== null) +
     Number(Boolean(filter.search)) +
     filter.primaryCategories.length +
     filter.auxiliaryTags.length +
@@ -2343,6 +2588,7 @@ function countActiveFilters(filter: AssetFilter) {
     filter.saturationLevels.length +
     filter.ratings.length +
     filter.colorLabels.length +
+    Number(filter.colorHueCenter !== null && filter.colorHueWidth !== null) +
     Number(filter.brightnessMin !== null || filter.brightnessMax !== null) +
     Number(filter.saturationMin !== null || filter.saturationMax !== null) +
     Number(Boolean(filter.capturedFrom || filter.capturedTo)) +

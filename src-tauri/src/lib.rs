@@ -14,10 +14,16 @@ pub mod semantic_tasks;
 pub mod source_identity;
 pub mod subject;
 pub mod tasks;
+pub mod topics;
+#[cfg(windows)]
+mod wic_thumbnail;
 pub mod workflow;
 
 #[cfg(feature = "desktop")]
 use tauri::Manager;
+
+#[cfg(feature = "desktop")]
+use std::path::PathBuf;
 
 #[cfg(feature = "desktop")]
 pub fn run() {
@@ -33,52 +39,50 @@ pub fn run() {
                 .build(),
         )
         .setup(|app| {
-            let data_dir = app.path().app_data_dir()?;
+            let data_dir = std::env::var_os("PHOTO_ORGANIZER_DATA_DIR")
+                .map(PathBuf::from)
+                .unwrap_or(app.path().app_data_dir()?);
             let resource_dir = app.path().resource_dir()?;
             let paths = paths::AppPaths::initialize_with_resources(data_dir, resource_dir)?;
             let repository = db::Repository::new(&paths.database_path);
             repository.initialize()?;
+            // Keep first-run startup light: model sessions are loaded after the
+            // state is installed and the WebView can be created. Once a model
+            // has been explicitly prepared, ipc::restore_persisted_models
+            // restores it in the background on later launches.
             let semantic: std::sync::Arc<dyn semantic::SemanticClassifier> =
-                match semantic::Places365Classifier::load(
-                    &paths.semantic_model_dir,
-                    &paths.tinyclip_model_dir,
-                    &paths.onnx_runtime_path,
-                ) {
-                    Ok(classifier) => {
-                        repository.register_semantic_model(
-                            &paths.semantic_model_dir.join(semantic::MODEL_FILE),
-                            &paths.semantic_model_dir.join(semantic::TOKENIZER_FILE),
-                        )?;
-                        std::sync::Arc::new(classifier)
-                    }
-                    Err(error) => {
-                        log::warn!("semantic model unavailable: {error}");
-                        std::sync::Arc::new(semantic::UnavailableClassifier::with_message(
-                            error.to_string(),
-                        ))
-                    }
-                };
+                std::sync::Arc::new(semantic::UnavailableClassifier::default());
             let subject: std::sync::Arc<dyn subject::SubjectClassifier> =
-                match subject::SubjectModel::load(
-                    &paths.subject_model_dir,
-                    &paths.face_model_dir,
-                    &paths.onnx_runtime_path,
-                ) {
-                    Ok(classifier) => std::sync::Arc::new(classifier),
-                    Err(error) => {
-                        log::warn!("subject model unavailable: {error}");
-                        std::sync::Arc::new(subject::UnavailableSubjectClassifier::with_message(
-                            error.to_string(),
-                        ))
-                    }
-                };
+                std::sync::Arc::new(subject::UnavailableSubjectClassifier::default());
             log::info!(
                 "PhotoOrganizer data directory: {}",
                 paths.data_dir.display()
             );
             let state = ipc::AppState::new(repository, paths, semantic, subject);
-            ipc::resume_pending_semantic_jobs(app.handle().clone(), &state);
             app.manage(state);
+            // The manual acceptance config sets `create: false` so the script
+            // can provide an isolated, per-session WebView2 profile. The
+            // packaged/default config still creates its `main` window before
+            // setup and therefore takes this branch only when it is absent.
+            if app.get_webview_window("main").is_none() {
+                let window_config = app
+                    .config()
+                    .app
+                    .windows
+                    .iter()
+                    .find(|window| window.label == "main")
+                    .ok_or(tauri::Error::WindowNotFound)?;
+                let mut window_builder =
+                    tauri::WebviewWindowBuilder::from_config(app.handle(), window_config)?;
+                if let Some(data_directory) = std::env::var_os("PHOTO_ORGANIZER_WEBVIEW_DATA_DIR") {
+                    window_builder = window_builder.data_directory(PathBuf::from(data_directory));
+                }
+                window_builder.build()?;
+            }
+            ipc::restore_persisted_models(
+                app.handle().clone(),
+                app.state::<ipc::AppState>().inner(),
+            );
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![

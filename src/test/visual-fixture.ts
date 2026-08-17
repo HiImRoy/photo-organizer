@@ -33,24 +33,23 @@ export interface VisualFixture {
 const rootPath = "C:\\test-data\\专业界面验收图库";
 
 const semanticCatalog: SemanticLabelDescriptor[] = [
+  ["photo_portrait", "人像"],
   ["photo_landscape", "风光自然"],
-  ["photo_urban", "城市街拍"],
-  ["photo_architecture", "建筑与空间"],
-  ["photo_food", "美食餐饮"],
-  ["photo_commercial", "商业与静物"],
-  ["photo_indoor", "室内与生活"],
-  ["photo_travel", "旅行人文"],
-  ["photo_event", "活动与运动"],
-  ["photo_transport", "交通与汽车"],
-  ["photo_plant", "植物与园艺"],
-  ["photo_documentary", "纪实与工业"],
+  ["photo_street", "街拍纪实"],
+  ["photo_architecture", "建筑"],
+  ["photo_still_life", "静物产品"],
+  ["photo_food", "美食"],
+  ["photo_wildlife", "动物"],
+  ["photo_macro", "植物"],
+  ["photo_activity", "运动"],
+  ["photo_vehicle", "交通工具"],
+  ["photo_document", "文档截图"],
+  ["photo_abstract", "抽象艺术"],
   ["indoor", "室内"],
   ["outdoor", "室外"],
-  ["person", "人物"],
-  ["group", "多人"],
-  ["portrait", "人像"],
+  ["single_person", "单人"],
+  ["multiple_people", "多人"],
   ["animal", "动物"],
-  ["pet", "宠物"],
   ["vehicle", "车辆"],
   ["food", "食品"],
   ["plant", "植物"],
@@ -59,15 +58,15 @@ const semanticCatalog: SemanticLabelDescriptor[] = [
   displayName,
   categoryGroup: id.startsWith("photo_")
     ? "scene"
-    : ["person", "group", "portrait", "animal", "pet", "vehicle", "food", "plant"].includes(id)
+    : ["single_person", "multiple_people", "animal", "vehicle", "food", "plant"].includes(id)
       ? "subject"
       : "context",
-  threshold: id === "portrait" ? 0.65 : 0.16,
+  threshold: id === "single_person" ? 0.45 : 0.16,
   isPrimaryCategory: id.startsWith("photo_"),
   taxonomyVersion:
     id.startsWith("photo_") || id === "indoor" || id === "outdoor"
-      ? "photo-organizer-photography-topics-v1"
-      : "photo-organizer-subject-tags-v1",
+      ? "photo-organizer-photography-topics-v3"
+      : "photo-organizer-subject-tags-v2",
 }));
 
 const library: LibrarySummary = {
@@ -159,6 +158,7 @@ const assets: AssetListItem[] = names.map((fileName, index) => {
     saturationLabel,
     dominantColor: palette[index % palette.length],
     dominantColorCategory,
+    colorPalette: null,
     neutralRatio: 0.18,
     dominantColorCoverage: 0.52,
     semanticStatus: "completed",
@@ -223,7 +223,7 @@ export function visualFixtureFromSearch(search: string): VisualFixture | null {
     semanticStatus: {
       status: "ready",
       message:
-        "Places365 ResNet-18 已就绪；拍摄题材使用本地 365 类模型，向量搜索使用本地 TinyCLIP。",
+        "Places365 ResNet-18 已就绪；环境证据与摄影题材候选已启用 SigLIP2-Base-Patch16-224。",
       model: {
         name: "Places365-ResNet18",
         version: "onnx-2026-08-10",
@@ -232,6 +232,16 @@ export function visualFixtureFromSearch(search: string): VisualFixture | null {
         installed: true,
         modelSizeBytes: 45_575_731,
         modelSha256: "3c3cd0d42693e2957fcaa0bc365ce78e169a2e1162356742adfbd11077e8f7bf",
+        supportedBackends: ["cpu"],
+      },
+      topicModel: {
+        name: "SigLIP2-Base-Patch16-224",
+        version: "onnx-int8-2026-08-11",
+        analysisVersion: "photo-organizer-semantic-topic-candidates-siglip2-v2",
+        license: "Apache-2.0",
+        installed: true,
+        modelSizeBytes: 378_000_135,
+        modelSha256: "bfe28fe2ccdb685874586648035ea349593e487ce33bd0939b28813681a8f167",
         supportedBackends: ["cpu"],
       },
       selectedBackend: "cpu",
@@ -275,7 +285,7 @@ export function visualFixtureFromSearch(search: string): VisualFixture | null {
         categoryGroup: "scene",
         assetCount: 4,
       },
-      { labelId: "photo_food", displayName: "美食餐饮", categoryGroup: "scene", assetCount: 4 },
+      { labelId: "photo_food", displayName: "美食", categoryGroup: "scene", assetCount: 4 },
       { labelId: "outdoor", displayName: "室外", categoryGroup: "context", assetCount: 11 },
     ],
     folders: [
@@ -314,12 +324,18 @@ export function fixtureAssetPage(
 
 function semanticLabelsFor(index: number) {
   const ids: ReadonlyArray<readonly [string, string]> = [
+    ["photo_portrait", "人像"],
     ["photo_landscape", "风光自然"],
-    ["photo_architecture", "建筑与空间"],
-    ["photo_food", "美食餐饮"],
-    ["photo_plant", "植物与园艺"],
-    ["photo_urban", "城市街拍"],
-    ["photo_indoor", "室内与生活"],
+    ["photo_street", "街拍纪实"],
+    ["photo_architecture", "建筑"],
+    ["photo_still_life", "静物产品"],
+    ["photo_food", "美食"],
+    ["photo_wildlife", "动物"],
+    ["photo_macro", "植物"],
+    ["photo_activity", "运动"],
+    ["photo_vehicle", "交通工具"],
+    ["photo_document", "文档截图"],
+    ["photo_abstract", "抽象艺术"],
   ];
   const primary = ids[index % ids.length];
   const secondary = index % 4 === 0 ? (["outdoor", "室外"] as const) : null;
@@ -330,10 +346,10 @@ function semanticLabelsFor(index: number) {
       displayName,
       similarity: 0.29 - rank * 0.04,
       threshold: 0.16,
-      modelName: "Places365-ResNet18",
-      modelVersion: "onnx-2026-08-10",
-      analysisVersion: "photo-organizer-semantic-places365-photography-v1",
-      taxonomyVersion: "photo-organizer-photography-topics-v1",
+      modelName: "SigLIP2-Base-Patch16-224",
+      modelVersion: "onnx-int8-2026-08-11",
+      analysisVersion: "photo-organizer-semantic-topic-candidates-siglip2-v2",
+      taxonomyVersion: "photo-organizer-photography-topics-v3",
       analyzedAt: "2026-08-07T03:12:00Z",
       isManual: false,
       isPrimary: rank === 0,
@@ -380,6 +396,11 @@ function fixtureClassification(
 }
 
 function matchesFilter(asset: AssetListItem, filter: AssetFilter) {
+  // The browser fixture has no mutable favorite/collection store. Treat the
+  // highest-rated fixture item as a stable favorite so source navigation can
+  // still be exercised without inventing a second mutable data store.
+  if (filter.favoriteOnly && asset.rating < 4) return false;
+  if (filter.collectionId !== null) return false;
   if (filter.search) {
     const search = filter.search.toLocaleLowerCase();
     if (!asset.fileName.toLocaleLowerCase().includes(search)) return false;

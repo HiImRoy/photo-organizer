@@ -1,11 +1,13 @@
 use std::collections::HashMap;
 use std::fs::{self, File};
 use std::io::Read;
+use std::panic::AssertUnwindSafe;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::{self, SyncSender};
 use std::time::{Duration, Instant, UNIX_EPOCH};
 
-use crate::db::{LibrarySourceRoot, Repository};
+use crate::db::{LibrarySourceRoot, ProcessedAssetWrite, Repository, SeenAssetWrite};
 use crate::error::{AppError, AppResult};
 use crate::imaging::{process_image_from_cached_thumbnail, process_image_with_source_bytes};
 use crate::models::{FileSnapshot, ProcessedImage, ScanPerformance, ScanProgress, ScanSummary};
@@ -13,8 +15,10 @@ use crate::source_identity::{
     SourceIdentity, existing_identity, identity_key, is_same_or_descendant,
 };
 
-const MIN_IMPORT_IMAGE_WORKERS: usize = 2;
-const MAX_IMPORT_IMAGE_WORKERS: usize = 4;
+const MIN_IMPORT_IMAGE_WORKERS: usize = 1;
+const MAX_IMPORT_IMAGE_WORKERS: usize = 2;
+const IMPORT_DISCOVERY_WINDOW: usize = 24;
+const IMPORT_DATABASE_BATCH: usize = 16;
 
 struct PendingImageWork {
     path: PathBuf,
@@ -24,6 +28,14 @@ struct PendingImageWork {
     cached_thumbnail_path: Option<PathBuf>,
 }
 
+enum DiscoveryItem {
+    Image(PathBuf),
+    Skipped,
+    Error(String),
+    Finished { discovery_us: u64 },
+}
+
+#[derive(Clone)]
 struct ImageWorkResult {
     path: PathBuf,
     snapshot: FileSnapshot,
@@ -350,184 +362,262 @@ where
     let mut reporter = ScanProgressReporter::new(repository, task_id, emit);
     reporter.force(&mut progress, &performance)?;
 
-    let discovery_started = Instant::now();
-    let mut candidates = Vec::new();
-    for entry in walkdir::WalkDir::new(root)
-        .follow_links(false)
-        .into_iter()
-        .filter_entry(|entry| !is_pruned_source_root(entry.path(), &descendant_roots))
-    {
-        match entry {
-            Ok(entry) if entry.file_type().is_file() => {
-                if is_supported_image(entry.path()) {
-                    candidates.push(entry.into_path());
-                } else {
-                    progress.skipped += 1;
-                }
-            }
-            Ok(_) => {}
-            Err(error) => {
-                progress.failed += 1;
-                progress.error = Some(error.to_string());
-                reporter.report(&mut progress, &performance)?;
-            }
-        }
-    }
-    add_elapsed(&mut performance.discovery_us, discovery_started);
-    candidates.sort_by_key(|path| path_to_string(path));
-    progress.discovered = candidates.len() as u64;
-    progress.stage = "processing".into();
-    progress.error = None;
-    reporter.force(&mut progress, &performance)?;
+    // Ownership is immutable for the duration of one scan. Loading all
+    // source roots once avoids opening and querying SQLite for every image.
+    let ownership_roots = repository.library_source_roots()?;
 
-    let image_worker_count = import_image_worker_count();
-    let mut pending_work = Vec::with_capacity(image_worker_count);
-    for path in candidates {
-        if cancelled.load(Ordering::Relaxed) {
-            progress.status = "cancelled".into();
-            progress.stage = "cancelled".into();
-            progress.current_path = None;
-            if complete_job {
-                repository.cancel_scan(task_id, library_id)?;
+    let scan_result = std::thread::scope(|scope| -> AppResult<Option<ScanSummary>> {
+        let (discovery_tx, discovery_rx) = mpsc::sync_channel(IMPORT_DISCOVERY_WINDOW);
+        let mut discovery_handle = Some(scope.spawn(|| {
+            stream_discovered_images(root, &descendant_roots, cancelled, discovery_tx);
+        }));
+        let mut pending_work = Vec::with_capacity(IMPORT_DATABASE_BATCH);
+        let mut completed_results = Vec::with_capacity(IMPORT_DATABASE_BATCH);
+        let mut pending_seen = Vec::with_capacity(IMPORT_DATABASE_BATCH);
+        let mut discovered_images = Vec::new();
+        let mut processing_phase = false;
+
+        loop {
+            let item = if processing_phase {
+                match discovered_images.pop() {
+                    Some(path) => DiscoveryItem::Image(path),
+                    None => break,
+                }
             } else {
-                repository.cancel_library_scope(library_id)?;
-            }
-            reporter.force(&mut progress, &performance)?;
-            return Ok(summary_from_progress(&progress, library_id));
-        }
-
-        let ownership_started = Instant::now();
-        let Some(owner) = repository.resolve_library_owner(&path)? else {
-            add_elapsed(&mut performance.ownership_lookup_us, ownership_started);
-            continue;
-        };
-        add_elapsed(&mut performance.ownership_lookup_us, ownership_started);
-        if owner.library_id != library_id {
-            continue;
-        }
-        progress.current_path = Some(path_to_string(&path));
-
-        let metadata_started = Instant::now();
-        let snapshot = match snapshot_file(&owner.source_path, &path) {
-            Ok(snapshot) => snapshot,
-            Err(error) => {
-                add_elapsed(&mut performance.metadata_lookup_us, metadata_started);
-                let fallback = fallback_snapshot(&owner.source_path, &path);
-                let fingerprint = fallback_fingerprint(&fallback);
-                let database_started = Instant::now();
-                let database_result = repository.upsert_failed_asset(
-                    library_id,
-                    generation,
-                    &fallback,
-                    &fingerprint,
-                    &error.to_string(),
-                );
-                add_elapsed(&mut performance.database_write_us, database_started);
-                database_result?;
-                progress.processed += 1;
-                progress.failed += 1;
-                performance.failed_files += 1;
-                progress.error = Some(error.to_string());
-                reporter.report(&mut progress, &performance)?;
-                continue;
-            }
-        };
-
-        let asset_identity_key = identity_key(Path::new(&snapshot.absolute_path));
-        let existing = repository.find_existing_asset(&asset_identity_key)?;
-        add_elapsed(&mut performance.metadata_lookup_us, metadata_started);
-        if let Some(existing) = existing {
-            let cache_ready = existing.thumbnail_status.as_deref() == Some("ready")
-                && existing
-                    .cache_path
-                    .as_deref()
-                    .is_some_and(|cache| Path::new(cache).is_file());
-            if existing.file_size == snapshot.file_size
-                && existing.modified_at == snapshot.modified_at
-                && existing.analysis_status == "completed"
-                && existing.analysis_algorithm_version.as_deref()
-                    == Some(crate::imaging::ANALYSIS_VERSION)
-                && cache_ready
-            {
-                let database_started = Instant::now();
-                let database_result = repository.touch_asset_seen(
-                    existing.id,
-                    owner.library_id,
-                    &snapshot.relative_path,
-                    generation,
-                );
-                add_elapsed(&mut performance.database_write_us, database_started);
-                database_result?;
-                progress.processed += 1;
-                progress.skipped += 1;
-                performance.skipped_files += 1;
-                progress.error = None;
-                reporter.report(&mut progress, &performance)?;
-                continue;
-            }
-
-            if existing.file_size == snapshot.file_size
-                && existing.modified_at == snapshot.modified_at
-                && cache_ready
-            {
-                pending_work.push(PendingImageWork {
-                    path,
-                    snapshot,
-                    library_id,
-                    generation,
-                    cached_thumbnail_path: existing.cache_path.map(PathBuf::from),
-                });
-                if pending_work.len() < image_worker_count {
-                    continue;
+                match discovery_rx.recv() {
+                    Ok(item) => item,
+                    Err(_) => {
+                        let discovery_panicked = discovery_handle
+                            .take()
+                            .is_some_and(|handle| handle.join().is_err());
+                        let detail = if discovery_panicked {
+                            "image discovery worker panicked"
+                        } else {
+                            "image discovery worker stopped unexpectedly"
+                        };
+                        return Err(AppError::InvalidArgument(detail.into()));
+                    }
                 }
+            };
 
-                if let Some(next) = pending_work.last() {
-                    progress.current_path = Some(path_to_string(&next.path));
-                    reporter.force(&mut progress, &performance)?;
+            if cancelled.load(Ordering::Relaxed) {
+                if let Some(handle) = discovery_handle.take() {
+                    drop(discovery_rx);
+                    handle.join().map_err(|_| {
+                        AppError::InvalidArgument("image discovery worker panicked".into())
+                    })?;
                 }
-                for result in
-                    process_image_work_batch(std::mem::take(&mut pending_work), thumbnail_dir)
-                {
-                    progress.current_path = Some(path_to_string(&result.path));
-                    apply_image_work_result(repository, result, &mut progress, &mut performance)?;
+                return Ok(Some(cancel_scan_scope(
+                    repository,
+                    task_id,
+                    library_id,
+                    complete_job,
+                    &mut completed_results,
+                    &mut pending_seen,
+                    &mut progress,
+                    &mut performance,
+                    &mut reporter,
+                )?));
+            }
+
+            match item {
+                DiscoveryItem::Image(path) => {
+                    if !processing_phase {
+                        progress.discovered += 1;
+                        discovered_images.push(path);
+                        reporter.report(&mut progress, &performance)?;
+                        continue;
+                    }
+
+                    let ownership_started = Instant::now();
+                    let path_key = identity_key(&path);
+                    let Some(owner) = ownership_roots
+                        .iter()
+                        .filter(|root| is_same_or_descendant(&root.identity_key, &path_key))
+                        .max_by_key(|root| root.identity_key.len())
+                        .cloned()
+                    else {
+                        add_elapsed(&mut performance.ownership_lookup_us, ownership_started);
+                        continue;
+                    };
+                    add_elapsed(&mut performance.ownership_lookup_us, ownership_started);
+                    if owner.library_id != library_id {
+                        continue;
+                    }
+                    progress.current_path = Some(path_to_string(&path));
+
+                    let metadata_started = Instant::now();
+                    let snapshot = match snapshot_file(&owner.source_path, &path) {
+                        Ok(snapshot) => snapshot,
+                        Err(error) => {
+                            add_elapsed(&mut performance.metadata_lookup_us, metadata_started);
+                            let fallback = fallback_snapshot(&owner.source_path, &path);
+                            let fingerprint = fallback_fingerprint(&fallback);
+                            let database_started = Instant::now();
+                            let database_result = repository.upsert_failed_asset(
+                                library_id,
+                                generation,
+                                &fallback,
+                                &fingerprint,
+                                &error.to_string(),
+                            );
+                            add_elapsed(&mut performance.database_write_us, database_started);
+                            database_result?;
+                            progress.processed += 1;
+                            progress.failed += 1;
+                            performance.failed_files += 1;
+                            progress.error = Some(error.to_string());
+                            reporter.report(&mut progress, &performance)?;
+                            continue;
+                        }
+                    };
+
+                    let asset_identity_key = identity_key(Path::new(&snapshot.absolute_path));
+                    let existing = repository.find_existing_asset(&asset_identity_key)?;
+                    add_elapsed(&mut performance.metadata_lookup_us, metadata_started);
+                    if let Some(existing) = existing {
+                        let cache_ready = existing.thumbnail_status.as_deref() == Some("ready")
+                            && existing
+                                .cache_path
+                                .as_deref()
+                                .is_some_and(|cache| Path::new(cache).is_file());
+                        if existing.file_size == snapshot.file_size
+                            && existing.modified_at == snapshot.modified_at
+                            && existing.analysis_status == "completed"
+                            && existing.analysis_algorithm_version.as_deref()
+                                == Some(crate::imaging::ANALYSIS_VERSION)
+                            && cache_ready
+                        {
+                            pending_seen.push(SeenAssetWrite {
+                                asset_id: existing.id,
+                                library_id: owner.library_id,
+                                relative_path: snapshot.relative_path.clone(),
+                                generation,
+                            });
+                            if pending_seen.len() >= IMPORT_DATABASE_BATCH {
+                                flush_seen_assets(repository, &mut pending_seen, &mut performance)?;
+                            }
+                            progress.processed += 1;
+                            progress.skipped += 1;
+                            performance.skipped_files += 1;
+                            progress.error = None;
+                            reporter.report(&mut progress, &performance)?;
+                            continue;
+                        }
+
+                        if existing.file_size == snapshot.file_size
+                            && existing.modified_at == snapshot.modified_at
+                            && cache_ready
+                        {
+                            pending_work.push(PendingImageWork {
+                                path,
+                                snapshot,
+                                library_id,
+                                generation,
+                                cached_thumbnail_path: existing.cache_path.map(PathBuf::from),
+                            });
+                            if pending_work.len() < IMPORT_DATABASE_BATCH {
+                                continue;
+                            }
+                            flush_pending_image_work(
+                                repository,
+                                thumbnail_dir,
+                                &mut pending_work,
+                                &mut completed_results,
+                                &mut progress,
+                                &mut performance,
+                                &mut reporter,
+                            )?;
+                            continue;
+                        }
+                    }
+
+                    pending_work.push(PendingImageWork {
+                        path,
+                        snapshot,
+                        library_id,
+                        generation,
+                        cached_thumbnail_path: None,
+                    });
+                    if pending_work.len() < IMPORT_DATABASE_BATCH {
+                        continue;
+                    }
+                    flush_pending_image_work(
+                        repository,
+                        thumbnail_dir,
+                        &mut pending_work,
+                        &mut completed_results,
+                        &mut progress,
+                        &mut performance,
+                        &mut reporter,
+                    )?;
+                }
+                DiscoveryItem::Skipped => {
+                    progress.skipped += 1;
                     reporter.report(&mut progress, &performance)?;
                 }
-                continue;
+                DiscoveryItem::Error(error) => {
+                    progress.failed += 1;
+                    progress.error = Some(error);
+                    reporter.report(&mut progress, &performance)?;
+                }
+                DiscoveryItem::Finished { discovery_us } => {
+                    performance.discovery_us = discovery_us;
+                    if let Some(handle) = discovery_handle.take() {
+                        handle.join().map_err(|_| {
+                            AppError::InvalidArgument("image discovery worker panicked".into())
+                        })?;
+                    }
+                    processing_phase = true;
+                    progress.stage = "processing".into();
+                    progress.error = None;
+                    reporter.force(&mut progress, &performance)?;
+                    continue;
+                }
             }
         }
 
-        pending_work.push(PendingImageWork {
-            path,
-            snapshot,
-            library_id,
-            generation,
-            cached_thumbnail_path: None,
-        });
-        if pending_work.len() < image_worker_count {
-            continue;
+        if let Some(handle) = discovery_handle.take() {
+            handle
+                .join()
+                .map_err(|_| AppError::InvalidArgument("image discovery worker panicked".into()))?;
         }
+        if cancelled.load(Ordering::Relaxed) {
+            return Ok(Some(cancel_scan_scope(
+                repository,
+                task_id,
+                library_id,
+                complete_job,
+                &mut completed_results,
+                &mut pending_seen,
+                &mut progress,
+                &mut performance,
+                &mut reporter,
+            )?));
+        }
+        flush_pending_image_work(
+            repository,
+            thumbnail_dir,
+            &mut pending_work,
+            &mut completed_results,
+            &mut progress,
+            &mut performance,
+            &mut reporter,
+        )?;
+        flush_completed_results(
+            repository,
+            &mut completed_results,
+            &mut progress,
+            &mut performance,
+            &mut reporter,
+            true,
+        )?;
+        flush_seen_assets(repository, &mut pending_seen, &mut performance)?;
+        Ok(None)
+    })?;
 
-        if let Some(next) = pending_work.last() {
-            progress.current_path = Some(path_to_string(&next.path));
-            reporter.force(&mut progress, &performance)?;
-        }
-        for result in process_image_work_batch(std::mem::take(&mut pending_work), thumbnail_dir) {
-            progress.current_path = Some(path_to_string(&result.path));
-            apply_image_work_result(repository, result, &mut progress, &mut performance)?;
-            reporter.report(&mut progress, &performance)?;
-        }
-    }
-
-    if !pending_work.is_empty() {
-        if let Some(next) = pending_work.last() {
-            progress.current_path = Some(path_to_string(&next.path));
-            reporter.force(&mut progress, &performance)?;
-        }
-        for result in process_image_work_batch(pending_work, thumbnail_dir) {
-            progress.current_path = Some(path_to_string(&result.path));
-            apply_image_work_result(repository, result, &mut progress, &mut performance)?;
-            reporter.report(&mut progress, &performance)?;
-        }
+    if let Some(summary) = scan_result {
+        return Ok(summary);
     }
 
     progress.missing = if complete_job {
@@ -543,26 +633,167 @@ where
     Ok(summary_from_progress(&progress, library_id))
 }
 
+#[allow(clippy::too_many_arguments)]
+fn cancel_scan_scope<F>(
+    repository: &Repository,
+    task_id: &str,
+    library_id: i64,
+    complete_job: bool,
+    completed_results: &mut Vec<ImageWorkResult>,
+    pending_seen: &mut Vec<SeenAssetWrite>,
+    progress: &mut ScanProgress,
+    performance: &mut ScanPerformance,
+    reporter: &mut ScanProgressReporter<'_, F>,
+) -> AppResult<ScanSummary>
+where
+    F: Fn(ScanProgress),
+{
+    progress.status = "cancelled".into();
+    progress.stage = "cancelled".into();
+    progress.current_path = None;
+    flush_completed_results(
+        repository,
+        completed_results,
+        progress,
+        performance,
+        reporter,
+        true,
+    )?;
+    flush_seen_assets(repository, pending_seen, performance)?;
+    if complete_job {
+        repository.cancel_scan(task_id, library_id)?;
+    } else {
+        repository.cancel_library_scope(library_id)?;
+    }
+    reporter.force(progress, performance)?;
+    Ok(summary_from_progress(progress, library_id))
+}
+
+fn stream_discovered_images(
+    root: &Path,
+    descendant_roots: &[LibrarySourceRoot],
+    cancelled: &AtomicBool,
+    sender: SyncSender<DiscoveryItem>,
+) {
+    let mut traversal_started = Instant::now();
+    let mut discovery_us: u64 = 0;
+    for entry in walkdir::WalkDir::new(root)
+        .follow_links(false)
+        .into_iter()
+        .filter_entry(|entry| !is_pruned_source_root(entry.path(), descendant_roots))
+    {
+        if cancelled.load(Ordering::Relaxed) {
+            break;
+        }
+
+        let item = match entry {
+            Ok(entry) if entry.file_type().is_file() => {
+                if is_supported_image(entry.path()) {
+                    DiscoveryItem::Image(entry.into_path())
+                } else {
+                    DiscoveryItem::Skipped
+                }
+            }
+            Ok(_) => continue,
+            Err(error) => DiscoveryItem::Error(error.to_string()),
+        };
+        discovery_us = discovery_us.saturating_add(elapsed_us(traversal_started));
+        if sender.send(item).is_err() {
+            return;
+        }
+        traversal_started = Instant::now();
+    }
+
+    let _ = sender.send(DiscoveryItem::Finished {
+        discovery_us: discovery_us.saturating_add(elapsed_us(traversal_started)),
+    });
+}
+
+#[allow(clippy::too_many_arguments)]
+fn flush_pending_image_work<F>(
+    repository: &Repository,
+    thumbnail_dir: &Path,
+    pending_work: &mut Vec<PendingImageWork>,
+    completed_results: &mut Vec<ImageWorkResult>,
+    progress: &mut ScanProgress,
+    performance: &mut ScanPerformance,
+    reporter: &mut ScanProgressReporter<'_, F>,
+) -> AppResult<()>
+where
+    F: Fn(ScanProgress),
+{
+    if pending_work.is_empty() {
+        return Ok(());
+    }
+
+    if let Some(next) = pending_work.last() {
+        progress.current_path = Some(path_to_string(&next.path));
+        reporter.force(progress, performance)?;
+    }
+    completed_results.extend(process_image_work_batch(
+        std::mem::take(pending_work),
+        thumbnail_dir,
+    ));
+    flush_completed_results(
+        repository,
+        completed_results,
+        progress,
+        performance,
+        reporter,
+        false,
+    )
+}
+
 fn process_image_work_batch(
     work: Vec<PendingImageWork>,
     thumbnail_dir: &Path,
 ) -> Vec<ImageWorkResult> {
+    if work.is_empty() {
+        return Vec::new();
+    }
+
+    let worker_count = import_image_worker_count().min(work.len());
+    let mut work_chunks: Vec<Vec<PendingImageWork>> =
+        (0..worker_count).map(|_| Vec::new()).collect();
+    for (index, work) in work.into_iter().enumerate() {
+        work_chunks[index % worker_count].push(work);
+    }
+
     std::thread::scope(|scope| {
-        let handles = work
-            .into_iter()
-            .map(|work| {
-                let thumbnail_dir = thumbnail_dir.to_path_buf();
-                scope.spawn(move || process_image_work(work, thumbnail_dir))
+        let handles = work_chunks.into_iter().map(|work_chunk| {
+            let thumbnail_dir = thumbnail_dir.to_path_buf();
+            scope.spawn(move || {
+                work_chunk
+                    .into_iter()
+                    .map(|work| process_image_work_safely(work, &thumbnail_dir))
+                    .collect::<Vec<_>>()
             })
-            .collect::<Vec<_>>();
+        });
+        let handles = handles.collect::<Vec<_>>();
         handles
             .into_iter()
-            .map(|handle| handle.join().expect("image worker panicked"))
+            .flat_map(|handle| handle.join().unwrap_or_default())
             .collect()
     })
 }
 
-fn process_image_work(work: PendingImageWork, thumbnail_dir: PathBuf) -> ImageWorkResult {
+fn process_image_work_safely(work: PendingImageWork, thumbnail_dir: &Path) -> ImageWorkResult {
+    let fallback = ImageWorkResult {
+        path: work.path.clone(),
+        snapshot: work.snapshot.clone(),
+        library_id: work.library_id,
+        generation: work.generation,
+        fingerprint: None,
+        processed: None,
+        error: Some("image worker panicked; the file was skipped".into()),
+        fingerprint_us: 0,
+        image_processing_us: 0,
+    };
+    std::panic::catch_unwind(AssertUnwindSafe(|| process_image_work(work, thumbnail_dir)))
+        .unwrap_or(fallback)
+}
+
+fn process_image_work(work: PendingImageWork, thumbnail_dir: &Path) -> ImageWorkResult {
     let fingerprint_started = Instant::now();
     let fingerprinted_source = match work.cached_thumbnail_path.is_some() {
         true => hash_file(&work.path).map(|fingerprint| FingerprintedSource {
@@ -594,7 +825,7 @@ fn process_image_work(work: PendingImageWork, thumbnail_dir: PathBuf) -> ImageWo
         Some(thumbnail_path) => process_image_from_cached_thumbnail(&work.path, &thumbnail_path),
         None => process_image_with_source_bytes(
             &work.path,
-            &thumbnail_dir,
+            thumbnail_dir,
             &fingerprint,
             fingerprinted_source.bytes.as_deref(),
         ),
@@ -627,80 +858,131 @@ fn process_image_work(work: PendingImageWork, thumbnail_dir: PathBuf) -> ImageWo
     }
 }
 
-fn apply_image_work_result(
+#[allow(clippy::too_many_arguments)]
+fn flush_completed_results<F>(
     repository: &Repository,
-    result: ImageWorkResult,
+    completed_results: &mut Vec<ImageWorkResult>,
+    progress: &mut ScanProgress,
+    performance: &mut ScanPerformance,
+    reporter: &mut ScanProgressReporter<'_, F>,
+    force: bool,
+) -> AppResult<()>
+where
+    F: Fn(ScanProgress),
+{
+    if completed_results.is_empty() || (!force && completed_results.len() < IMPORT_DATABASE_BATCH) {
+        return Ok(());
+    }
+
+    let results = std::mem::take(completed_results);
+    apply_image_work_results_batch(repository, &results, progress, performance)?;
+    if let Some(last) = results.last() {
+        progress.current_path = Some(path_to_string(&last.path));
+    }
+    reporter.report(progress, performance)
+}
+
+fn apply_image_work_results_batch(
+    repository: &Repository,
+    results: &[ImageWorkResult],
     progress: &mut ScanProgress,
     performance: &mut ScanPerformance,
 ) -> AppResult<()> {
-    performance.fingerprint_us = performance
-        .fingerprint_us
-        .saturating_add(result.fingerprint_us);
-    performance.image_processing_us = performance
-        .image_processing_us
-        .saturating_add(result.image_processing_us);
+    let mut processed_writes = Vec::with_capacity(results.len());
+    let mut failed_results = Vec::new();
 
-    if let Some(processed) = result.processed {
-        performance.exif_us = performance
-            .exif_us
-            .saturating_add(processed.timings.exif_us);
-        performance.source_dimension_us = performance
-            .source_dimension_us
-            .saturating_add(processed.timings.source_dimension_us);
-        performance.decode_us = performance
-            .decode_us
-            .saturating_add(processed.timings.decode_us);
-        performance.source_decode_us = performance
-            .source_decode_us
-            .saturating_add(processed.timings.source_decode_us);
-        performance.thumbnail_decode_us = performance
-            .thumbnail_decode_us
-            .saturating_add(processed.timings.thumbnail_decode_us);
-        performance.resize_us = performance
-            .resize_us
-            .saturating_add(processed.timings.resize_us);
-        performance.feature_analysis_us = performance
-            .feature_analysis_us
-            .saturating_add(processed.timings.feature_analysis_us);
-        performance.thumbnail_write_us = performance
-            .thumbnail_write_us
-            .saturating_add(processed.timings.thumbnail_write_us);
-        let fingerprint = result.fingerprint.as_deref().unwrap_or("unreadable");
-        let database_started = Instant::now();
-        let database_result = repository.upsert_processed_asset(
-            result.library_id,
-            result.generation,
-            &result.snapshot,
-            fingerprint,
-            &processed,
-        );
-        add_elapsed(&mut performance.database_write_us, database_started);
-        database_result?;
-        progress.succeeded += 1;
-        performance.processed_files += 1;
-        progress.error = None;
-    } else {
+    for result in results {
+        performance.fingerprint_us = performance
+            .fingerprint_us
+            .saturating_add(result.fingerprint_us);
+        performance.image_processing_us = performance
+            .image_processing_us
+            .saturating_add(result.image_processing_us);
+
+        if let Some(processed) = result.processed.as_ref() {
+            performance.exif_us = performance
+                .exif_us
+                .saturating_add(processed.timings.exif_us);
+            performance.source_dimension_us = performance
+                .source_dimension_us
+                .saturating_add(processed.timings.source_dimension_us);
+            performance.decode_us = performance
+                .decode_us
+                .saturating_add(processed.timings.decode_us);
+            performance.source_decode_us = performance
+                .source_decode_us
+                .saturating_add(processed.timings.source_decode_us);
+            performance.thumbnail_decode_us = performance
+                .thumbnail_decode_us
+                .saturating_add(processed.timings.thumbnail_decode_us);
+            performance.resize_us = performance
+                .resize_us
+                .saturating_add(processed.timings.resize_us);
+            performance.feature_analysis_us = performance
+                .feature_analysis_us
+                .saturating_add(processed.timings.feature_analysis_us);
+            performance.thumbnail_write_us = performance
+                .thumbnail_write_us
+                .saturating_add(processed.timings.thumbnail_write_us);
+            processed_writes.push(ProcessedAssetWrite {
+                library_id: result.library_id,
+                generation: result.generation,
+                snapshot: &result.snapshot,
+                fingerprint: result.fingerprint.as_deref().unwrap_or("unreadable"),
+                processed,
+            });
+        } else {
+            failed_results.push(result);
+        }
+    }
+
+    let database_started = Instant::now();
+    repository.upsert_processed_assets_batch(&processed_writes)?;
+    add_elapsed(&mut performance.database_write_us, database_started);
+
+    for result in failed_results {
         let fingerprint = result
             .fingerprint
+            .clone()
             .unwrap_or_else(|| fallback_fingerprint(&result.snapshot));
-        let error = result
-            .error
-            .unwrap_or_else(|| "image processing failed".into());
+        let error = result.error.as_deref().unwrap_or("image processing failed");
         let database_started = Instant::now();
-        let database_result = repository.upsert_failed_asset(
+        repository.upsert_failed_asset(
             result.library_id,
             result.generation,
             &result.snapshot,
             &fingerprint,
-            &error,
-        );
+            error,
+        )?;
         add_elapsed(&mut performance.database_write_us, database_started);
-        database_result?;
-        progress.failed += 1;
-        performance.failed_files += 1;
-        progress.error = Some(error);
     }
-    progress.processed += 1;
+
+    for result in results {
+        progress.processed += 1;
+        if result.processed.is_some() {
+            progress.succeeded += 1;
+            performance.processed_files += 1;
+            progress.error = None;
+        } else {
+            progress.failed += 1;
+            performance.failed_files += 1;
+            progress.error = result.error.clone();
+        }
+    }
+    Ok(())
+}
+
+fn flush_seen_assets(
+    repository: &Repository,
+    pending_seen: &mut Vec<SeenAssetWrite>,
+    performance: &mut ScanPerformance,
+) -> AppResult<()> {
+    if pending_seen.is_empty() {
+        return Ok(());
+    }
+    let database_started = Instant::now();
+    repository.touch_assets_seen_batch(std::mem::take(pending_seen))?;
+    add_elapsed(&mut performance.database_write_us, database_started);
     Ok(())
 }
 
@@ -994,6 +1276,15 @@ mod tests {
         assert!(final_progress.performance.fingerprint_us > 0);
         assert!(final_progress.performance.image_processing_us > 0);
         assert!(final_progress.performance.database_write_us > 0);
+        assert!(
+            events
+                .lock()
+                .expect("events")
+                .iter()
+                .any(|progress| progress.stage == "processing"
+                    && progress.discovered == 3
+                    && progress.processed == 0)
+        );
     }
 
     #[test]
@@ -1085,7 +1376,7 @@ mod tests {
                 &crate::semantic::SemanticAnalysisOutput {
                     predictions: vec![
                         crate::semantic::SemanticPrediction {
-                            label_id: "portrait".into(),
+                            label_id: "photo_portrait".into(),
                             display_name: "人像".into(),
                             category_group: "scene".into(),
                             similarity: 0.31,
@@ -1107,7 +1398,7 @@ mod tests {
             )
             .expect("save semantic result");
         let combined_filter = crate::models::AssetFilter {
-            primary_categories: vec!["portrait".into()],
+            primary_categories: vec!["photo_portrait".into()],
             auxiliary_tags: vec!["night".into()],
             semantic_match: crate::models::SemanticMatchMode::All,
             tone_labels: semantic_asset.tone_label.clone().into_iter().collect(),
@@ -1315,6 +1606,73 @@ mod tests {
             .list_assets_for_organization(child.id, &crate::models::AssetFilter::default(), None)
             .expect("child full assets");
         assert!(child_full_assets[0].relative_path.ends_with("child.png"));
+    }
+
+    #[test]
+    fn rescan_tree_includes_registered_nested_libraries() {
+        let (_temp, paths, repository, source) = setup();
+        let child = source.join("旅行");
+        save_pixel(&source.join("root.png"), Rgba([220, 80, 30, 255]), (8, 8));
+        save_pixel(&child.join("child.png"), Rgba([30, 80, 220, 255]), (8, 8));
+
+        let discovered = discover_import_source_roots(&source).expect("discover roots");
+        let targets = repository
+            .ensure_library_source_roots(&discovered)
+            .expect("register roots");
+        scan_library_tree(
+            &repository,
+            &paths.thumbnail_dir,
+            &source,
+            "initial-tree",
+            &AtomicBool::new(false),
+            targets,
+            |_| {},
+        )
+        .expect("initial tree scan");
+
+        save_pixel(
+            &child.join("new-child.png"),
+            Rgba([30, 180, 120, 255]),
+            (8, 8),
+        );
+        let root_library = repository
+            .library_source_roots()
+            .expect("source roots")
+            .into_iter()
+            .find(|root| root.identity_key == identity_key(&source))
+            .expect("root source");
+        let mut rescan_targets = repository
+            .nested_source_roots(root_library.library_id)
+            .expect("nested source roots");
+        rescan_targets.insert(0, root_library.clone());
+
+        let summary = scan_library_tree(
+            &repository,
+            &paths.thumbnail_dir,
+            &source,
+            "rescan-tree",
+            &AtomicBool::new(false),
+            rescan_targets,
+            |_| {},
+        )
+        .expect("rescan tree");
+
+        assert_eq!(summary.status, "completed");
+        assert_eq!(summary.discovered, 3);
+        let child_library = repository
+            .library_source_roots()
+            .expect("source roots after rescan")
+            .into_iter()
+            .find(|root| root.identity_key == identity_key(&child))
+            .expect("child source");
+        let child_assets = repository
+            .list_assets_for_organization(
+                child_library.library_id,
+                &crate::models::AssetFilter::default(),
+                None,
+            )
+            .expect("child assets after rescan");
+        assert_eq!(child_assets.len(), 2);
     }
 
     #[test]

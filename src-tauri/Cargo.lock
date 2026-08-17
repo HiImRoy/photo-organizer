@@ -2767,6 +2767,7 @@ dependencies = [
  "unicode-normalization-alignments",
  "uuid",
  "walkdir",
+ "windows",
 ]
 
 [[package]]

@@ -5,15 +5,16 @@ use std::process::ExitCode;
 
 use clap::{Parser, ValueEnum};
 use photo_organizer_lib::semantic::{
-    BenchmarkReport, ExecutionBackend, Places365Classifier, SemanticClassifier, TinyClipClassifier,
-    UnavailableClassifier, benchmark_classifier, discover_benchmark_images,
+    BenchmarkReport, ExecutionBackend, OpenVocabularyClipClassifier, Places365Classifier,
+    SemanticClassifier, TopicModelKind, UnavailableClassifier, benchmark_classifier,
+    discover_benchmark_images,
 };
 
 #[derive(Debug, Parser)]
 #[command(
     name = "semantic-benchmark",
     about = "Benchmark a PhotoOrganizer semantic classifier adapter",
-    long_about = "Runs the bundled Places365 or TinyCLIP ONNX adapter against an explicit fixture directory and records real CPU predictions and timing. The unavailable adapter remains available to verify the no-fake-label fallback."
+    long_about = "Runs the bundled Places365 environment classifier or SigLIP 2 Base topic classifier against an explicit fixture directory and records real CPU predictions and timing. The unavailable adapter remains available to verify the no-fake-label fallback."
 )]
 struct Arguments {
     #[arg(long, value_name = "DIR")]
@@ -101,7 +102,7 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
             manifest_dir
                 .join("resources")
                 .join("models")
-                .join("tinyclip-vit-8m-16-text-3m-yfcc15m")
+                .join("siglip2-base-patch16-224")
         });
         let runtime = arguments.runtime.unwrap_or_else(|| {
             manifest_dir
@@ -114,13 +115,19 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
             &embedding_model_dir,
             &runtime,
         )?)
-    } else if arguments.model == "tinyclip" {
+    } else if arguments.model == "siglip2-base" {
         let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let topic_model = TopicModelKind::parse(&arguments.model)
+            .ok_or_else(|| format!("unsupported topic model: {}", arguments.model))?;
+        let default_dir_name = match topic_model {
+            TopicModelKind::Siglip2Base => "siglip2-base-patch16-224",
+            _ => unreachable!("only the bundled SigLIP 2 topic model is accepted"),
+        };
         let model_dir = arguments.model_dir.unwrap_or_else(|| {
             manifest_dir
                 .join("resources")
                 .join("models")
-                .join("tinyclip-vit-8m-16-text-3m-yfcc15m")
+                .join(default_dir_name)
         });
         let runtime = arguments.runtime.unwrap_or_else(|| {
             manifest_dir
@@ -128,9 +135,13 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
                 .join("runtime")
                 .join("onnxruntime.dll")
         });
-        Box::new(TinyClipClassifier::load(&model_dir, &runtime)?)
+        Box::new(OpenVocabularyClipClassifier::load(
+            topic_model,
+            &model_dir,
+            &runtime,
+        )?)
     } else {
-        return Err("--model must be places365, tinyclip or unavailable".into());
+        return Err("--model must be places365, siglip2-base or unavailable".into());
     };
     let report = benchmark_classifier(
         classifier.as_ref(),

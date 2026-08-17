@@ -24,6 +24,13 @@ path = "src/bin/semantic-benchmark.rs"
 [target.'cfg(target_env = "msvc")'.build-dependencies]
 tauri-build = { version = "2", features = [] }
 
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.61.3", features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Imaging",
+    "Win32_System_Com",
+] }
+
 [features]
 default = ["desktop"]
 desktop = ["dep:tauri", "dep:tauri-plugin-dialog", "dep:tauri-plugin-log"]

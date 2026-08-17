@@ -13,12 +13,12 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tokenizers::{PaddingParams, PaddingStrategy, Tokenizer, TruncationParams};
 
-use crate::places365;
+use crate::{places365, topics};
 
 pub const MODEL_NAME: &str = "Places365-ResNet18";
-pub const MODEL_VERSION: &str = "onnx-2026-08-10";
-pub const ANALYSIS_VERSION: &str = "photo-organizer-semantic-places365-photography-v1";
-pub const TAXONOMY_VERSION: &str = places365::TAXONOMY_VERSION;
+pub const MODEL_VERSION: &str = "onnx-2026-08-11";
+pub const ANALYSIS_VERSION: &str = "photo-organizer-semantic-topic-candidates-tinyclip-v2";
+pub const TAXONOMY_VERSION: &str = topics::TAXONOMY_VERSION;
 pub const MODEL_FILE: &str = "resnet18_places365.onnx";
 pub const TOKENIZER_FILE: &str = "categories_places365.txt";
 pub const IO_FILE: &str = "IO_places365.txt";
@@ -34,6 +34,28 @@ pub const TINYCLIP_MODEL_SHA256: &str =
     "10921310ddef06557ec1598d1260470a0a4db53f70ffe0deb60b946dcad6d27a";
 pub const TINYCLIP_TOKENIZER_SHA256: &str =
     "6d9109cc838977f3ca94a379eec36aecc7c807e1785cd729660ca2fc0171fb35";
+pub const SIGLIP2_MODEL_NAME: &str = "SigLIP2-Base-Patch16-224";
+pub const SIGLIP2_MODEL_VERSION: &str = "onnx-int8-2026-08-11";
+pub const SIGLIP2_ANALYSIS_VERSION: &str = "photo-organizer-semantic-topic-candidates-siglip2-v2";
+pub const SIGLIP2_MODEL_FILE: &str = "model_int8.onnx";
+pub const SIGLIP2_TOKENIZER_FILE: &str = "tokenizer.json";
+pub const SIGLIP2_MODEL_SHA256: &str =
+    "bfe28fe2ccdb685874586648035ea349593e487ce33bd0939b28813681a8f167";
+pub const SIGLIP2_TOKENIZER_SHA256: &str =
+    "cb9140fae3ac5122c972d37adf83e1248471a38147ad76f8215c8872c6fd8322";
+pub const MOBILECLIP_MODEL_NAME: &str = "MobileCLIP-S0";
+pub const MOBILECLIP_MODEL_VERSION: &str = "onnx-int8-2026-08-11";
+pub const MOBILECLIP_ANALYSIS_VERSION: &str =
+    "photo-organizer-semantic-topic-candidates-mobileclip-s0-v1";
+pub const MOBILECLIP_VISION_FILE: &str = "vision_model_int8.onnx";
+pub const MOBILECLIP_TEXT_FILE: &str = "text_model_int8.onnx";
+pub const MOBILECLIP_TOKENIZER_FILE: &str = "tokenizer.json";
+pub const MOBILECLIP_VISION_SHA256: &str =
+    "7a1b45f57fb9f3cde9d325759883e9451d7281336caeb9c576ae918e72080f0b";
+pub const MOBILECLIP_TEXT_SHA256: &str =
+    "fc8d87978623385c17a46331ffb9cb5ab7fe8b61c513c094602b85f08edd0a0b";
+pub const MOBILECLIP_TOKENIZER_SHA256: &str =
+    "72ed5c96db5729294468543e4bc75fce14ca63f58e37300290189ba1c1e52b85";
 pub const RUNTIME_SHA256: &str = "8a1aad8d59d02a5337d4e3f5bbd1158c3f7bf84fe3b3f0052f957dd3e75a91cb";
 pub const EMBEDDING_DIMENSIONS: usize = 512;
 
@@ -42,14 +64,70 @@ const PLACES365_IMAGE_SIZE: usize = 224;
 const TOKEN_LENGTH: usize = 77;
 const PAD_TOKEN_ID: u32 = 49_407;
 const MAX_LABELS: usize = 8;
-const TOP_SCORE_WINDOW: f32 = 0.055;
-const SCENE_SCORE_MARGIN: f32 = 0.025;
-const PLACES365_SCENE_MIN_PROBABILITY: f32 = 0.24;
-const PLACES365_SCENE_MIN_MARGIN: f32 = 0.045;
+const PLACES365_TOPIC_MIN_SCORE: f32 = 0.24;
+const PLACES365_TOPIC_MIN_MARGIN: f32 = 0.045;
 const IMAGE_MEAN: [f32; 3] = [0.481_454_66, 0.457_827_5, 0.408_210_73];
 const IMAGE_STD: [f32; 3] = [0.268_629_54, 0.261_302_6, 0.275_777_1];
 const PLACES365_IMAGE_MEAN: [f32; 3] = [0.485, 0.456, 0.406];
 const PLACES365_IMAGE_STD: [f32; 3] = [0.229, 0.224, 0.225];
+
+const SIGLIP_IMAGE_SIZE: usize = 224;
+const SIGLIP_TOKEN_LENGTH: usize = 64;
+const SIGLIP_PAD_TOKEN_ID: u32 = 0;
+const MOBILECLIP_IMAGE_SIZE: usize = 256;
+const MOBILECLIP_TOKEN_LENGTH: usize = 77;
+const MOBILECLIP_PAD_TOKEN_ID: u32 = 0;
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum TopicModelKind {
+    Tinyclip,
+    Siglip2Base,
+    MobileclipS0,
+}
+
+pub const DEFAULT_TOPIC_MODEL: TopicModelKind = TopicModelKind::Siglip2Base;
+
+impl TopicModelKind {
+    pub fn parse(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "siglip2" | "siglip2-base" | "siglip2-base-patch16-224" => Some(Self::Siglip2Base),
+            _ => None,
+        }
+    }
+
+    pub const fn id(self) -> &'static str {
+        match self {
+            Self::Tinyclip => "tinyclip",
+            Self::Siglip2Base => "siglip2-base",
+            Self::MobileclipS0 => "mobileclip-s0",
+        }
+    }
+
+    pub const fn display_name(self) -> &'static str {
+        match self {
+            Self::Tinyclip => "TinyCLIP INT8",
+            Self::Siglip2Base => "SigLIP 2 Base INT8",
+            Self::MobileclipS0 => "MobileCLIP-S0 INT8",
+        }
+    }
+
+    pub const fn model_name(self) -> &'static str {
+        match self {
+            Self::Tinyclip => TINYCLIP_MODEL_NAME,
+            Self::Siglip2Base => SIGLIP2_MODEL_NAME,
+            Self::MobileclipS0 => MOBILECLIP_MODEL_NAME,
+        }
+    }
+
+    pub const fn analysis_version(self) -> &'static str {
+        match self {
+            Self::Tinyclip => ANALYSIS_VERSION,
+            Self::Siglip2Base => SIGLIP2_ANALYSIS_VERSION,
+            Self::MobileclipS0 => MOBILECLIP_ANALYSIS_VERSION,
+        }
+    }
+}
 
 static ORT_RUNTIME: OnceLock<Result<PathBuf, String>> = OnceLock::new();
 
@@ -75,6 +153,19 @@ pub struct ModelMetadata {
     pub model_size_bytes: Option<u64>,
     pub model_sha256: Option<String>,
     pub supported_backends: Vec<ExecutionBackend>,
+}
+
+pub fn default_topic_model_metadata() -> ModelMetadata {
+    ModelMetadata {
+        name: SIGLIP2_MODEL_NAME.into(),
+        version: SIGLIP2_MODEL_VERSION.into(),
+        analysis_version: SIGLIP2_ANALYSIS_VERSION.into(),
+        license: Some("Apache-2.0".into()),
+        installed: true,
+        model_size_bytes: None,
+        model_sha256: Some(SIGLIP2_MODEL_SHA256.into()),
+        supported_backends: vec![ExecutionBackend::Cpu],
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -112,6 +203,8 @@ pub struct SemanticRuntimeStatus {
     pub status: String,
     pub message: String,
     pub model: ModelMetadata,
+    #[serde(default)]
+    pub topic_model: Option<ModelMetadata>,
     pub selected_backend: Option<ExecutionBackend>,
 }
 
@@ -126,108 +219,8 @@ pub struct SemanticLabelDescriptor {
     pub taxonomy_version: String,
 }
 
-#[derive(Debug, Clone, Copy)]
-struct LabelDefinition {
-    id: &'static str,
-    display_name: &'static str,
-    prompt: &'static str,
-    category_group: &'static str,
-    threshold: f32,
-}
-
-const LABELS: [LabelDefinition; 13] = [
-    LabelDefinition {
-        id: "photo_landscape",
-        display_name: "风光自然",
-        prompt: "a landscape or nature photograph with mountains, water, forest, coast, or other landform",
-        category_group: "scene",
-        threshold: 0.16,
-    },
-    LabelDefinition {
-        id: "photo_urban",
-        display_name: "城市街拍",
-        prompt: "a street photography scene in a city, town, neighborhood, village, or public outdoor area",
-        category_group: "scene",
-        threshold: 0.16,
-    },
-    LabelDefinition {
-        id: "photo_architecture",
-        display_name: "建筑与空间",
-        prompt: "an architectural photograph of a building, landmark, historical site, bridge, castle, temple, or religious space",
-        category_group: "scene",
-        threshold: 0.16,
-    },
-    LabelDefinition {
-        id: "photo_food",
-        display_name: "美食餐饮",
-        prompt: "a food or dining photograph showing a dish, restaurant, cafe, market, kitchen, or dining space",
-        category_group: "scene",
-        threshold: 0.16,
-    },
-    LabelDefinition {
-        id: "photo_commercial",
-        display_name: "商业与静物",
-        prompt: "a commercial, product, shop, market, salon, or still life photograph",
-        category_group: "scene",
-        threshold: 0.16,
-    },
-    LabelDefinition {
-        id: "photo_indoor",
-        display_name: "室内与生活",
-        prompt: "an interior or everyday life photograph inside a home, office, school, library, laboratory, hospital, or public room",
-        category_group: "scene",
-        threshold: 0.16,
-    },
-    LabelDefinition {
-        id: "photo_travel",
-        display_name: "旅行人文",
-        prompt: "a travel or cultural documentary photograph showing a destination, museum, hotel, airport, station, harbor, or local experience",
-        category_group: "scene",
-        threshold: 0.16,
-    },
-    LabelDefinition {
-        id: "photo_event",
-        display_name: "活动与运动",
-        prompt: "an event, sports, performance, entertainment, stadium, theater, amusement park, or pool photograph",
-        category_group: "scene",
-        threshold: 0.16,
-    },
-    LabelDefinition {
-        id: "photo_transport",
-        display_name: "交通与汽车",
-        prompt: "a transportation or automobile photograph showing a vehicle, road, garage, parking area, rail track, or transport facility",
-        category_group: "scene",
-        threshold: 0.16,
-    },
-    LabelDefinition {
-        id: "photo_plant",
-        display_name: "植物与园艺",
-        prompt: "a plant, garden, orchard, greenhouse, cultivated field, park, or horticulture photograph",
-        category_group: "scene",
-        threshold: 0.16,
-    },
-    LabelDefinition {
-        id: "photo_documentary",
-        display_name: "纪实与工业",
-        prompt: "an industrial, construction, worksite, utility, repair, military, or documentary photograph",
-        category_group: "scene",
-        threshold: 0.16,
-    },
-    LabelDefinition {
-        id: "indoor",
-        display_name: "室内",
-        prompt: "an indoor scene inside a room or building",
-        category_group: "context",
-        threshold: 0.16,
-    },
-    LabelDefinition {
-        id: "outdoor",
-        display_name: "室外",
-        prompt: "an outdoor scene under the open sky",
-        category_group: "context",
-        threshold: 0.16,
-    },
-];
+const CONTEXT_LABELS: [(&str, &str, f32); 2] =
+    [("indoor", "室内", 0.55), ("outdoor", "室外", 0.55)];
 
 #[derive(Debug, thiserror::Error)]
 pub enum SemanticError {
@@ -244,6 +237,14 @@ pub enum SemanticError {
 pub trait SemanticClassifier: Send + Sync {
     fn metadata(&self) -> ModelMetadata;
     fn status(&self) -> SemanticRuntimeStatus;
+    /// Metadata for the model whose labels and embeddings are persisted.
+    ///
+    /// The Places365 adapter is a composite classifier: it owns the scene
+    /// model, but its persisted topic results come from the selected topic
+    /// model. Standalone adapters simply return their own metadata.
+    fn result_metadata(&self) -> ModelMetadata {
+        self.metadata()
+    }
     fn encode_text(&self, _queries: &[String]) -> Result<Vec<Vec<f32>>, SemanticError> {
         Err(SemanticError::ModelUnavailable)
     }
@@ -255,29 +256,57 @@ pub trait SemanticClassifier: Send + Sync {
 }
 
 pub fn semantic_catalog() -> Vec<SemanticLabelDescriptor> {
-    let mut catalog = LABELS
+    let mut catalog = topics::TOPIC_LABELS
         .iter()
         .map(|label| SemanticLabelDescriptor {
             id: label.id.into(),
             display_name: label.display_name.into(),
-            category_group: label.category_group.into(),
+            category_group: "scene".into(),
             threshold: label.threshold,
-            is_primary_category: is_primary_category(label.id),
+            is_primary_category: true,
             taxonomy_version: TAXONOMY_VERSION.into(),
         })
         .collect::<Vec<_>>();
+    catalog.extend(CONTEXT_LABELS.iter().map(|(id, display_name, threshold)| {
+        SemanticLabelDescriptor {
+            id: (*id).into(),
+            display_name: (*display_name).into(),
+            category_group: "context".into(),
+            threshold: *threshold,
+            is_primary_category: false,
+            taxonomy_version: TAXONOMY_VERSION.into(),
+        }
+    }));
     catalog.extend(crate::subject::subject_catalog());
     catalog
 }
 
+/// Map values written by older taxonomy versions to the current user-facing
+/// taxonomy. This is intentionally kept at the read boundary so existing
+/// manual classifications and organization rules remain readable after a
+/// taxonomy refresh.
+pub fn canonical_label_id(label_id: &str) -> &str {
+    match label_id {
+        "unknown" | "photo_documentary" => "photo_abstract",
+        "person" | "portrait" => "single_person",
+        "group" => "multiple_people",
+        "pet" => "animal",
+        "photo_urban" => "photo_street",
+        "photo_event" => "photo_activity",
+        "photo_transport" => "photo_vehicle",
+        "photo_plant" => "photo_macro",
+        _ => label_id,
+    }
+}
+
 pub fn known_display_name_for_label_id(label_id: &str) -> Option<&'static str> {
-    if label_id == "unknown" {
-        return Some("未知");
+    let canonical_id = canonical_label_id(label_id);
+    if canonical_id != label_id {
+        return known_display_name_for_label_id(canonical_id);
     }
     let legacy_name = match label_id {
-        "person" => Some("人物"),
-        "portrait" => Some("人像"),
-        "group" => Some("多人"),
+        "single_person" => Some("单人"),
+        "multiple_people" => Some("多人"),
         "landscape" => Some("风景"),
         "architecture" => Some("建筑"),
         "product" => Some("产品"),
@@ -288,7 +317,6 @@ pub fn known_display_name_for_label_id(label_id: &str) -> Option<&'static str> {
         "document" => Some("文档"),
         "abstract" => Some("抽象"),
         "vehicle" => Some("车辆"),
-        "pet" => Some("宠物"),
         "plant" => Some("植物"),
         "flower" => Some("花卉"),
         "mountain" => Some("山"),
@@ -302,20 +330,29 @@ pub fn known_display_name_for_label_id(label_id: &str) -> Option<&'static str> {
     if legacy_name.is_some() {
         return legacy_name;
     }
-    LABELS
+    topics::TOPIC_LABELS
         .iter()
         .find(|label| label.id == label_id)
         .map(|label| label.display_name)
+        .or_else(|| {
+            CONTEXT_LABELS
+                .iter()
+                .find(|(id, _, _)| *id == label_id)
+                .map(|(_, display_name, _)| *display_name)
+        })
 }
 
 pub fn category_group_for_label_id(label_id: &str) -> Option<&'static str> {
-    if label_id == "unknown" {
-        return Some("scene");
+    let canonical_id = canonical_label_id(label_id);
+    if canonical_id != label_id {
+        return category_group_for_label_id(canonical_id);
     }
     let legacy_group = match label_id {
-        "person" | "portrait" | "group" | "animal" | "pet" | "vehicle" | "plant" => Some("subject"),
-        "landscape" | "architecture" | "product" | "still_life" | "food" | "screenshot"
-        | "document" | "abstract" => Some("scene"),
+        "single_person" | "multiple_people" | "animal" | "vehicle" | "food" | "plant" => {
+            Some("subject")
+        }
+        "landscape" | "architecture" | "product" | "still_life" | "screenshot" | "document"
+        | "abstract" => Some("scene"),
         "flower" | "mountain" | "water" | "forest" => Some("subject"),
         "street" | "night" | "sunset" | "indoor" | "outdoor" => Some("context"),
         _ => None,
@@ -323,21 +360,16 @@ pub fn category_group_for_label_id(label_id: &str) -> Option<&'static str> {
     if legacy_group.is_some() {
         return legacy_group;
     }
-    LABELS
+    topics::TOPIC_LABELS
         .iter()
         .find(|label| label.id == label_id)
-        .map(|label| label.category_group)
-}
-
-fn is_primary_category(label_id: &str) -> bool {
-    LABELS
-        .iter()
-        .find(|label| label.id == label_id)
-        .is_some_and(|label| label.category_group == "scene")
-}
-
-fn is_active_label(label_id: &str) -> bool {
-    LABELS.iter().any(|label| label.id == label_id)
+        .map(|_| "scene")
+        .or_else(|| {
+            CONTEXT_LABELS
+                .iter()
+                .find(|(id, _, _)| *id == label_id)
+                .map(|_| "context")
+        })
 }
 
 #[derive(Debug, Default)]
@@ -374,6 +406,7 @@ impl SemanticClassifier for UnavailableClassifier {
                 "本地语义模型不可用；基础图库、缩略图和影调色彩分析仍可正常使用。".into()
             }),
             model: self.metadata(),
+            topic_model: None,
             selected_backend: None,
         }
     }
@@ -395,7 +428,7 @@ pub struct Places365Classifier {
     leaf_cluster_indexes: Vec<usize>,
     outdoor_by_leaf: Vec<bool>,
     model_size_bytes: u64,
-    embedding_classifier: Option<TinyClipClassifier>,
+    topic_classifier: Option<Box<dyn SemanticClassifier>>,
 }
 
 impl std::fmt::Debug for Places365Classifier {
@@ -405,10 +438,7 @@ impl std::fmt::Debug for Places365Classifier {
             .field("model", &MODEL_NAME)
             .field("version", &MODEL_VERSION)
             .field("categories", &self.categories.len())
-            .field(
-                "has_embedding_classifier",
-                &self.embedding_classifier.is_some(),
-            )
+            .field("has_topic_classifier", &self.topic_classifier.is_some())
             .finish_non_exhaustive()
     }
 }
@@ -418,6 +448,20 @@ impl Places365Classifier {
         model_dir: &Path,
         embedding_model_dir: &Path,
         runtime_path: &Path,
+    ) -> Result<Self, SemanticError> {
+        Self::load_with_topic_model(
+            model_dir,
+            embedding_model_dir,
+            runtime_path,
+            DEFAULT_TOPIC_MODEL,
+        )
+    }
+
+    pub fn load_with_topic_model(
+        model_dir: &Path,
+        topic_model_dir: &Path,
+        runtime_path: &Path,
+        topic_model: TopicModelKind,
     ) -> Result<Self, SemanticError> {
         let model_path = model_dir.join(MODEL_FILE);
         let categories_path = model_dir.join(TOKENIZER_FILE);
@@ -467,14 +511,17 @@ impl Places365Classifier {
             })
             .collect::<Result<Vec<_>, _>>()?;
 
-        let embedding_classifier = match TinyClipClassifier::load(embedding_model_dir, runtime_path)
-        {
-            Ok(classifier) => Some(classifier),
-            Err(error) => {
-                log::warn!("TinyCLIP embedding adapter unavailable: {error}");
-                None
-            }
-        };
+        let topic_classifier =
+            match load_topic_classifier(topic_model, topic_model_dir, runtime_path) {
+                Ok(classifier) => Some(classifier),
+                Err(error) => {
+                    log::warn!(
+                        "{} topic adapter unavailable: {error}",
+                        topic_model.display_name()
+                    );
+                    None
+                }
+            };
 
         Ok(Self {
             session: Mutex::new(session),
@@ -486,7 +533,7 @@ impl Places365Classifier {
             model_size_bytes: std::fs::metadata(model_path)
                 .map_err(|error| SemanticError::Inference(error.to_string()))?
                 .len(),
-            embedding_classifier,
+            topic_classifier,
         })
     }
 
@@ -510,21 +557,38 @@ impl SemanticClassifier for Places365Classifier {
     }
 
     fn status(&self) -> SemanticRuntimeStatus {
-        let message = if self.embedding_classifier.is_some() {
-            "Places365 ResNet-18 已就绪；场景分类使用本地 365 类模型，向量搜索使用本地 TinyCLIP。"
+        let message = if self.topic_classifier.is_some() {
+            format!(
+                "Places365 ResNet-18 已就绪；环境证据与摄影题材候选已启用 {}。",
+                self.topic_classifier
+                    .as_ref()
+                    .map(|classifier| classifier.metadata().name)
+                    .unwrap_or_default()
+            )
         } else {
-            "Places365 ResNet-18 已就绪；场景分类可用，但本地文本与相似搜索向量模型未就绪。"
+            "Places365 ResNet-18 已就绪；环境证据可用，但题材候选模型未就绪。".into()
         };
         SemanticRuntimeStatus {
             status: "ready".into(),
-            message: message.into(),
+            message,
             model: self.metadata(),
+            topic_model: self
+                .topic_classifier
+                .as_ref()
+                .map(|classifier| classifier.metadata()),
             selected_backend: Some(ExecutionBackend::Cpu),
         }
     }
 
+    fn result_metadata(&self) -> ModelMetadata {
+        self.topic_classifier
+            .as_ref()
+            .map(|classifier| classifier.metadata())
+            .unwrap_or_else(|| self.metadata())
+    }
+
     fn encode_text(&self, queries: &[String]) -> Result<Vec<Vec<f32>>, SemanticError> {
-        self.embedding_classifier
+        self.topic_classifier
             .as_ref()
             .ok_or(SemanticError::ModelUnavailable)?
             .encode_text(queries)
@@ -571,42 +635,32 @@ impl SemanticClassifier for Places365Classifier {
         }
         drop(session);
 
-        let embedding_outputs = self.embedding_classifier.as_ref().and_then(|classifier| {
+        let embedding_outputs = self.topic_classifier.as_ref().and_then(|classifier| {
             match classifier.classify_batch(images, ExecutionBackend::Cpu) {
                 Ok(outputs) if outputs.len() == image_count => Some(outputs),
                 Ok(outputs) => {
                     log::warn!(
-                        "TinyCLIP returned {} embeddings for {} images",
+                        "topic model returned {} embeddings for {} images",
                         outputs.len(),
                         image_count
                     );
                     None
                 }
                 Err(error) => {
-                    log::warn!("TinyCLIP embedding batch failed: {error}");
+                    log::warn!("topic model embedding batch failed: {error}");
                     None
                 }
             }
         });
         let mut results = Vec::with_capacity(image_count);
         for (image_index, probabilities) in probability_rows.into_iter().enumerate() {
-            let primary = select_places365_primary(
-                &probabilities,
-                &self.leaf_cluster_indexes,
-                places365::SCENE_CLUSTERS.len(),
-            );
-            let mut predictions = Vec::with_capacity(2);
-            if let Some((cluster_index, score)) = primary {
-                let cluster = &places365::SCENE_CLUSTERS[cluster_index];
-                predictions.push(SemanticPrediction {
-                    label_id: cluster.id.into(),
-                    display_name: cluster.display_name.into(),
-                    category_group: "scene".into(),
-                    similarity: score,
-                    threshold: PLACES365_SCENE_MIN_PROBABILITY,
-                    is_primary: true,
-                });
-            }
+            let topic_output = embedding_outputs
+                .as_ref()
+                .and_then(|outputs| outputs.get(image_index));
+            let mut predictions =
+                select_places365_topic(&probabilities, &self.leaf_cluster_indexes)
+                    .into_iter()
+                    .collect::<Vec<_>>();
             if let Some((label_id, score)) =
                 select_places365_environment(&probabilities, &self.outdoor_by_leaf)
             {
@@ -621,11 +675,21 @@ impl SemanticClassifier for Places365Classifier {
                     is_primary: false,
                 });
             }
-            let raw_similarities = places365_raw_similarities(
+            let mut raw_similarities = topic_output
+                .map(|output| output.raw_similarities.clone())
+                .unwrap_or_default();
+            raw_similarities.extend(places365_raw_similarities(
                 &probabilities,
                 &self.categories,
                 &self.leaf_cluster_indexes,
-            );
+            ));
+            raw_similarities.sort_by(|left, right| {
+                right
+                    .similarity
+                    .total_cmp(&left.similarity)
+                    .then(left.label_id.cmp(&right.label_id))
+            });
+            raw_similarities.truncate(MAX_LABELS);
             let embedding = embedding_outputs
                 .as_ref()
                 .and_then(|outputs| outputs.get(image_index))
@@ -646,6 +710,7 @@ pub struct TinyClipClassifier {
     tokenizer: Tokenizer,
     prompt_input_ids: Vec<i64>,
     prompt_attention_mask: Vec<i64>,
+    prompt_label_indexes: Vec<usize>,
     model_size_bytes: u64,
 }
 
@@ -703,13 +768,15 @@ impl TinyClipClassifier {
             SemanticError::Inference(format!("could not load ONNX graph: {error}"))
         })?;
         validate_model_contract(&session)?;
-        let (prompt_input_ids, prompt_attention_mask) = tokenize_prompts(&tokenizer)?;
+        let (prompt_input_ids, prompt_attention_mask, prompt_label_indexes) =
+            tokenize_topic_prompts(&tokenizer)?;
 
         Ok(Self {
             session: Mutex::new(session),
             tokenizer,
             prompt_input_ids,
             prompt_attention_mask,
+            prompt_label_indexes,
             model_size_bytes: std::fs::metadata(model_path)
                 .map_err(|error| SemanticError::Inference(error.to_string()))?
                 .len(),
@@ -750,8 +817,9 @@ impl SemanticClassifier for TinyClipClassifier {
     fn status(&self) -> SemanticRuntimeStatus {
         SemanticRuntimeStatus {
             status: "ready".into(),
-            message: "TinyCLIP INT8 向量模型已通过完整性校验，可用于本地文本与相似搜索。".into(),
+            message: "TinyCLIP INT8 已通过完整性校验，可用于题材候选和本地文本/相似搜索。".into(),
             model: self.metadata(),
+            topic_model: Some(self.metadata()),
             selected_backend: Some(ExecutionBackend::Cpu),
         }
     }
@@ -822,14 +890,14 @@ impl SemanticClassifier for TinyClipClassifier {
         let input_ids = self.prompt_input_ids.clone();
         let attention_mask = self.prompt_attention_mask.clone();
         let pixel_values = preprocess_images(images)?;
-        let label_count = LABELS.len();
+        let prompt_count = self.prompt_label_indexes.len();
         let image_count = images.len();
 
         let input_ids =
-            Tensor::from_array(([label_count, TOKEN_LENGTH], input_ids.into_boxed_slice()))
+            Tensor::from_array(([prompt_count, TOKEN_LENGTH], input_ids.into_boxed_slice()))
                 .map_err(inference_error)?;
         let attention_mask = Tensor::from_array((
-            [label_count, TOKEN_LENGTH],
+            [prompt_count, TOKEN_LENGTH],
             attention_mask.into_boxed_slice(),
         ))
         .map_err(inference_error)?;
@@ -855,7 +923,7 @@ impl SemanticClassifier for TinyClipClassifier {
             .map_err(inference_error)?;
 
         if image_shape.as_ref() != [image_count as i64, EMBEDDING_DIMENSIONS as i64]
-            || text_shape.as_ref() != [label_count as i64, EMBEDDING_DIMENSIONS as i64]
+            || text_shape.as_ref() != [prompt_count as i64, EMBEDDING_DIMENSIONS as i64]
         {
             return Err(SemanticError::Inference(format!(
                 "unexpected embedding shapes: image={image_shape:?}, text={text_shape:?}"
@@ -866,23 +934,569 @@ impl SemanticClassifier for TinyClipClassifier {
         for image_index in 0..image_count {
             let start = image_index * EMBEDDING_DIMENSIONS;
             let embedding = image_data[start..start + EMBEDDING_DIMENSIONS].to_vec();
-            let mut scores = Vec::with_capacity(label_count);
-            for label_index in 0..label_count {
-                let text_start = label_index * EMBEDDING_DIMENSIONS;
+            let mut prompt_scores = Vec::with_capacity(prompt_count);
+            for prompt_index in 0..prompt_count {
+                let text_start = prompt_index * EMBEDDING_DIMENSIONS;
                 let similarity = cosine_similarity(
                     &embedding,
                     &text_data[text_start..text_start + EMBEDDING_DIMENSIONS],
                 );
-                scores.push(similarity);
+                prompt_scores.push(similarity);
             }
+            let scores =
+                topics::aggregate_prompt_scores(&prompt_scores, &self.prompt_label_indexes);
             results.push(SemanticAnalysisOutput {
-                predictions: select_predictions(&scores),
+                predictions: select_topic_predictions(&scores),
                 embedding,
-                raw_similarities: rank_similarities(&scores),
+                raw_similarities: rank_topic_similarities(&scores),
             });
         }
         Ok(results)
     }
+}
+
+#[derive(Debug, Clone, Copy)]
+enum OpenClipVariant {
+    Siglip2Base,
+    MobileclipS0,
+}
+
+impl OpenClipVariant {
+    const fn topic_model(self) -> TopicModelKind {
+        match self {
+            Self::Siglip2Base => TopicModelKind::Siglip2Base,
+            Self::MobileclipS0 => TopicModelKind::MobileclipS0,
+        }
+    }
+
+    const fn image_size(self) -> usize {
+        match self {
+            Self::Siglip2Base => SIGLIP_IMAGE_SIZE,
+            Self::MobileclipS0 => MOBILECLIP_IMAGE_SIZE,
+        }
+    }
+
+    const fn token_length(self) -> usize {
+        match self {
+            Self::Siglip2Base => SIGLIP_TOKEN_LENGTH,
+            Self::MobileclipS0 => MOBILECLIP_TOKEN_LENGTH,
+        }
+    }
+
+    const fn pad_token_id(self) -> u32 {
+        match self {
+            Self::Siglip2Base => SIGLIP_PAD_TOKEN_ID,
+            Self::MobileclipS0 => MOBILECLIP_PAD_TOKEN_ID,
+        }
+    }
+
+    const fn pad_token(self) -> &'static str {
+        match self {
+            Self::Siglip2Base => "<pad>",
+            Self::MobileclipS0 => "!",
+        }
+    }
+
+    const fn embedding_dimensions(self) -> usize {
+        match self {
+            Self::Siglip2Base => 768,
+            Self::MobileclipS0 => 512,
+        }
+    }
+}
+
+enum OpenClipGraph {
+    Joint(Mutex<Session>),
+    Split {
+        vision: Mutex<Session>,
+        text: Mutex<Session>,
+    },
+}
+
+struct OpenClipImageBatch {
+    embeddings: Vec<f32>,
+    siglip_logits: Option<Vec<f32>>,
+}
+
+pub struct OpenVocabularyClipClassifier {
+    variant: OpenClipVariant,
+    graph: OpenClipGraph,
+    tokenizer: Tokenizer,
+    prompt_input_ids: Vec<i64>,
+    prompt_label_indexes: Vec<usize>,
+    prompt_text_embeddings: Vec<f32>,
+    embedding_dimensions: usize,
+    model_size_bytes: u64,
+}
+
+impl std::fmt::Debug for OpenVocabularyClipClassifier {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("OpenVocabularyClipClassifier")
+            .field("model", &self.variant.topic_model().model_name())
+            .field("version", &self.variant.topic_model().analysis_version())
+            .field("embedding_dimensions", &self.embedding_dimensions)
+            .finish_non_exhaustive()
+    }
+}
+
+impl OpenVocabularyClipClassifier {
+    pub fn load(
+        topic_model: TopicModelKind,
+        model_dir: &Path,
+        runtime_path: &Path,
+    ) -> Result<Self, SemanticError> {
+        let variant = match topic_model {
+            TopicModelKind::Siglip2Base => OpenClipVariant::Siglip2Base,
+            TopicModelKind::MobileclipS0 => OpenClipVariant::MobileclipS0,
+            TopicModelKind::Tinyclip => {
+                return Err(SemanticError::Inference(
+                    "TinyCLIP must use its combined graph adapter".into(),
+                ));
+            }
+        };
+        verify_sha256(runtime_path, RUNTIME_SHA256)?;
+        initialize_ort(runtime_path)?;
+
+        let tokenizer_path = model_dir.join(match variant {
+            OpenClipVariant::Siglip2Base => SIGLIP2_TOKENIZER_FILE,
+            OpenClipVariant::MobileclipS0 => MOBILECLIP_TOKENIZER_FILE,
+        });
+        let model_size_bytes = match variant {
+            OpenClipVariant::Siglip2Base => {
+                let model_path = model_dir.join(SIGLIP2_MODEL_FILE);
+                verify_sha256(&model_path, SIGLIP2_MODEL_SHA256)?;
+                std::fs::metadata(&model_path)
+                    .map_err(|error| SemanticError::Integrity(error.to_string()))?
+                    .len()
+            }
+            OpenClipVariant::MobileclipS0 => {
+                let vision_path = model_dir.join(MOBILECLIP_VISION_FILE);
+                let text_path = model_dir.join(MOBILECLIP_TEXT_FILE);
+                verify_sha256(&vision_path, MOBILECLIP_VISION_SHA256)?;
+                verify_sha256(&text_path, MOBILECLIP_TEXT_SHA256)?;
+                std::fs::metadata(&vision_path)
+                    .and_then(|vision| {
+                        std::fs::metadata(&text_path).map(|text| vision.len() + text.len())
+                    })
+                    .map_err(|error| SemanticError::Integrity(error.to_string()))?
+            }
+        };
+        verify_sha256(
+            &tokenizer_path,
+            match variant {
+                OpenClipVariant::Siglip2Base => SIGLIP2_TOKENIZER_SHA256,
+                OpenClipVariant::MobileclipS0 => MOBILECLIP_TOKENIZER_SHA256,
+            },
+        )?;
+
+        let mut tokenizer = Tokenizer::from_file(&tokenizer_path).map_err(|error| {
+            SemanticError::Inference(format!("could not load tokenizer: {error}"))
+        })?;
+        let token_length = variant.token_length();
+        tokenizer
+            .with_truncation(Some(TruncationParams {
+                max_length: token_length,
+                ..TruncationParams::default()
+            }))
+            .map_err(|error| {
+                SemanticError::Inference(format!("could not configure tokenizer: {error}"))
+            })?;
+        tokenizer.with_padding(Some(PaddingParams {
+            strategy: PaddingStrategy::Fixed(token_length),
+            pad_id: variant.pad_token_id(),
+            pad_token: variant.pad_token().into(),
+            ..PaddingParams::default()
+        }));
+
+        let graph = match variant {
+            OpenClipVariant::Siglip2Base => {
+                let model_path = model_dir.join(SIGLIP2_MODEL_FILE);
+                let session = build_optimized_session(&model_path, "SigLIP 2")?;
+                validate_siglip2_model_contract(&session)?;
+                OpenClipGraph::Joint(Mutex::new(session))
+            }
+            OpenClipVariant::MobileclipS0 => {
+                let vision_path = model_dir.join(MOBILECLIP_VISION_FILE);
+                let text_path = model_dir.join(MOBILECLIP_TEXT_FILE);
+                let vision = build_optimized_session(&vision_path, "MobileCLIP vision")?;
+                let text = build_optimized_session(&text_path, "MobileCLIP text")?;
+                validate_mobileclip_vision_contract(&vision)?;
+                validate_mobileclip_text_contract(&text)?;
+                OpenClipGraph::Split {
+                    vision: Mutex::new(vision),
+                    text: Mutex::new(text),
+                }
+            }
+        };
+
+        let (prompt_input_ids, _, prompt_label_indexes) =
+            tokenize_topic_prompts_for_variant(&tokenizer, variant)?;
+        let mut classifier = Self {
+            variant,
+            graph,
+            tokenizer,
+            prompt_input_ids,
+            prompt_label_indexes,
+            prompt_text_embeddings: Vec::new(),
+            embedding_dimensions: variant.embedding_dimensions(),
+            model_size_bytes,
+        };
+        classifier.prompt_text_embeddings = classifier.run_text_embeddings(
+            &classifier.prompt_input_ids,
+            classifier.prompt_label_indexes.len(),
+        )?;
+        if classifier.prompt_text_embeddings.len()
+            != classifier.prompt_label_indexes.len() * classifier.embedding_dimensions
+        {
+            return Err(SemanticError::Inference(format!(
+                "unexpected topic prompt embedding size: {}",
+                classifier.prompt_text_embeddings.len()
+            )));
+        }
+        Ok(classifier)
+    }
+
+    fn run_text_embeddings(
+        &self,
+        input_ids: &[i64],
+        batch_size: usize,
+    ) -> Result<Vec<f32>, SemanticError> {
+        let token_length = self.variant.token_length();
+        let input_ids = Tensor::from_array((
+            [batch_size, token_length],
+            input_ids.to_vec().into_boxed_slice(),
+        ))
+        .map_err(inference_error)?;
+        let data = match &self.graph {
+            OpenClipGraph::Joint(session) => {
+                let pixel_values = Tensor::from_array((
+                    [1_usize, 3, SIGLIP_IMAGE_SIZE, SIGLIP_IMAGE_SIZE],
+                    vec![0_f32; 3 * SIGLIP_IMAGE_SIZE * SIGLIP_IMAGE_SIZE].into_boxed_slice(),
+                ))
+                .map_err(inference_error)?;
+                let mut session = session.lock();
+                let outputs = session
+                    .run(ort::inputs! {
+                        "input_ids" => input_ids,
+                        "pixel_values" => pixel_values,
+                    })
+                    .map_err(inference_error)?;
+                outputs["text_embeds"]
+                    .try_extract_tensor::<f32>()
+                    .map_err(inference_error)
+                    .map(|(_, data)| data.to_vec())?
+            }
+            OpenClipGraph::Split { text, .. } => {
+                let mut session = text.lock();
+                let outputs = session
+                    .run(ort::inputs! { "input_ids" => input_ids })
+                    .map_err(inference_error)?;
+                outputs["text_embeds"]
+                    .try_extract_tensor::<f32>()
+                    .map_err(inference_error)
+                    .map(|(_, data)| data.to_vec())?
+            }
+        };
+        if data.len() != batch_size * self.embedding_dimensions {
+            return Err(SemanticError::Inference(format!(
+                "unexpected text embedding size: {}; expected {}",
+                data.len(),
+                batch_size * self.embedding_dimensions
+            )));
+        }
+        Ok(data)
+    }
+
+    fn run_image_embeddings(
+        &self,
+        images: &[PathBuf],
+    ) -> Result<OpenClipImageBatch, SemanticError> {
+        let image_count = images.len();
+        let pixel_values = preprocess_open_clip_images(images, self.variant)?;
+        let pixel_values = Tensor::from_array((
+            [
+                image_count,
+                3,
+                self.variant.image_size(),
+                self.variant.image_size(),
+            ],
+            pixel_values.into_boxed_slice(),
+        ))
+        .map_err(inference_error)?;
+        let (data, siglip_logits) = match &self.graph {
+            OpenClipGraph::Joint(session) => {
+                let prompt_count = self.prompt_label_indexes.len();
+                let input_ids = Tensor::from_array((
+                    [prompt_count, self.variant.token_length()],
+                    self.prompt_input_ids.clone().into_boxed_slice(),
+                ))
+                .map_err(inference_error)?;
+                let mut session = session.lock();
+                let outputs = session
+                    .run(ort::inputs! {
+                        "input_ids" => input_ids,
+                        "pixel_values" => pixel_values,
+                    })
+                    .map_err(inference_error)?;
+                let image_data = outputs["image_embeds"]
+                    .try_extract_tensor::<f32>()
+                    .map_err(inference_error)
+                    .map(|(_, data)| data.to_vec())?;
+                let prompt_count = self.prompt_label_indexes.len();
+                let (logit_shape, logits) = outputs["logits_per_image"]
+                    .try_extract_tensor::<f32>()
+                    .map_err(inference_error)?;
+                if logit_shape.as_ref() != [image_count as i64, prompt_count as i64] {
+                    return Err(SemanticError::Inference(format!(
+                        "unexpected SigLIP 2 logit shape: {logit_shape:?}"
+                    )));
+                }
+                (image_data, Some(logits.to_vec()))
+            }
+            OpenClipGraph::Split { vision, .. } => {
+                let mut session = vision.lock();
+                let outputs = session
+                    .run(ort::inputs! { "pixel_values" => pixel_values })
+                    .map_err(inference_error)?;
+                let image_data = outputs["image_embeds"]
+                    .try_extract_tensor::<f32>()
+                    .map_err(inference_error)
+                    .map(|(_, data)| data.to_vec())?;
+                (image_data, None)
+            }
+        };
+        if data.len() != image_count * self.embedding_dimensions {
+            return Err(SemanticError::Inference(format!(
+                "unexpected image embedding size: {}; expected {}",
+                data.len(),
+                image_count * self.embedding_dimensions
+            )));
+        }
+        Ok(OpenClipImageBatch {
+            embeddings: data,
+            siglip_logits,
+        })
+    }
+}
+
+impl SemanticClassifier for OpenVocabularyClipClassifier {
+    fn metadata(&self) -> ModelMetadata {
+        let topic_model = self.variant.topic_model();
+        let (model_sha256, license) = match self.variant {
+            OpenClipVariant::Siglip2Base => (SIGLIP2_MODEL_SHA256, "Apache-2.0"),
+            OpenClipVariant::MobileclipS0 => (MOBILECLIP_VISION_SHA256, "Apple AMLR 2.0"),
+        };
+        ModelMetadata {
+            name: topic_model.model_name().into(),
+            version: match self.variant {
+                OpenClipVariant::Siglip2Base => SIGLIP2_MODEL_VERSION,
+                OpenClipVariant::MobileclipS0 => MOBILECLIP_MODEL_VERSION,
+            }
+            .into(),
+            analysis_version: topic_model.analysis_version().into(),
+            license: Some(license.into()),
+            installed: true,
+            model_size_bytes: Some(self.model_size_bytes),
+            model_sha256: Some(model_sha256.into()),
+            supported_backends: vec![ExecutionBackend::Cpu],
+        }
+    }
+
+    fn status(&self) -> SemanticRuntimeStatus {
+        let metadata = self.metadata();
+        SemanticRuntimeStatus {
+            status: "ready".into(),
+            message: format!(
+                "{} 已通过完整性校验，可用于摄影题材候选和本地文本/相似搜索。",
+                self.variant.topic_model().display_name()
+            ),
+            model: metadata.clone(),
+            topic_model: Some(metadata),
+            selected_backend: Some(ExecutionBackend::Cpu),
+        }
+    }
+
+    fn encode_text(&self, queries: &[String]) -> Result<Vec<Vec<f32>>, SemanticError> {
+        if queries.is_empty() {
+            return Ok(Vec::new());
+        }
+        let prompts = queries
+            .iter()
+            .map(|query| match self.variant {
+                OpenClipVariant::Siglip2Base => format!("This is a photo of {query}."),
+                OpenClipVariant::MobileclipS0 => format!("a photo of {query}"),
+            })
+            .collect::<Vec<_>>();
+        let (input_ids, _) =
+            tokenize_texts_with_length(&self.tokenizer, &prompts, self.variant.token_length())?;
+        let data = self.run_text_embeddings(&input_ids, prompts.len())?;
+        Ok(data
+            .chunks_exact(self.embedding_dimensions)
+            .map(|embedding| embedding.to_vec())
+            .collect())
+    }
+
+    fn classify_batch(
+        &self,
+        images: &[PathBuf],
+        backend: ExecutionBackend,
+    ) -> Result<Vec<SemanticAnalysisOutput>, SemanticError> {
+        if !matches!(backend, ExecutionBackend::Auto | ExecutionBackend::Cpu) {
+            return Err(SemanticError::BackendUnavailable(backend));
+        }
+        if images.is_empty() {
+            return Ok(Vec::new());
+        }
+        let image_batch = self.run_image_embeddings(images)?;
+        let prompt_count = self.prompt_label_indexes.len();
+        let mut results = Vec::with_capacity(images.len());
+        for image_index in 0..images.len() {
+            let start = image_index * self.embedding_dimensions;
+            let embedding =
+                image_batch.embeddings[start..start + self.embedding_dimensions].to_vec();
+            let prompt_scores = if let Some(logits) = image_batch.siglip_logits.as_ref() {
+                logits[image_index * prompt_count..(image_index + 1) * prompt_count]
+                    .iter()
+                    .map(|logit| sigmoid(*logit))
+                    .collect::<Vec<_>>()
+            } else {
+                let cosine_scores = (0..prompt_count)
+                    .map(|prompt_index| {
+                        let text_start = prompt_index * self.embedding_dimensions;
+                        cosine_similarity(
+                            &embedding,
+                            &self.prompt_text_embeddings
+                                [text_start..text_start + self.embedding_dimensions],
+                        )
+                    })
+                    .collect::<Vec<_>>();
+                match self.variant {
+                    OpenClipVariant::MobileclipS0 => softmax(
+                        &cosine_scores
+                            .iter()
+                            .map(|score| score * 100.0)
+                            .collect::<Vec<_>>(),
+                    ),
+                    OpenClipVariant::Siglip2Base => cosine_scores,
+                }
+            };
+            let scores =
+                topics::aggregate_prompt_scores(&prompt_scores, &self.prompt_label_indexes);
+            results.push(SemanticAnalysisOutput {
+                predictions: select_topic_predictions(&scores),
+                embedding,
+                raw_similarities: rank_topic_similarities(&scores),
+            });
+        }
+        Ok(results)
+    }
+}
+
+fn load_topic_classifier(
+    topic_model: TopicModelKind,
+    model_dir: &Path,
+    runtime_path: &Path,
+) -> Result<Box<dyn SemanticClassifier>, SemanticError> {
+    match topic_model {
+        TopicModelKind::Tinyclip => {
+            Ok(Box::new(TinyClipClassifier::load(model_dir, runtime_path)?))
+        }
+        TopicModelKind::Siglip2Base | TopicModelKind::MobileclipS0 => Ok(Box::new(
+            OpenVocabularyClipClassifier::load(topic_model, model_dir, runtime_path)?,
+        )),
+    }
+}
+
+fn build_optimized_session(model_path: &Path, model_name: &str) -> Result<Session, SemanticError> {
+    let builder = Session::builder().map_err(|error| {
+        SemanticError::Inference(format!(
+            "could not create {model_name} ONNX session: {error}"
+        ))
+    })?;
+    let builder = builder
+        .with_optimization_level(GraphOptimizationLevel::Level3)
+        .map_err(|error| {
+            SemanticError::Inference(format!(
+                "could not optimize {model_name} ONNX graph: {error}"
+            ))
+        })?;
+    let mut builder = builder
+        .with_intra_threads(cpu_thread_count())
+        .map_err(|error| {
+            SemanticError::Inference(format!(
+                "could not configure {model_name} ONNX threads: {error}"
+            ))
+        })?;
+    builder.commit_from_file(model_path).map_err(|error| {
+        SemanticError::Inference(format!("could not load {model_name} ONNX graph: {error}"))
+    })
+}
+
+fn validate_siglip2_model_contract(session: &Session) -> Result<(), SemanticError> {
+    let input_names = session
+        .inputs()
+        .iter()
+        .map(|input| input.name())
+        .collect::<Vec<_>>();
+    let output_names = session
+        .outputs()
+        .iter()
+        .map(|output| output.name())
+        .collect::<Vec<_>>();
+    for name in ["input_ids", "pixel_values"] {
+        if !input_names.contains(&name) {
+            return Err(SemanticError::Inference(format!(
+                "SigLIP 2 model input is missing: {name}"
+            )));
+        }
+    }
+    for name in ["image_embeds", "text_embeds", "logits_per_image"] {
+        if !output_names.contains(&name) {
+            return Err(SemanticError::Inference(format!(
+                "SigLIP 2 model output is missing: {name}"
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn validate_mobileclip_vision_contract(session: &Session) -> Result<(), SemanticError> {
+    let input_names = session
+        .inputs()
+        .iter()
+        .map(|input| input.name())
+        .collect::<Vec<_>>();
+    let output_names = session
+        .outputs()
+        .iter()
+        .map(|output| output.name())
+        .collect::<Vec<_>>();
+    if !input_names.contains(&"pixel_values") || !output_names.contains(&"image_embeds") {
+        return Err(SemanticError::Inference(
+            "MobileCLIP vision graph must expose pixel_values and image_embeds".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_mobileclip_text_contract(session: &Session) -> Result<(), SemanticError> {
+    let input_names = session
+        .inputs()
+        .iter()
+        .map(|input| input.name())
+        .collect::<Vec<_>>();
+    let output_names = session
+        .outputs()
+        .iter()
+        .map(|output| output.name())
+        .collect::<Vec<_>>();
+    if !input_names.contains(&"input_ids") || !output_names.contains(&"text_embeds") {
+        return Err(SemanticError::Inference(
+            "MobileCLIP text graph must expose input_ids and text_embeds".into(),
+        ));
+    }
+    Ok(())
 }
 
 fn validate_places365_model_contract(session: &Session) -> Result<(String, String), SemanticError> {
@@ -954,9 +1568,8 @@ fn preprocess_places365_images(images: &[PathBuf]) -> Result<Vec<f32>, SemanticE
     let mut values =
         Vec::with_capacity(images.len() * 3 * PLACES365_IMAGE_SIZE * PLACES365_IMAGE_SIZE);
     for path in images {
-        let image = image::open(path)
-            .map_err(|error| SemanticError::Inference(format!("{}: {error}", path.display())))?
-            .to_rgb8();
+        let image = crate::imaging::load_analysis_thumbnail(path)
+            .map_err(|error| SemanticError::Inference(format!("{}: {error}", path.display())))?;
         if image.width() == 0 || image.height() == 0 {
             return Err(SemanticError::Inference(format!(
                 "image has zero dimensions: {}",
@@ -1000,26 +1613,6 @@ fn softmax(values: &[f32]) -> Vec<f32> {
         }
     }
     probabilities
-}
-
-fn select_places365_primary(
-    probabilities: &[f32],
-    leaf_cluster_indexes: &[usize],
-    cluster_count: usize,
-) -> Option<(usize, f32)> {
-    let mut scores = vec![0.0_f32; cluster_count];
-    for (probability, cluster_index) in probabilities.iter().zip(leaf_cluster_indexes) {
-        if let Some(score) = scores.get_mut(*cluster_index) {
-            *score += probability;
-        }
-    }
-    let mut ranked = scores.into_iter().enumerate().collect::<Vec<_>>();
-    ranked.sort_by(|left, right| right.1.total_cmp(&left.1).then(left.0.cmp(&right.0)));
-    let (top_index, top_score) = ranked.first().copied()?;
-    let second_score = ranked.get(1).map(|(_, score)| *score).unwrap_or(0.0);
-    (top_score >= PLACES365_SCENE_MIN_PROBABILITY
-        && top_score - second_score >= PLACES365_SCENE_MIN_MARGIN)
-        .then_some((top_index, top_score))
 }
 
 fn select_places365_environment(
@@ -1074,6 +1667,72 @@ fn places365_raw_similarities(
             })
         })
         .collect()
+}
+
+fn select_places365_topic(
+    probabilities: &[f32],
+    leaf_cluster_indexes: &[usize],
+) -> Option<SemanticPrediction> {
+    let mut scores = vec![0.0_f32; topics::TOPIC_LABELS.len()];
+    for (index, probability) in probabilities.iter().enumerate() {
+        let Some(cluster_index) = leaf_cluster_indexes.get(index) else {
+            continue;
+        };
+        let Some(cluster) = places365::SCENE_CLUSTERS.get(*cluster_index) else {
+            continue;
+        };
+        let Some(topic_id) = places365_cluster_to_topic(cluster.id) else {
+            continue;
+        };
+        let Some(topic_index) = topics::label_index(topic_id) else {
+            continue;
+        };
+        scores[topic_index] += probability;
+    }
+
+    let mut ranked = scores
+        .iter()
+        .enumerate()
+        .filter_map(|(index, score)| {
+            topics::TOPIC_LABELS
+                .get(index)
+                .map(|label| (index, *score, label))
+        })
+        .collect::<Vec<_>>();
+    ranked.sort_by(|left, right| right.1.total_cmp(&left.1).then(left.0.cmp(&right.0)));
+    let (_, score, label) = ranked.first().copied()?;
+    let second_score = ranked.get(1).map(|(_, score, _)| *score).unwrap_or(0.0);
+    if score < PLACES365_TOPIC_MIN_SCORE || score - second_score < PLACES365_TOPIC_MIN_MARGIN {
+        return None;
+    }
+    Some(SemanticPrediction {
+        label_id: label.id.into(),
+        display_name: label.display_name.into(),
+        category_group: "scene".into(),
+        similarity: score,
+        threshold: label.threshold,
+        is_primary: true,
+    })
+}
+
+fn places365_cluster_to_topic(cluster_id: &str) -> Option<&'static str> {
+    match cluster_id {
+        "photo_landscape" => Some("photo_landscape"),
+        "photo_urban" => Some("photo_street"),
+        "photo_architecture" => Some("photo_architecture"),
+        "photo_food" => Some("photo_food"),
+        "photo_commercial" => Some("photo_still_life"),
+        "photo_event" => Some("photo_activity"),
+        "photo_transport" => Some("photo_vehicle"),
+        "photo_plant" => Some("photo_macro"),
+        // Industrial/work scenes are deliberately not a photographer-facing
+        // topic; leave that Places365 evidence unassigned.
+        "photo_documentary" => None,
+        // Residential/public indoor and travel are useful evidence, but are
+        // intentionally not forced into a photographer-facing topic.
+        "photo_indoor" | "photo_travel" => None,
+        _ => None,
+    }
 }
 
 pub(crate) fn initialize_ort(runtime_path: &Path) -> Result<(), SemanticError> {
@@ -1150,14 +1809,64 @@ pub(crate) fn verify_sha256(path: &Path, expected: &str) -> Result<(), SemanticE
     }
 }
 
-fn tokenize_prompts(tokenizer: &Tokenizer) -> Result<(Vec<i64>, Vec<i64>), SemanticError> {
-    let prompts = LABELS.iter().map(|label| label.prompt).collect::<Vec<_>>();
-    tokenize_texts(tokenizer, &prompts)
+type TokenizedTopicPrompts = (Vec<i64>, Vec<i64>, Vec<usize>);
+
+fn tokenize_topic_prompts(tokenizer: &Tokenizer) -> Result<TokenizedTopicPrompts, SemanticError> {
+    tokenize_topic_prompts_with_config(tokenizer, TOKEN_LENGTH)
+}
+
+fn tokenize_topic_prompts_with_config(
+    tokenizer: &Tokenizer,
+    token_length: usize,
+) -> Result<TokenizedTopicPrompts, SemanticError> {
+    tokenize_topic_prompts_for_template(tokenizer, token_length, None)
+}
+
+fn tokenize_topic_prompts_for_variant(
+    tokenizer: &Tokenizer,
+    variant: OpenClipVariant,
+) -> Result<TokenizedTopicPrompts, SemanticError> {
+    let template = match variant {
+        OpenClipVariant::Siglip2Base => Some("This is a photo of {label}."),
+        OpenClipVariant::MobileclipS0 => None,
+    };
+    tokenize_topic_prompts_for_template(tokenizer, variant.token_length(), template)
+}
+
+fn tokenize_topic_prompts_for_template(
+    tokenizer: &Tokenizer,
+    token_length: usize,
+    template: Option<&str>,
+) -> Result<TokenizedTopicPrompts, SemanticError> {
+    let specs = topics::prompt_specs();
+    let prompts = specs
+        .iter()
+        .map(|spec| {
+            template
+                .map(|template| template.replace("{label}", spec.prompt))
+                .unwrap_or_else(|| spec.prompt.to_string())
+        })
+        .collect::<Vec<_>>();
+    let label_indexes = specs
+        .iter()
+        .map(|spec| spec.label_index)
+        .collect::<Vec<_>>();
+    let (input_ids, attention_mask) =
+        tokenize_texts_with_length(tokenizer, &prompts, token_length)?;
+    Ok((input_ids, attention_mask, label_indexes))
 }
 
 fn tokenize_texts<S: AsRef<str>>(
     tokenizer: &Tokenizer,
     prompts: &[S],
+) -> Result<(Vec<i64>, Vec<i64>), SemanticError> {
+    tokenize_texts_with_length(tokenizer, prompts, TOKEN_LENGTH)
+}
+
+fn tokenize_texts_with_length<S: AsRef<str>>(
+    tokenizer: &Tokenizer,
+    prompts: &[S],
+    token_length: usize,
 ) -> Result<(Vec<i64>, Vec<i64>), SemanticError> {
     let encodings = tokenizer
         .encode_batch(
@@ -1168,13 +1877,13 @@ fn tokenize_texts<S: AsRef<str>>(
             true,
         )
         .map_err(|error| SemanticError::Inference(format!("tokenization failed: {error}")))?;
-    let mut input_ids = Vec::with_capacity(prompts.len() * TOKEN_LENGTH);
-    let mut attention_mask = Vec::with_capacity(prompts.len() * TOKEN_LENGTH);
+    let mut input_ids = Vec::with_capacity(prompts.len() * token_length);
+    let mut attention_mask = Vec::with_capacity(prompts.len() * token_length);
     for encoding in encodings {
-        if encoding.len() != TOKEN_LENGTH {
+        if encoding.len() != token_length {
             return Err(SemanticError::Inference(format!(
-                "tokenizer returned {} tokens; expected {TOKEN_LENGTH}",
-                encoding.len()
+                "tokenizer returned {} tokens; expected {token_length}",
+                encoding.len(),
             )));
         }
         input_ids.extend(encoding.get_ids().iter().map(|value| i64::from(*value)));
@@ -1191,9 +1900,8 @@ fn tokenize_texts<S: AsRef<str>>(
 fn preprocess_images(images: &[PathBuf]) -> Result<Vec<f32>, SemanticError> {
     let mut values = Vec::with_capacity(images.len() * 3 * IMAGE_SIZE * IMAGE_SIZE);
     for path in images {
-        let image = image::open(path)
-            .map_err(|error| SemanticError::Inference(format!("{}: {error}", path.display())))?
-            .to_rgb8();
+        let image = crate::imaging::load_analysis_thumbnail(path)
+            .map_err(|error| SemanticError::Inference(format!("{}: {error}", path.display())))?;
         let shortest = image.width().min(image.height());
         if shortest == 0 {
             return Err(SemanticError::Inference(format!(
@@ -1230,6 +1938,60 @@ fn preprocess_images(images: &[PathBuf]) -> Result<Vec<f32>, SemanticError> {
     Ok(values)
 }
 
+fn preprocess_open_clip_images(
+    images: &[PathBuf],
+    variant: OpenClipVariant,
+) -> Result<Vec<f32>, SemanticError> {
+    let image_size = variant.image_size() as u32;
+    let mut values =
+        Vec::with_capacity(images.len() * 3 * variant.image_size() * variant.image_size());
+    for path in images {
+        let image = crate::imaging::load_analysis_thumbnail(path)
+            .map_err(|error| SemanticError::Inference(format!("{}: {error}", path.display())))?;
+        if image.width() == 0 || image.height() == 0 {
+            return Err(SemanticError::Inference(format!(
+                "image has zero dimensions: {}",
+                path.display()
+            )));
+        }
+        let cropped = match variant {
+            OpenClipVariant::Siglip2Base => {
+                image::imageops::resize(&image, image_size, image_size, FilterType::CatmullRom)
+            }
+            OpenClipVariant::MobileclipS0 => {
+                let shortest = image.width().min(image.height());
+                let scale = f64::from(image_size) / f64::from(shortest);
+                let resized_width = (f64::from(image.width()) * scale)
+                    .round()
+                    .max(f64::from(image_size)) as u32;
+                let resized_height = (f64::from(image.height()) * scale)
+                    .round()
+                    .max(f64::from(image_size)) as u32;
+                let resized = image::imageops::resize(
+                    &image,
+                    resized_width,
+                    resized_height,
+                    FilterType::CatmullRom,
+                );
+                let left = (resized_width - image_size) / 2;
+                let top = (resized_height - image_size) / 2;
+                image::imageops::crop_imm(&resized, left, top, image_size, image_size).to_image()
+            }
+        };
+        for channel in 0..3 {
+            for pixel in cropped.pixels() {
+                let value = f32::from(pixel[channel]) / 255.0;
+                let value = match variant {
+                    OpenClipVariant::Siglip2Base => (value - 0.5) / 0.5,
+                    OpenClipVariant::MobileclipS0 => value,
+                };
+                values.push(value);
+            }
+        }
+    }
+    Ok(values)
+}
+
 fn cosine_similarity(left: &[f32], right: &[f32]) -> f32 {
     let mut dot = 0.0_f32;
     let mut left_norm = 0.0_f32;
@@ -1247,91 +2009,54 @@ fn cosine_similarity(left: &[f32], right: &[f32]) -> f32 {
     }
 }
 
-fn select_predictions(scores: &[f32]) -> Vec<SemanticPrediction> {
-    let mut accepted = Vec::<(usize, f32)>::new();
-
-    // `scene` is the compatibility primary category. It is deliberately
-    // selected separately from attributes so two unrelated labels cannot
-    // force one another into the primary slot.
-    let mut scene_candidates = candidates_for_group(scores, "scene");
-    scene_candidates.sort_by(|left, right| right.1.total_cmp(&left.1).then(left.0.cmp(&right.0)));
-    if let Some((index, score)) = scene_candidates.first().copied()
-        && score >= LABELS[index].threshold
-        && scene_candidates
-            .get(1)
-            .is_none_or(|(_, second_score)| score - *second_score >= SCENE_SCORE_MARGIN)
-    {
-        accepted.push((index, score));
+fn sigmoid(value: f32) -> f32 {
+    if value >= 0.0 {
+        1.0 / (1.0 + (-value).exp())
+    } else {
+        let exponential = value.exp();
+        exponential / (1.0 + exponential)
     }
-
-    for group in ["subject", "context"] {
-        let mut candidates = candidates_for_group(scores, group);
-        candidates.sort_by(|left, right| right.1.total_cmp(&left.1).then(left.0.cmp(&right.0)));
-        let Some((_, top_score)) = candidates.first().copied() else {
-            continue;
-        };
-        accepted.extend(
-            candidates
-                .into_iter()
-                .filter(|(index, score)| {
-                    *score >= LABELS[*index].threshold && *score >= top_score - TOP_SCORE_WINDOW
-                })
-                .take(MAX_LABELS),
-        );
-    }
-
-    accepted.sort_by(|left, right| {
-        is_primary_category(LABELS[left.0].id)
-            .cmp(&is_primary_category(LABELS[right.0].id))
-            .reverse()
-            .then(right.1.total_cmp(&left.1))
-            .then(left.0.cmp(&right.0))
-    });
-    accepted.truncate(MAX_LABELS);
-
-    let primary_index = accepted
-        .iter()
-        .find(|(index, _)| is_primary_category(LABELS[*index].id))
-        .map(|(index, _)| *index);
-    accepted
-        .into_iter()
-        .map(|(index, similarity)| SemanticPrediction {
-            label_id: LABELS[index].id.into(),
-            display_name: LABELS[index].display_name.into(),
-            category_group: LABELS[index].category_group.into(),
-            similarity,
-            threshold: LABELS[index].threshold,
-            is_primary: primary_index == Some(index),
-        })
-        .collect()
 }
 
-fn rank_similarities(scores: &[f32]) -> Vec<SemanticSimilarity> {
+fn select_topic_predictions(scores: &[f32]) -> Vec<SemanticPrediction> {
+    let Some((index, similarity)) = topics::select_primary(scores) else {
+        return Vec::new();
+    };
+    let label = &topics::TOPIC_LABELS[index];
+    vec![SemanticPrediction {
+        label_id: label.id.into(),
+        display_name: label.display_name.into(),
+        category_group: "scene".into(),
+        similarity,
+        threshold: label.threshold,
+        is_primary: true,
+    }]
+}
+
+fn rank_topic_similarities(scores: &[f32]) -> Vec<SemanticSimilarity> {
     let mut ranked = scores
         .iter()
         .enumerate()
-        .filter(|(index, _)| is_active_label(LABELS[*index].id))
-        .map(|(index, similarity)| SemanticSimilarity {
-            label_id: LABELS[index].id.into(),
-            display_name: LABELS[index].display_name.into(),
-            category_group: LABELS[index].category_group.into(),
-            similarity: *similarity,
-            threshold: LABELS[index].threshold,
+        .filter_map(|(index, similarity)| {
+            topics::TOPIC_LABELS
+                .get(index)
+                .map(|label| SemanticSimilarity {
+                    label_id: label.id.into(),
+                    display_name: label.display_name.into(),
+                    category_group: "topic_candidate".into(),
+                    similarity: *similarity,
+                    threshold: label.threshold,
+                })
         })
         .collect::<Vec<_>>();
-    ranked.sort_by(|left, right| right.similarity.total_cmp(&left.similarity));
+    ranked.sort_by(|left, right| {
+        right
+            .similarity
+            .total_cmp(&left.similarity)
+            .then(left.label_id.cmp(&right.label_id))
+    });
+    ranked.truncate(topics::MAX_RAW_CANDIDATES);
     ranked
-}
-
-fn candidates_for_group(scores: &[f32], group: &str) -> Vec<(usize, f32)> {
-    scores
-        .iter()
-        .enumerate()
-        .filter(|(index, _)| {
-            is_active_label(LABELS[*index].id) && LABELS[*index].category_group == group
-        })
-        .map(|(index, score)| (index, *score))
-        .collect()
 }
 
 pub(crate) fn cpu_thread_count() -> usize {
@@ -1369,6 +2094,7 @@ pub struct BenchmarkReport {
 pub struct BenchmarkSamplePrediction {
     pub path: String,
     pub labels: Vec<SemanticPrediction>,
+    pub raw_similarities: Vec<SemanticSimilarity>,
 }
 
 pub fn benchmark_classifier(
@@ -1398,6 +2124,7 @@ pub fn benchmark_classifier(
                     sample_predictions.push(BenchmarkSamplePrediction {
                         path: path.to_string_lossy().into_owned(),
                         labels: result.predictions,
+                        raw_similarities: result.raw_similarities,
                     });
                 }
             }
@@ -1515,6 +2242,7 @@ mod tests {
                 status: "ready".into(),
                 message: "test double".into(),
                 model: self.metadata(),
+                topic_model: None,
                 selected_backend: Some(ExecutionBackend::Cpu),
             }
         }
@@ -1547,7 +2275,7 @@ mod tests {
     #[test]
     fn catalog_has_stable_unique_ids_and_group_metadata() {
         let catalog = semantic_catalog();
-        assert_eq!(catalog.len(), 21);
+        assert_eq!(catalog.len(), topics::TOPIC_LABELS.len() + 2 + 6);
         let mut ids = catalog
             .iter()
             .map(|label| label.id.as_str())
@@ -1559,20 +2287,26 @@ mod tests {
             known_display_name_for_label_id("photo_landscape"),
             Some("风光自然")
         );
-        assert_eq!(known_display_name_for_label_id("unknown"), Some("未知"));
+        assert_eq!(known_display_name_for_label_id("unknown"), Some("抽象艺术"));
+        assert_eq!(
+            known_display_name_for_label_id("photo_documentary"),
+            Some("抽象艺术")
+        );
+        assert_eq!(known_display_name_for_label_id("person"), Some("单人"));
+        assert_eq!(known_display_name_for_label_id("pet"), Some("动物"));
         assert_eq!(
             catalog
                 .iter()
                 .filter(|label| label.is_primary_category)
                 .count(),
-            11
+            topics::TOPIC_LABELS.len()
         );
         assert_eq!(
             catalog
                 .iter()
                 .filter(|label| label.category_group == "subject")
                 .count(),
-            8
+            6
         );
         assert!(catalog
             .iter()
@@ -1592,17 +2326,25 @@ mod tests {
                 .is_primary_category
         );
         assert!(!catalog.iter().any(|label| label.id == "unknown"));
+        assert!(!catalog.iter().any(|label| label.id == "photo_documentary"));
+    }
+
+    #[test]
+    fn legacy_labels_canonicalize_to_the_consolidated_taxonomy() {
+        assert_eq!(canonical_label_id("unknown"), "photo_abstract");
+        assert_eq!(canonical_label_id("photo_documentary"), "photo_abstract");
+        assert_eq!(canonical_label_id("person"), "single_person");
+        assert_eq!(canonical_label_id("portrait"), "single_person");
+        assert_eq!(canonical_label_id("group"), "multiple_people");
+        assert_eq!(canonical_label_id("pet"), "animal");
     }
 
     #[test]
     fn unknown_is_not_a_model_candidate() {
-        let mut scores = vec![0.05; LABELS.len()];
-        scores[LABELS
-            .iter()
-            .position(|label| label.id == "photo_landscape")
-            .unwrap()] = 0.30;
+        let mut scores = vec![0.05; topics::TOPIC_LABELS.len()];
+        scores[topics::label_index("photo_landscape").unwrap()] = 0.30;
 
-        let predictions = select_predictions(&scores);
+        let predictions = select_topic_predictions(&scores);
 
         assert!(
             predictions
@@ -1613,36 +2355,59 @@ mod tests {
     }
 
     #[test]
+    fn siglip2_is_the_default_topic_model() {
+        assert_eq!(DEFAULT_TOPIC_MODEL, TopicModelKind::Siglip2Base);
+        assert_eq!(
+            TopicModelKind::parse("siglip2-base"),
+            Some(TopicModelKind::Siglip2Base)
+        );
+        assert!(TopicModelKind::parse("tinyclip").is_none());
+        assert!(TopicModelKind::parse("mobileclip-s0").is_none());
+        let metadata = default_topic_model_metadata();
+        assert_eq!(metadata.name, SIGLIP2_MODEL_NAME);
+        assert_eq!(metadata.version, SIGLIP2_MODEL_VERSION);
+        assert_eq!(metadata.analysis_version, SIGLIP2_ANALYSIS_VERSION);
+        assert_eq!(metadata.license.as_deref(), Some("Apache-2.0"));
+        assert_eq!(metadata.model_sha256.as_deref(), Some(SIGLIP2_MODEL_SHA256));
+    }
+
+    #[test]
     fn primary_label_uses_highest_accepted_similarity() {
-        let mut scores = vec![0.10; LABELS.len()];
-        scores[LABELS
-            .iter()
-            .position(|label| label.id == "photo_landscape")
-            .unwrap()] = 0.21;
-        scores[LABELS
-            .iter()
-            .position(|label| label.id == "photo_food")
-            .unwrap()] = 0.24;
-        scores[LABELS
-            .iter()
-            .position(|label| label.id == "outdoor")
-            .unwrap()] = 0.24;
-        let predictions = select_predictions(&scores);
+        let mut scores = vec![0.10; topics::TOPIC_LABELS.len()];
+        scores[topics::label_index("photo_landscape").unwrap()] = 0.21;
+        scores[topics::label_index("photo_food").unwrap()] = 0.30;
+        let predictions = select_topic_predictions(&scores);
         assert_eq!(predictions[0].label_id, "photo_food");
         assert!(predictions[0].is_primary);
         assert_eq!(
             predictions.iter().filter(|label| label.is_primary).count(),
             1
         );
-        assert!(predictions.iter().any(|label| label.label_id == "outdoor"));
+        assert_eq!(predictions.len(), 1);
     }
 
     #[test]
-    fn low_confidence_success_is_empty_and_resolves_to_virtual_unknown() {
-        let scores = vec![0.01; LABELS.len()];
-        let predictions = select_predictions(&scores);
+    fn low_confidence_success_is_empty_for_the_abstract_fallback() {
+        let scores = vec![0.01; topics::TOPIC_LABELS.len()];
+        let predictions = select_topic_predictions(&scores);
         assert!(predictions.is_empty());
         assert!(!predictions.iter().any(|label| label.label_id == "unknown"));
+    }
+
+    #[test]
+    fn places365_evidence_maps_to_a_photography_topic() {
+        let landscape_cluster = places365::SCENE_CLUSTERS
+            .iter()
+            .position(|cluster| cluster.id == "photo_landscape")
+            .unwrap();
+        let street_cluster = places365::SCENE_CLUSTERS
+            .iter()
+            .position(|cluster| cluster.id == "photo_urban")
+            .unwrap();
+        let prediction =
+            select_places365_topic(&[0.42, 0.08], &[landscape_cluster, street_cluster]).unwrap();
+        assert_eq!(prediction.label_id, "photo_landscape");
+        assert!(prediction.is_primary);
     }
 
     #[test]

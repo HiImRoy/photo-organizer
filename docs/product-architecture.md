@@ -35,7 +35,7 @@ PhotoOrganizer 已有可靠的本地索引、只读扫描、图像分析和安�
 | 单图预览、胶片栏、缩放和 Navigator               | Functional but UX incomplete                         | 可用，但 `activeAssetId` 与 `previewAssetId` 两套当前图片状态仍并存，Checkpoint C 的单一状态目标未实现。                                                                              |
 | EXIF/Metadata Inspector                          | Production-ready for display                         | 相机、镜头、ISO、光圈、快门、焦距可展示；绝大多数字段尚不可查询。                                                                                                                     |
 | Tone/Color 分析和筛选                            | Production-ready within current algorithm            | 可查询并支持人工 override；Checkpoint D 要求的完整评测和版本语义仍未全部验收。                                                                                                        |
-| TinyCLIP 分类与任务恢复                          | Functional but UX incomplete                         | 本地运行、版本/fingerprint 约束、批处理和缩略图输入已实现；摄影评测集和逐类质量门槛仍不充分。                                                                                         |
+| SigLIP 2 摄影题材与任务恢复                      | Functional but UX incomplete                         | 当前默认题材模型已切换为 SigLIP 2；版本/fingerprint 约束、批处理和缩略图输入已实现，摄影评测集和逐类质量门槛仍不充分。                                                                |
 | Favorite、Rating、Color Label                    | Production-ready                                     | 数据持久化、卡片/详情操作和筛选存在；Favorite 还通过工作台复制出第二个浏览入口。                                                                                                      |
 | Manual classification/tag overrides              | Functional but UX incomplete                         | Auto/Manual/Effective 边界已实现；Checkpoint B 仍等待桌面人工验收。                                                                                                                   |
 | Collection                                       | Functional but UX incomplete                         | 固定多对多成员关系正确且不改原图；只能在智能工作台中管理，不能作为主 Grid source 或 Organization scope。                                                                              |
@@ -354,13 +354,13 @@ LAP 的 100k+ 宣称和具体优化只能作为待验证假设，不能作为 Ph
 
 ### 已有证据与未知项
 
-| 领域           | 已有证据                                                                                                                                                | 仍是猜测                                             |
-| -------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------- |
-| 冷导入         | 隔离 release 基准（2 张 4000×3000 JPEG）约 360 ms；源 decode 223 ms、resize 117 ms。缓存复用约 204 ms 且源 decode 为 0；暖扫描约 141 ms 且无图像处理。  | 1k/10k/50k 导入吞吐、内存和跨格式表现。              |
-| 语义推理       | 48 个图标的 TinyCLIP CPU microbenchmark；release 批次 8 约 76.8 张/秒、批次 32 约 87.7 张/秒；应用输入严格为 thumbnail-only。                           | 大库任务调度、真实摄影图质量、长期内存。             |
-| Thumbnail 展示 | 已知链路是每个组件一次 IPC -> Rust 读 cache -> Base64 -> data URL -> Browser decode；页面 120 项，无 virtualization、batch、priority queue 或主动取消。 | 首屏、滚动帧、IPC/Base64/DOM/解码各自占比。          |
-| 文本/相似搜索  | 已知每次查询从 SQLite 读取 BLOB，逐个分配 `Vec<f32>`，重复计算 norm/点积并排序；硬上限 10,001。                                                         | 1k–100k 的 load/deserialization/scoring 分解和 P95。 |
-| 相似聚类       | 5,000 上限，top-dimension candidate window + exact check。                                                                                              | 候选召回率、质量、延迟和内存。                       |
+| 领域           | 已有证据                                                                                                                                                                | 仍是猜测                                             |
+| -------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------- |
+| 冷导入         | 旧隔离 release 基准（2 张 4000×3000 JPEG）中的源 decode 223 ms 仅作为问题定位历史；当前以计划 0036 为准，bounded WIC 导入不得建立完整源图像素缓冲，`sourceDecodeUs=0`。 | 1k/10k/50k 导入吞吐、内存和跨格式表现。              |
+| 语义推理       | 历史 48 个图标 TinyCLIP CPU microbenchmark；应用输入严格为 thumbnail-only。当前 SigLIP 2 的大库吞吐与长期内存仍需独立基准。                                             | 大库任务调度、真实摄影图质量、长期内存。             |
+| Thumbnail 展示 | 已知链路是每个组件一次 IPC -> Rust 读 cache -> Base64 -> data URL -> Browser decode；页面 120 项，无 virtualization、batch、priority queue 或主动取消。                 | 首屏、滚动帧、IPC/Base64/DOM/解码各自占比。          |
+| 文本/相似搜索  | 已知每次查询从 SQLite 读取 BLOB，逐个分配 `Vec<f32>`，重复计算 norm/点积并排序；硬上限 10,001。                                                                         | 1k–100k 的 load/deserialization/scoring 分解和 P95。 |
+| 相似聚类       | 5,000 上限，top-dimension candidate window + exact check。                                                                                                              | 候选召回率、质量、延迟和内存。                       |
 
 ### Thumbnail benchmark plan
 

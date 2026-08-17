@@ -11,7 +11,7 @@ pub struct SceneCluster {
     pub leaf_labels: &'static [&'static str],
 }
 
-pub const TAXONOMY_VERSION: &str = "photo-organizer-photography-topics-v1";
+pub const TAXONOMY_VERSION: &str = "photo-organizer-places365-scene-evidence-v1";
 pub const PLACES365_LEAF_COUNT: usize = 365;
 
 /// The official Places365 scene groups are kept as an implementation detail.
@@ -462,7 +462,7 @@ pub const SCENE_CLUSTERS: [SceneCluster; 11] = [
     },
     SceneCluster {
         id: "photo_architecture",
-        display_name: "建筑与空间",
+        display_name: "建筑",
         leaf_labels: &[],
     },
     SceneCluster {
@@ -487,22 +487,22 @@ pub const SCENE_CLUSTERS: [SceneCluster; 11] = [
     },
     SceneCluster {
         id: "photo_event",
-        display_name: "活动与运动",
+        display_name: "运动",
         leaf_labels: &[],
     },
     SceneCluster {
         id: "photo_transport",
-        display_name: "交通与汽车",
+        display_name: "交通工具",
         leaf_labels: &[],
     },
     SceneCluster {
         id: "photo_plant",
-        display_name: "植物与园艺",
+        display_name: "植物",
         leaf_labels: &[],
     },
     SceneCluster {
         id: "photo_documentary",
-        display_name: "纪实与工业",
+        display_name: "工业场景证据（不归类）",
         leaf_labels: &[],
     },
 ];

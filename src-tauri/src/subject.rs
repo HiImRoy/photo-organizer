@@ -12,7 +12,7 @@ use crate::semantic::{ExecutionBackend, ModelMetadata, SemanticError, SemanticLa
 pub const MODEL_NAME: &str = "PicoDet-S-COCO";
 pub const MODEL_VERSION: &str = "onnx-2026-08-10";
 pub const ANALYSIS_VERSION: &str = "photo-organizer-subject-picodet-yunet-v1";
-pub const TAXONOMY_VERSION: &str = "photo-organizer-subject-tags-v1";
+pub const TAXONOMY_VERSION: &str = "photo-organizer-subject-tags-v2";
 pub const MODEL_FILE: &str = "picodet_s_320_lcnet_postprocessed.onnx";
 pub const LABELS_FILE: &str = "coco80.txt";
 pub const MODEL_SHA256: &str = "09fc88131be8ad224f13739a5cf8fc838600d76a77539af7f0400fa90506c5f3";
@@ -37,7 +37,6 @@ const YUNET_OUTPUT_NAMES: [&str; 12] = [
 
 const VEHICLE_CLASSES: &[usize] = &[1, 2, 3, 4, 5, 6, 7, 8];
 const ANIMAL_CLASSES: &[usize] = &[14, 15, 16, 17, 18, 19, 20, 21, 22, 23];
-const PET_CLASSES: &[usize] = &[15, 16];
 const FOOD_CLASSES: &[usize] = &[39, 40, 41, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55];
 const PLANT_CLASSES: &[usize] = &[58];
 
@@ -74,30 +73,20 @@ struct SubjectLabelDefinition {
     threshold: f32,
 }
 
-const SUBJECT_LABELS: [SubjectLabelDefinition; 8] = [
+const SUBJECT_LABELS: [SubjectLabelDefinition; 6] = [
     SubjectLabelDefinition {
-        id: "person",
-        display_name: "人物",
+        id: "single_person",
+        display_name: "单人",
         threshold: PERSON_SCORE_THRESHOLD,
     },
     SubjectLabelDefinition {
-        id: "group",
+        id: "multiple_people",
         display_name: "多人",
         threshold: PERSON_SCORE_THRESHOLD,
     },
     SubjectLabelDefinition {
-        id: "portrait",
-        display_name: "人像",
-        threshold: FACE_SCORE_THRESHOLD,
-    },
-    SubjectLabelDefinition {
         id: "animal",
         display_name: "动物",
-        threshold: DETECTION_SCORE_THRESHOLD,
-    },
-    SubjectLabelDefinition {
-        id: "pet",
-        display_name: "宠物",
         threshold: DETECTION_SCORE_THRESHOLD,
     },
     SubjectLabelDefinition {
@@ -320,9 +309,9 @@ impl SubjectClassifier for SubjectModel {
         }
         let mut results = Vec::with_capacity(images.len());
         for path in images {
-            let rgb = image::open(path)
-                .map_err(|error| SemanticError::Inference(format!("{}: {error}", path.display())))?
-                .to_rgb8();
+            let rgb = crate::imaging::load_analysis_thumbnail(path).map_err(|error| {
+                SemanticError::Inference(format!("{}: {error}", path.display()))
+            })?;
             let pico_pixels = preprocess_pico(&rgb);
             let detections = {
                 let input = Tensor::from_array((
@@ -587,7 +576,7 @@ fn parse_yunet_outputs(blobs: &[(Vec<i64>, Vec<f32>)]) -> Result<f32, SemanticEr
             // clamp class/objectness probabilities, combine them, then use
             // the anchor-grid offsets for the box and landmarks. The box and
             // landmarks are intentionally discarded after decoding because
-            // this product only needs an anonymous portrait signal.
+            // this product only needs an anonymous single-person signal.
             let cls_score = cls[index].clamp(0.0, 1.0);
             let obj_score = obj[index].clamp(0.0, 1.0);
             let score = (cls_score * obj_score).sqrt();
@@ -636,21 +625,24 @@ fn aggregate_subjects(detections: &[(usize, f32)], face_score: f32) -> SubjectAn
     person_scores.sort_by(|left, right| right.total_cmp(left));
 
     let mut predictions = Vec::new();
-    if let Some(score) = person_scores.first().copied() {
-        predictions.push(prediction("person", score));
-    }
-    if person_scores.len() >= 2 {
-        let group_score = person_scores[1];
-        predictions.push(prediction("group", group_score));
-    }
-    if face_score >= FACE_SCORE_THRESHOLD {
-        predictions.push(prediction("portrait", face_score));
+    match person_scores.as_slice() {
+        [] if face_score >= FACE_SCORE_THRESHOLD => {
+            // A clear face without a surviving full-body person box is still
+            // useful evidence for the mutually exclusive single-person tag.
+            predictions.push(prediction("single_person", face_score));
+        }
+        [] => {}
+        [score] => {
+            predictions.push(prediction("single_person", (*score).max(face_score)));
+        }
+        scores => {
+            // The second strongest box is a conservative confidence for the
+            // presence of more than one person.
+            predictions.push(prediction("multiple_people", scores[1]));
+        }
     }
     if let Some(score) = max_for_classes(&class_scores, ANIMAL_CLASSES) {
         predictions.push(prediction("animal", score));
-    }
-    if let Some(score) = max_for_classes(&class_scores, PET_CLASSES) {
-        predictions.push(prediction("pet", score));
     }
     if let Some(score) = max_for_classes(&class_scores, VEHICLE_CLASSES) {
         predictions.push(prediction("vehicle", score));
@@ -693,7 +685,7 @@ mod tests {
     #[test]
     fn subject_catalog_is_non_primary_and_chinese() {
         let catalog = subject_catalog();
-        assert_eq!(catalog.len(), 8);
+        assert_eq!(catalog.len(), 6);
         assert!(
             catalog
                 .iter()
@@ -715,9 +707,28 @@ mod tests {
             .iter()
             .map(|prediction| prediction.label_id.as_str())
             .collect::<Vec<_>>();
+        assert_eq!(labels, &["multiple_people", "animal", "vehicle"]);
+    }
+
+    #[test]
+    fn person_labels_are_mutually_exclusive_and_face_fallback_is_single_person() {
+        let one_person = aggregate_subjects(&[(0, 0.91)], 0.82);
         assert_eq!(
-            labels,
-            &["person", "group", "portrait", "animal", "pet", "vehicle"]
+            one_person
+                .predictions
+                .iter()
+                .map(|prediction| prediction.label_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["single_person"]
+        );
+
+        let face_only = aggregate_subjects(&[], 0.82);
+        assert_eq!(face_only.predictions[0].label_id, "single_person");
+        assert!(
+            !face_only
+                .predictions
+                .iter()
+                .any(|prediction| prediction.label_id == "multiple_people")
         );
     }
 
@@ -744,12 +755,12 @@ mod tests {
         let mut ordered = Vec::with_capacity(YUNET_OUTPUT_NAMES.len());
         ordered.extend(cls_outputs);
         ordered.extend(obj_outputs);
-        for stride_index in 0..YUNET_STRIDES.len() {
-            let count = (FACE_IMAGE_SIZE / YUNET_STRIDES[stride_index]).pow(2);
+        for stride in YUNET_STRIDES {
+            let count = (FACE_IMAGE_SIZE / stride).pow(2);
             ordered.push((vec![1, count as i64, 4], vec![0.0; count * 4]));
         }
-        for stride_index in 0..YUNET_STRIDES.len() {
-            let count = (FACE_IMAGE_SIZE / YUNET_STRIDES[stride_index]).pow(2);
+        for stride in YUNET_STRIDES {
+            let count = (FACE_IMAGE_SIZE / stride).pow(2);
             ordered.push((vec![1, count as i64, 10], vec![0.0; count * 10]));
         }
 

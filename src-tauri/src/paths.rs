@@ -11,7 +11,7 @@ pub struct AppPaths {
     pub preview_dir: PathBuf,
     pub log_dir: PathBuf,
     pub semantic_model_dir: PathBuf,
-    pub tinyclip_model_dir: PathBuf,
+    pub siglip2_model_dir: PathBuf,
     pub subject_model_dir: PathBuf,
     pub face_model_dir: PathBuf,
     pub onnx_runtime_path: PathBuf,
@@ -47,8 +47,8 @@ impl AppPaths {
             .is_file()
             || packaged_root
                 .join("models")
-                .join("tinyclip-vit-8m-16-text-3m-yfcc15m")
-                .join(crate::semantic::TINYCLIP_MODEL_FILE)
+                .join("siglip2-base-patch16-224")
+                .join(crate::semantic::SIGLIP2_MODEL_FILE)
                 .is_file()
             || packaged_root
                 .join("models")
@@ -72,9 +72,9 @@ impl AppPaths {
             preview_dir,
             log_dir,
             semantic_model_dir: resource_root.join("models").join("places365-resnet18"),
-            tinyclip_model_dir: resource_root
+            siglip2_model_dir: resource_root
                 .join("models")
-                .join("tinyclip-vit-8m-16-text-3m-yfcc15m"),
+                .join("siglip2-base-patch16-224"),
             subject_model_dir: resource_root.join("models").join("subject-picodet"),
             face_model_dir: resource_root.join("models").join("subject-yunet"),
             onnx_runtime_path: resource_root.join("runtime").join("onnxruntime.dll"),

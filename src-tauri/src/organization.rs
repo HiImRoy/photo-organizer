@@ -1136,6 +1136,7 @@ mod tests {
             saturation_label: Some("medium".into()),
             dominant_color: None,
             dominant_color_category: Some("blue".into()),
+            color_palette: None,
             neutral_ratio: Some(0.2),
             dominant_color_coverage: Some(0.5),
             semantic_status: "completed".into(),

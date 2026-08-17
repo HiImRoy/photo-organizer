@@ -2,6 +2,8 @@
 
 状态：IMPLEMENTED_PENDING_MANUAL
 
+边界说明：本计划只描述用户主动查看单图预览时的 viewer-only 资源缓存。它不得被复用到导入、基础分析、语义分析或模型推理；这些流程统一遵循 `docs/decisions/0010-thumbnail-only-import-analysis.md` 和计划 0036 的缩略图-only 契约。
+
 ## 目标
 
 在不改变 SourceRoot、IPC 原图大小边界和既有预览架构的前提下，改善单图预览的连续浏览体验：

@@ -14,6 +14,12 @@ const api = vi.hoisted(() => ({
   fetchFavoriteAssetIds: vi.fn(),
   fetchFavoriteAssets: vi.fn(),
   fetchCollections: vi.fn(),
+  fetchCollection: vi.fn(),
+  addAssetsToCollection: vi.fn(),
+  searchLocalImages: vi.fn(),
+  fetchDuplicateGroups: vi.fn(),
+  fetchSimilarAssets: vi.fn(),
+  renderEditPreview: vi.fn(),
   fetchClassificationRegistry: vi.fn(),
   startLibraryScan: vi.fn(),
   rescanLibrary: vi.fn(),
@@ -46,6 +52,8 @@ const api = vi.hoisted(() => ({
   cancelSemanticAnalysis: vi.fn(),
   subscribeScanProgress: vi.fn(),
   subscribeSemanticProgress: vi.fn(),
+  subscribeSemanticStatus: vi.fn(),
+  subscribeSubjectStatus: vi.fn(),
 }));
 
 vi.mock("./api", () => api);
@@ -100,6 +108,43 @@ const asset: AssetListItem = {
   saturationLabel: "high",
   dominantColor: "#D76A52",
   dominantColorCategory: "orange",
+  colorPalette: {
+    algorithmVersion: "accent-oklab-v3",
+    coveragePalette: [
+      {
+        rank: 1,
+        color: "#D76A52",
+        category: "orange",
+        areaCoverage: 0.62,
+        saliencyCoverage: 0.58,
+        localContrast: 0.3,
+        chroma: 0.14,
+        spatialCoherence: 0.8,
+      },
+    ],
+    prominentPalette: [
+      {
+        rank: 1,
+        color: "#D76A52",
+        category: "orange",
+        areaCoverage: 0.62,
+        saliencyCoverage: 0.58,
+        localContrast: 0.3,
+        chroma: 0.14,
+        spatialCoherence: 0.8,
+      },
+      {
+        rank: 2,
+        color: "#294B70",
+        category: "blue",
+        areaCoverage: 0.2,
+        saliencyCoverage: 0.24,
+        localContrast: 0.42,
+        chroma: 0.12,
+        spatialCoherence: 0.56,
+      },
+    ],
+  },
   neutralRatio: 0.12,
   dominantColorCoverage: 0.72,
   semanticStatus: "completed",
@@ -114,7 +159,7 @@ const asset: AssetListItem = {
       categoryGroup: "context",
       similarity: 0.31,
       threshold: 0.16,
-      modelName: "TinyCLIP",
+      modelName: "SigLIP2-Base-Patch16-224",
       modelVersion: "test",
       analysisVersion: "test",
       taxonomyVersion: "photo-organizer-taxonomy-v2",
@@ -159,6 +204,17 @@ beforeEach(() => {
   api.fetchFavoriteAssetIds.mockResolvedValue([]);
   api.fetchFavoriteAssets.mockResolvedValue([]);
   api.fetchCollections.mockResolvedValue([]);
+  api.fetchCollection.mockResolvedValue(null);
+  api.addAssetsToCollection.mockResolvedValue(null);
+  api.searchLocalImages.mockResolvedValue({
+    query: "",
+    normalizedQuery: "",
+    embeddedAssetCount: 0,
+    items: [],
+  });
+  api.fetchDuplicateGroups.mockResolvedValue([]);
+  api.fetchSimilarAssets.mockResolvedValue([]);
+  api.renderEditPreview.mockResolvedValue("data:image/jpeg;base64,ZmFrZQ==");
   api.updateAssetRating.mockResolvedValue(null);
   api.updateAssetColorLabel.mockResolvedValue(null);
   api.setAssetFavorite.mockResolvedValue(true);
@@ -191,12 +247,12 @@ beforeEach(() => {
     status: "ready",
     message: "ready",
     model: {
-      name: "TinyCLIP",
+      name: "SigLIP2-Base-Patch16-224",
       version: "test",
       analysisVersion: "test",
-      license: "MIT",
+      license: "Apache-2.0",
       installed: true,
-      modelSizeBytes: 24_281_512,
+      modelSizeBytes: 378_000_135,
       modelSha256: "test",
       supportedBackends: ["cpu"],
     },
@@ -227,6 +283,8 @@ beforeEach(() => {
     },
     selectedBackend: "cpu",
   });
+  api.subscribeSemanticStatus.mockResolvedValue(() => undefined);
+  api.subscribeSubjectStatus.mockResolvedValue(() => undefined);
   api.prepareSubjectModel.mockResolvedValue({
     status: "ready",
     message: "ready",
@@ -347,12 +405,12 @@ describe("PhotoOrganizer application shell", () => {
       status: "ready",
       message: "ready",
       model: {
-        name: "TinyCLIP",
+        name: "SigLIP2-Base-Patch16-224",
         version: "test",
         analysisVersion: "test",
-        license: "MIT",
+        license: "Apache-2.0",
         installed: true,
-        modelSizeBytes: 24_281_512,
+        modelSizeBytes: 378_000_135,
         modelSha256: "test",
         supportedBackends: ["cpu"],
       },
@@ -362,6 +420,7 @@ describe("PhotoOrganizer application shell", () => {
     api.fetchAssets.mockResolvedValue({ items: [asset], total: 1, page: 1, pageSize: 200 });
     render(<App />);
 
+    expect(screen.queryByLabelText("题材模型")).not.toBeInTheDocument();
     const assetButton = await screen.findByRole("button", { name: "晚霞.png" });
     expect(await screen.findByText("1200 × 800")).toBeInTheDocument();
     expect(assetButton).toHaveAttribute("aria-pressed", "false");
@@ -369,6 +428,8 @@ describe("PhotoOrganizer application shell", () => {
 
     expect(screen.getByRole("complementary", { name: "图片详情" })).toBeInTheDocument();
     expect(screen.getByText("直方图")).toBeInTheDocument();
+    expect(screen.getByText("强调色")).toBeInTheDocument();
+    expect(screen.getByText("面积色")).toBeInTheDocument();
     const histogramChannels = screen.getByRole("group", { name: "直方图通道" });
     expect(histogramChannels).toBeInTheDocument();
     expect(within(histogramChannels).getByRole("button", { name: "显示全部通道" })).toHaveAttribute(
@@ -398,6 +459,17 @@ describe("PhotoOrganizer application shell", () => {
     expect(screen.getByText("1200 × 800")).toBeInTheDocument();
     expect(screen.getByText("#D76A52")).toBeInTheDocument();
     await waitFor(() => expect(api.fetchThumbnail).toHaveBeenCalledWith(12));
+  });
+
+  it("loads SigLIP 2 when the default topic model is prepared", async () => {
+    const user = userEvent.setup();
+    api.fetchLibraries.mockResolvedValue([library]);
+    api.fetchAssets.mockResolvedValue({ items: [asset], total: 1, page: 1, pageSize: 200 });
+    render(<App />);
+
+    await user.click(await screen.findByRole("button", { name: "装载模型" }));
+
+    await waitFor(() => expect(api.prepareSemanticModel).toHaveBeenCalledWith("siglip2-base"));
   });
 
   it("refreshes the grid and sidebar category counts after a manual classification change", async () => {
@@ -531,10 +603,334 @@ describe("PhotoOrganizer application shell", () => {
     await user.click(screen.getByRole("button", { name: "查找与审阅" }));
 
     expect(screen.getByRole("region", { name: "查找与审阅" })).toBeInTheDocument();
-    expect(screen.getByText("QUERY / REVIEW CONTEXT")).toBeInTheDocument();
-    expect(screen.getByText("当前查询")).toBeInTheDocument();
+    expect(screen.getByText("当前范围 · 当前查询")).toBeInTheDocument();
+    expect(screen.queryByRole("navigation", { name: "工作流工具" })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Faces" })).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: "返回图库" })).toBeInTheDocument();
+  });
+
+  it("keeps the main grid and detail context visible while opening a review tool", async () => {
+    const user = userEvent.setup();
+    api.fetchLibraries.mockResolvedValue([library]);
+    api.fetchAssets.mockResolvedValue({
+      items: [asset, secondAsset],
+      total: 2,
+      page: 1,
+      pageSize: 200,
+    });
+    render(<App />);
+
+    const firstSelection = await screen.findByRole("button", { name: "选择 晚霞.png" });
+    const secondSelection = screen.getByRole("button", { name: "选择 海边.png" });
+    await user.click(firstSelection);
+    fireEvent.click(secondSelection, { ctrlKey: true });
+    await user.click(screen.getByRole("button", { name: "比较" }));
+
+    expect(screen.getByRole("region", { name: "查找与审阅" })).toBeInTheDocument();
+    expect(screen.getByRole("region", { name: "图片网格" })).toBeInTheDocument();
+    expect(screen.getByRole("complementary", { name: "图片详情" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "双图 / 四图比较" })).toBeInTheDocument();
+    expect(screen.queryByRole("navigation", { name: "工作流工具" })).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "返回图库" }));
+    expect(screen.queryByRole("heading", { name: "双图 / 四图比较" })).not.toBeInTheDocument();
+    expect(screen.getByRole("region", { name: "图片网格" })).toBeInTheDocument();
+  });
+
+  it("preserves an explicit selection or query scope through organization preview and back", async () => {
+    const user = userEvent.setup();
+    api.fetchLibraries.mockResolvedValue([library]);
+    api.fetchAssets.mockResolvedValue({ items: [asset], total: 1, page: 1, pageSize: 200 });
+    render(<App />);
+
+    const assetButton = await screen.findByRole("button", { name: "晚霞.png" });
+    await user.click(screen.getByRole("button", { name: "选择 晚霞.png" }));
+    await user.click(screen.getByRole("button", { name: "整理预览" }));
+
+    expect(screen.getByRole("region", { name: "整理预览工作区" })).toBeInTheDocument();
+    expect(screen.getByText("显式选择 · 1 张")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "返回图库" }));
+    expect(screen.getByRole("region", { name: "图片网格" })).toBeInTheDocument();
+    expect(assetButton).toHaveAttribute("aria-pressed", "true");
+
+    await user.click(screen.getByRole("button", { name: "清除选择" }));
+    await user.click(screen.getByRole("button", { name: "整理预览" }));
+    expect(screen.getByText("当前查询 · 1 张")).toBeInTheDocument();
+  });
+
+  it("keeps the explicit selection when choosing a collection for the add-selection action", async () => {
+    const user = userEvent.setup();
+    const collection = {
+      id: 3,
+      name: "旅行",
+      description: "",
+      createdAt: "2026-08-06T10:00:00Z",
+      updatedAt: "2026-08-06T10:00:00Z",
+      assetCount: 0,
+      assets: [],
+    };
+    api.fetchLibraries.mockResolvedValue([library]);
+    api.fetchAssets.mockResolvedValue({ items: [asset], total: 1, page: 1, pageSize: 200 });
+    api.fetchCollections.mockResolvedValue([collection]);
+    api.fetchCollection.mockResolvedValue(collection);
+    api.addAssetsToCollection.mockResolvedValue(collection);
+    render(<App />);
+
+    await screen.findByRole("button", { name: "晚霞.png" });
+    await user.click(screen.getByRole("button", { name: "选择 晚霞.png" }));
+    await user.click(screen.getByRole("button", { name: "加入集合" }));
+
+    const workflow = screen.getByRole("region", { name: "查找与审阅" });
+    const assetRequestCountBeforeTargetSelection = api.fetchAssets.mock.calls.length;
+    await user.click(within(workflow).getByRole("button", { name: /旅行/ }));
+
+    const addButton = await within(workflow).findByRole("button", { name: "加入已选 1 张" });
+    expect(addButton).toBeEnabled();
+    expect(api.fetchAssets.mock.calls.length).toBe(assetRequestCountBeforeTargetSelection);
+    await user.click(addButton);
+
+    expect(api.addAssetsToCollection).toHaveBeenCalledWith(3, [asset.id]);
+  });
+
+  it("keeps the current selection while focusing a search result in the detail panel", async () => {
+    const user = userEvent.setup();
+    api.fetchLibraries.mockResolvedValue([library]);
+    api.fetchAssets.mockResolvedValue({
+      items: [asset, secondAsset],
+      total: 2,
+      page: 1,
+      pageSize: 200,
+    });
+    api.searchLocalImages.mockResolvedValue({
+      query: "海边",
+      normalizedQuery: "海边",
+      embeddedAssetCount: 2,
+      items: [{ ...secondAsset, similarity: 0.94 }],
+    });
+    render(<App />);
+
+    await screen.findByRole("button", { name: "晚霞.png" });
+    await user.click(screen.getByRole("button", { name: "选择 晚霞.png" }));
+    await user.click(screen.getByRole("button", { name: "查找与审阅" }));
+
+    const workflow = screen.getByRole("region", { name: "查找与审阅" });
+    const searchInput = within(workflow).getByRole("textbox", { name: "本地 AI 搜索" });
+    await user.type(searchInput, "海边");
+    await user.click(within(workflow).getByRole("button", { name: "本地搜索" }));
+    await within(workflow).findByText("模型查询：海边 · 已分析 2 张");
+    await user.click(within(workflow).getByRole("button", { name: /海边\.png/ }));
+
+    expect(screen.getByRole("button", { name: "取消选择 晚霞.png" })).toHaveAttribute(
+      "aria-pressed",
+      "true",
+    );
+    expect(within(workflow).getByText(/显式选择范围/)).toBeInTheDocument();
+  });
+
+  it("makes favorites and collections browse sources without replacing the main grid", async () => {
+    const user = userEvent.setup();
+    api.fetchLibraries.mockResolvedValue([library]);
+    api.fetchAssets.mockResolvedValue({ items: [asset], total: 1, page: 1, pageSize: 200 });
+    render(<App />);
+
+    await screen.findByRole("button", { name: "晚霞.png" });
+    await user.click(screen.getByRole("button", { name: /收藏 仅收藏照片/ }));
+
+    await waitFor(() =>
+      expect(api.fetchAssets).toHaveBeenLastCalledWith(
+        expect.objectContaining({
+          filter: expect.objectContaining({ favoriteOnly: true, collectionId: null }),
+        }),
+      ),
+    );
+    expect(screen.getByRole("region", { name: "图片网格" })).toBeInTheDocument();
+    expect(screen.getByRole("complementary", { name: "图片详情" })).toBeInTheDocument();
+  });
+
+  it("explains and applies the photographic tone and capture-date ranges", async () => {
+    api.fetchLibraries.mockResolvedValue([library]);
+    api.fetchAssets.mockResolvedValue({ items: [asset], total: 1, page: 1, pageSize: 200 });
+    render(<App />);
+
+    expect(screen.getByText("按画面平均亮度筛选")).toBeInTheDocument();
+    expect(screen.getAllByText("0% — 100%")).toHaveLength(2);
+    expect(screen.getByText("按照片记录的拍摄日期筛选，包含开始和结束当天。")).toBeInTheDocument();
+
+    act(() => {
+      fireEvent.change(screen.getByRole("slider", { name: "亮度最低百分比" }), {
+        target: { value: "25" },
+      });
+      fireEvent.change(screen.getByLabelText("拍摄日期开始"), {
+        target: { value: "2026-01-01" },
+      });
+    });
+
+    await waitFor(() =>
+      expect(api.fetchAssets).toHaveBeenLastCalledWith(
+        expect.objectContaining({
+          filter: expect.objectContaining({
+            brightnessMin: 0.25,
+            brightnessMax: null,
+            capturedFrom: "2026-01-01",
+            capturedTo: null,
+          }),
+        }),
+      ),
+    );
+  });
+
+  it("keeps the main context and selection while reviewing duplicate groups", async () => {
+    const user = userEvent.setup();
+    api.fetchLibraries.mockResolvedValue([library]);
+    api.fetchAssets.mockResolvedValue({
+      items: [asset, secondAsset],
+      total: 2,
+      page: 1,
+      pageSize: 200,
+    });
+    api.fetchDuplicateGroups.mockResolvedValue([
+      {
+        fingerprint: "duplicate-fingerprint",
+        assets: [asset, secondAsset],
+        totalBytes: asset.fileSize + secondAsset.fileSize,
+        reclaimableBytes: secondAsset.fileSize,
+      },
+    ]);
+    render(<App />);
+
+    await screen.findByRole("button", { name: "选择 晚霞.png" });
+    await user.click(screen.getByRole("button", { name: "选择 晚霞.png" }));
+    fireEvent.click(screen.getByRole("button", { name: "选择 海边.png" }), { ctrlKey: true });
+    await user.click(screen.getByRole("button", { name: "重复审阅" }));
+
+    expect(await screen.findByRole("heading", { name: "精确重复审阅" })).toBeInTheDocument();
+    expect(screen.getByRole("region", { name: "图片网格" })).toBeInTheDocument();
+    expect(screen.getByRole("complementary", { name: "图片详情" })).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "返回图库" }));
+    expect(screen.getByRole("button", { name: "取消选择 晚霞.png" })).toHaveAttribute(
+      "aria-pressed",
+      "true",
+    );
+  });
+
+  it("keeps the explicit selection while focusing a similar-image result", async () => {
+    const user = userEvent.setup();
+    api.fetchLibraries.mockResolvedValue([library]);
+    api.fetchAssets.mockResolvedValue({
+      items: [asset, secondAsset],
+      total: 2,
+      page: 1,
+      pageSize: 200,
+    });
+    api.fetchSimilarAssets.mockResolvedValue([{ ...secondAsset, similarity: 0.91 }]);
+    render(<App />);
+
+    await screen.findByRole("button", { name: "选择 晚霞.png" });
+    await user.click(screen.getByRole("button", { name: "选择 晚霞.png" }));
+    await user.click(screen.getByRole("button", { name: "找相似" }));
+    const workflow = screen.getByRole("region", { name: "查找与审阅" });
+    await user.click(within(workflow).getByRole("button", { name: "查找当前图片的相似项" }));
+    await within(workflow).findByRole("button", { name: /海边\.png 91%/ });
+    await user.click(within(workflow).getByRole("button", { name: /海边\.png 91%/ }));
+
+    expect(screen.getByRole("button", { name: "取消选择 晚霞.png" })).toHaveAttribute(
+      "aria-pressed",
+      "true",
+    );
+    expect(within(workflow).getByText(/显式选择范围/)).toBeInTheDocument();
+  });
+
+  it("keeps a multi-selection when moving from similar review to compare", async () => {
+    const user = userEvent.setup();
+    api.fetchLibraries.mockResolvedValue([library]);
+    api.fetchAssets.mockResolvedValue({
+      items: [asset, secondAsset],
+      total: 2,
+      page: 1,
+      pageSize: 200,
+    });
+    api.fetchSimilarAssets.mockResolvedValue([{ ...secondAsset, similarity: 0.91 }]);
+    render(<App />);
+
+    await screen.findByRole("button", { name: "选择 晚霞.png" });
+    await user.click(screen.getByRole("button", { name: "选择 晚霞.png" }));
+    fireEvent.click(screen.getByRole("button", { name: "选择 海边.png" }), { ctrlKey: true });
+    await user.click(screen.getByRole("button", { name: "找相似" }));
+
+    const workflow = screen.getByRole("region", { name: "查找与审阅" });
+    await user.click(within(workflow).getByRole("button", { name: "查找当前图片的相似项" }));
+    await within(workflow).findByRole("button", { name: /海边\.png 91%/ });
+    await user.click(screen.getByRole("button", { name: "比较" }));
+
+    expect(await screen.findByRole("heading", { name: "双图 / 四图比较" })).toBeInTheDocument();
+    expect(api.fetchPreview).toHaveBeenCalledWith(12, "screen", 1600, 1200);
+    expect(api.fetchPreview).toHaveBeenCalledWith(13, "screen", 1600, 1200);
+    expect(screen.getByRole("button", { name: "取消选择 晚霞.png" })).toHaveAttribute(
+      "aria-pressed",
+      "true",
+    );
+    expect(screen.getByRole("button", { name: "取消选择 海边.png" })).toHaveAttribute(
+      "aria-pressed",
+      "true",
+    );
+  });
+
+  it("marks the focused review result and restores the multi-selection on back", async () => {
+    const user = userEvent.setup();
+    api.fetchLibraries.mockResolvedValue([library]);
+    api.fetchAssets.mockResolvedValue({
+      items: [asset, secondAsset],
+      total: 2,
+      page: 1,
+      pageSize: 200,
+    });
+    api.fetchSimilarAssets.mockResolvedValue([{ ...secondAsset, similarity: 0.91 }]);
+    render(<App />);
+
+    await screen.findByRole("button", { name: "选择 晚霞.png" });
+    await user.click(screen.getByRole("button", { name: "选择 晚霞.png" }));
+    fireEvent.click(screen.getByRole("button", { name: "选择 海边.png" }), { ctrlKey: true });
+    await user.click(screen.getByRole("button", { name: "找相似" }));
+
+    const workflow = screen.getByRole("region", { name: "查找与审阅" });
+    await user.click(within(workflow).getByRole("button", { name: "查找当前图片的相似项" }));
+    await within(workflow).findByRole("button", { name: /海边\.png 91%/ });
+    await user.click(screen.getByRole("button", { name: "比较" }));
+
+    const details = screen.getByRole("complementary", { name: "图片详情" });
+    await user.click(within(details).getByRole("button", { name: "4 星" }));
+    expect(api.updateAssetRating).toHaveBeenCalledWith(13, 4);
+
+    await user.click(screen.getByRole("button", { name: "返回图库" }));
+    expect(screen.getByRole("region", { name: "图片网格" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "取消选择 晚霞.png" })).toHaveAttribute(
+      "aria-pressed",
+      "true",
+    );
+    expect(screen.getByRole("button", { name: "取消选择 海边.png" })).toHaveAttribute(
+      "aria-pressed",
+      "true",
+    );
+  });
+
+  it("returns from non-destructive edit without losing the selected asset", async () => {
+    const user = userEvent.setup();
+    api.fetchLibraries.mockResolvedValue([library]);
+    api.fetchAssets.mockResolvedValue({ items: [asset], total: 1, page: 1, pageSize: 200 });
+    render(<App />);
+
+    await screen.findByRole("button", { name: "选择 晚霞.png" });
+    await user.click(screen.getByRole("button", { name: "选择 晚霞.png" }));
+    await user.click(screen.getByRole("button", { name: "编辑副本" }));
+
+    expect(await screen.findByRole("heading", { name: "非破坏性配方" })).toBeInTheDocument();
+    expect(screen.getByRole("region", { name: "图片网格" })).toBeInTheDocument();
+    expect(screen.getByRole("complementary", { name: "图片详情" })).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "返回图库" }));
+    expect(screen.getByRole("button", { name: "取消选择 晚霞.png" })).toHaveAttribute(
+      "aria-pressed",
+      "true",
+    );
   });
 
   it("applies Lightroom-style marks to one image or the selected images", async () => {
@@ -790,13 +1186,15 @@ describe("PhotoOrganizer application shell", () => {
       clientX: 10,
       clientY: 10,
     });
-    fireEvent.pointerMove(targetRow as HTMLElement, {
-      pointerId: 2,
-      clientX: 30,
-      clientY: 30,
+    await act(async () => {
+      fireEvent.pointerMove(targetRow as HTMLElement, {
+        pointerId: 2,
+        clientX: 30,
+        clientY: 30,
+      });
     });
     expect(sourceButton?.closest(".library-tree-row")).toHaveClass("is-dragging");
-    expect(targetRow).toHaveClass("is-drag-over");
+    await waitFor(() => expect(targetRow).toHaveClass("is-drag-over"));
     fireEvent.pointerUp(targetRow as HTMLElement, {
       pointerId: 2,
       clientX: 30,
@@ -1032,6 +1430,7 @@ describe("PhotoOrganizer application shell", () => {
       "aria-current",
       "true",
     );
+    expect(screen.getByRole("button", { name: "晚霞.png" })).toHaveClass("is-active");
     expect(
       screen.getByRole("toolbar", { name: "人工标记筛选" }).closest(".single-workspace"),
     ).not.toBeNull();
@@ -1072,6 +1471,11 @@ describe("PhotoOrganizer application shell", () => {
     const zoomLabel = document.querySelector<HTMLElement>(".preview-navigator-zoom-label");
     expect(zoomLabel).not.toBeNull();
     await waitFor(() => expect(zoomLabel?.textContent).toBe("50.67%"));
+    const previewImage = screen.getByAltText(asset.fileName) as HTMLImageElement;
+    Object.defineProperty(previewImage, "naturalWidth", { configurable: true, value: 800 });
+    Object.defineProperty(previewImage, "naturalHeight", { configurable: true, value: 1200 });
+    fireEvent.load(previewImage);
+    expect(zoomLabel).toHaveTextContent("50.67%");
     const zoomBeforeWheel = zoomLabel?.textContent;
     fireEvent.doubleClick(await screen.findByAltText(asset.fileName));
     await waitFor(() => expect(screen.getByText("100%")).toBeInTheDocument());
@@ -1177,6 +1581,70 @@ describe("PhotoOrganizer application shell", () => {
 
     expect(api.removeLibrary).toHaveBeenCalledWith(7);
     expect(confirm).toHaveBeenCalled();
+    confirm.mockRestore();
+  });
+
+  it("asks before removing child libraries and removes a cascade from the leaves upward", async () => {
+    const user = userEvent.setup();
+    const childLibrary: LibrarySummary = {
+      ...library,
+      id: 8,
+      name: "子图库",
+      rootPath: "C:\\fixtures\\中文 图库\\子图库",
+      sourcePath: "C:\\fixtures\\中文 图库\\子图库",
+      sourceIdentityKey: "c:/fixtures/中文 图库/子图库",
+      parentLibraryId: library.id,
+    };
+    const nestedLibrary: LibrarySummary = {
+      ...childLibrary,
+      id: 9,
+      name: "嵌套子图库",
+      rootPath: "C:\\fixtures\\中文 图库\\子图库\\嵌套",
+      sourcePath: "C:\\fixtures\\中文 图库\\子图库\\嵌套",
+      sourceIdentityKey: "c:/fixtures/中文 图库/子图库/嵌套",
+      parentLibraryId: childLibrary.id,
+    };
+    const confirm = vi.spyOn(window, "confirm").mockReturnValueOnce(true).mockReturnValueOnce(true);
+    api.fetchLibraries.mockResolvedValue([library, childLibrary, nestedLibrary]);
+    render(<App />);
+
+    await screen.findByText("嵌套子图库");
+    await user.click(screen.getByRole("button", { name: "中文 图库图库菜单" }));
+    await user.click(screen.getByRole("button", { name: "从图库移除" }));
+
+    await waitFor(() => expect(api.removeLibrary).toHaveBeenCalledTimes(3));
+    expect(api.removeLibrary).toHaveBeenNthCalledWith(1, nestedLibrary.id);
+    expect(api.removeLibrary).toHaveBeenNthCalledWith(2, childLibrary.id);
+    expect(api.removeLibrary).toHaveBeenNthCalledWith(3, library.id);
+    expect(confirm).toHaveBeenNthCalledWith(2, expect.stringContaining("2 个子图库"));
+    confirm.mockRestore();
+  });
+
+  it("keeps child libraries when the parent removal asks to remove them and the answer is no", async () => {
+    const user = userEvent.setup();
+    const childLibrary: LibrarySummary = {
+      ...library,
+      id: 8,
+      name: "子图库",
+      rootPath: "C:\\fixtures\\中文 图库\\子图库",
+      sourcePath: "C:\\fixtures\\中文 图库\\子图库",
+      sourceIdentityKey: "c:/fixtures/中文 图库/子图库",
+      parentLibraryId: library.id,
+    };
+    const confirm = vi
+      .spyOn(window, "confirm")
+      .mockReturnValueOnce(true)
+      .mockReturnValueOnce(false);
+    api.fetchLibraries.mockResolvedValue([library, childLibrary]);
+    render(<App />);
+
+    await screen.findByText("子图库");
+    await user.click(screen.getByRole("button", { name: "中文 图库图库菜单" }));
+    await user.click(screen.getByRole("button", { name: "从图库移除" }));
+
+    await waitFor(() => expect(api.removeLibrary).toHaveBeenCalledTimes(1));
+    expect(api.removeLibrary).toHaveBeenCalledWith(library.id);
+    expect(confirm).toHaveBeenNthCalledWith(2, expect.stringContaining("仅移除当前图库"));
     confirm.mockRestore();
   });
 });

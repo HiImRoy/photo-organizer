@@ -8,16 +8,16 @@ use std::time::Instant;
 use chrono::Utc;
 use clap::{Parser, ValueEnum};
 use photo_organizer_lib::semantic::{
-    ExecutionBackend, ModelMetadata, SemanticClassifier, SemanticSimilarity, TinyClipClassifier,
-    semantic_catalog,
+    ExecutionBackend, ModelMetadata, OpenVocabularyClipClassifier, SemanticClassifier,
+    SemanticSimilarity, TopicModelKind, semantic_catalog,
 };
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Parser)]
 #[command(
     name = "semantic-evaluate",
-    about = "Evaluate bundled TinyCLIP against an explicit, locally licensed photography set",
-    long_about = "Reads only the supplied evaluation directory. Each top-level folder is a stable label ID or a '+'-joined multi-label set such as portrait+night. Reports are created outside the dataset and never overwrite an existing file."
+    about = "Evaluate a bundled topic model against an explicit, locally licensed photography set",
+    long_about = "Reads only the supplied evaluation directory. Each top-level folder is a stable topic label ID or a '+'-joined set with optional context/subject labels. Reports are created outside the dataset and never overwrite an existing file."
 )]
 struct Arguments {
     #[arg(long, default_value = "evaluation-data", value_name = "DIR")]
@@ -30,6 +30,9 @@ struct Arguments {
     )]
     output: PathBuf,
 
+    #[arg(long, default_value = "siglip2-base", value_name = "MODEL")]
+    model: String,
+
     #[arg(long, value_name = "DIR")]
     model_dir: Option<PathBuf>,
 
@@ -38,6 +41,18 @@ struct Arguments {
 
     #[arg(long, value_enum, default_value_t = BackendArgument::Cpu)]
     backend: BackendArgument,
+
+    #[arg(long, default_value_t = 4)]
+    batch_size: usize,
+
+    #[arg(long, default_value_t = false)]
+    calibrate: bool,
+
+    #[arg(long, default_value_t = 0.85)]
+    target_precision: f64,
+
+    #[arg(long, default_value_t = 8)]
+    minimum_samples_per_class: usize,
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -101,6 +116,51 @@ struct ProcessStats {
     cpu_seconds: Option<f64>,
 }
 
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CalibrationLabel {
+    label_id: String,
+    display_name: String,
+    sample_count: usize,
+    positive_count: usize,
+    current_threshold: f32,
+    recommended_threshold: Option<f32>,
+    accepted_count: usize,
+    true_positive_count: usize,
+    false_positive_count: usize,
+    precision: Option<f64>,
+    recall: Option<f64>,
+    eligible: bool,
+    status: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CalibrationMarginSummary {
+    margin: f32,
+    accepted_count: usize,
+    true_positive_count: usize,
+    precision: Option<f64>,
+    macro_recall: Option<f64>,
+    coverage: Option<f64>,
+    meets_target_precision: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CalibrationReport {
+    status: String,
+    score_semantics: String,
+    target_precision: f64,
+    minimum_samples_per_class: usize,
+    evaluated_sample_count: usize,
+    eligible_label_count: usize,
+    recommended_margin: Option<f32>,
+    labels: Vec<CalibrationLabel>,
+    margin_sweep: Vec<CalibrationMarginSummary>,
+    notes: Vec<String>,
+}
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct EvaluationReport {
@@ -130,6 +190,7 @@ struct EvaluationReport {
     peak_memory_bytes: Option<u64>,
     process_cpu_seconds: Option<f64>,
     average_cpu_core_percent: Option<f64>,
+    calibration: Option<CalibrationReport>,
     samples: Vec<EvaluatedSample>,
 }
 
@@ -156,13 +217,32 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     if inputs.is_empty() {
         return Err("the evaluation directory contains no supported images".into());
     }
+    if !(1..=1024).contains(&arguments.batch_size) {
+        return Err("--batch-size must be between 1 and 1024".into());
+    }
+    if !(0.0..=1.0).contains(&arguments.target_precision) {
+        return Err("--target-precision must be between 0 and 1".into());
+    }
+    if arguments.minimum_samples_per_class == 0 {
+        return Err("--minimum-samples-per-class must be greater than 0".into());
+    }
+
+    let topic_model = TopicModelKind::parse(&arguments.model).ok_or_else(|| {
+        format!(
+            "unsupported --model '{}'; use siglip2-base",
+            arguments.model
+        )
+    })?;
 
     let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let model_dir = arguments.model_dir.unwrap_or_else(|| {
         manifest_dir
             .join("resources")
             .join("models")
-            .join("tinyclip-vit-8m-16-text-3m-yfcc15m")
+            .join(match topic_model {
+                TopicModelKind::Siglip2Base => "siglip2-base-patch16-224",
+                _ => unreachable!("only the bundled SigLIP 2 topic model is accepted"),
+            })
     });
     let runtime = arguments.runtime.unwrap_or_else(|| {
         manifest_dir
@@ -173,7 +253,11 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let process_start = collect_process_stats();
     let overall_start = Instant::now();
     let load_start = Instant::now();
-    let classifier = TinyClipClassifier::load(&model_dir, &runtime)?;
+    let classifier: Box<dyn SemanticClassifier> = Box::new(OpenVocabularyClipClassifier::load(
+        topic_model,
+        &model_dir,
+        &runtime,
+    )?);
     let model_load_ms = load_start.elapsed().as_secs_f64() * 1000.0;
     let metadata = classifier.metadata();
     let backend: ExecutionBackend = arguments.backend.into();
@@ -181,59 +265,75 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
 
     let inference_start = Instant::now();
     let mut samples = Vec::with_capacity(inputs.len());
-    for input in &inputs {
-        let sample_start = Instant::now();
-        let result = classifier.classify_batch(std::slice::from_ref(&input.path), backend);
-        let latency_ms = sample_start.elapsed().as_secs_f64() * 1000.0;
-        let relative_path = input
-            .path
-            .strip_prefix(&arguments.data)
-            .unwrap_or(&input.path)
-            .to_string_lossy()
-            .replace('\\', "/");
+    for batch in inputs.chunks(arguments.batch_size) {
+        let paths = batch
+            .iter()
+            .map(|input| input.path.clone())
+            .collect::<Vec<_>>();
+        let batch_start = Instant::now();
+        let result = classifier.classify_batch(&paths, backend);
+        let batch_latency_ms = batch_start.elapsed().as_secs_f64() * 1000.0;
+        let per_sample_latency_ms = batch_latency_ms / batch.len() as f64;
         match result {
-            Ok(mut outputs) if outputs.len() == 1 => {
-                let output = outputs.remove(0);
-                let top3 = output
-                    .raw_similarities
-                    .iter()
-                    .take(3)
-                    .map(|score| score.label_id.clone())
-                    .collect::<Vec<_>>();
-                let top1 = top3.first().cloned();
-                samples.push(EvaluatedSample {
-                    path: relative_path,
-                    expected_labels: input.expected_labels.clone(),
-                    predicted_labels: output
-                        .predictions
-                        .iter()
-                        .map(|prediction| prediction.label_id.clone())
-                        .collect(),
-                    top1,
-                    top3,
-                    raw_similarities: output.raw_similarities,
-                    latency_ms,
-                    error: None,
-                });
+            Ok(outputs) if outputs.len() == batch.len() => {
+                for (input, output) in batch.iter().zip(outputs) {
+                    let relative_path = input
+                        .path
+                        .strip_prefix(&arguments.data)
+                        .unwrap_or(&input.path)
+                        .to_string_lossy()
+                        .replace('\\', "/");
+                    samples.push(evaluated_sample(
+                        input,
+                        relative_path,
+                        per_sample_latency_ms,
+                        output,
+                    ));
+                }
             }
-            Ok(_) => samples.push(failed_sample(
-                input,
-                relative_path,
-                latency_ms,
-                "classifier returned an unexpected result count".into(),
-            )),
-            Err(error) => samples.push(failed_sample(
-                input,
-                relative_path,
-                latency_ms,
-                error.to_string(),
-            )),
+            Ok(outputs) => {
+                let error = format!(
+                    "classifier returned {} outputs for {} inputs",
+                    outputs.len(),
+                    batch.len()
+                );
+                for input in batch {
+                    let relative_path = input
+                        .path
+                        .strip_prefix(&arguments.data)
+                        .unwrap_or(&input.path)
+                        .to_string_lossy()
+                        .replace('\\', "/");
+                    samples.push(failed_sample(
+                        input,
+                        relative_path,
+                        per_sample_latency_ms,
+                        error.clone(),
+                    ));
+                }
+            }
+            Err(error) => {
+                for input in batch {
+                    let relative_path = input
+                        .path
+                        .strip_prefix(&arguments.data)
+                        .unwrap_or(&input.path)
+                        .to_string_lossy()
+                        .replace('\\', "/");
+                    samples.push(failed_sample(
+                        input,
+                        relative_path,
+                        per_sample_latency_ms,
+                        error.to_string(),
+                    ));
+                }
+            }
         }
     }
     let inference_ms = inference_start.elapsed().as_secs_f64() * 1000.0;
     let end_to_end_ms = overall_start.elapsed().as_secs_f64() * 1000.0;
     let process_stats = process_stats_delta(process_start, collect_process_stats());
-    let report = build_report(
+    let mut report = build_report(
         &arguments.data,
         metadata,
         actual_backend,
@@ -243,9 +343,50 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         end_to_end_ms,
         process_stats,
     );
+    if arguments.calibrate {
+        report.calibration = Some(build_calibration_report(
+            &report.samples,
+            arguments.target_precision,
+            arguments.minimum_samples_per_class,
+            score_semantics(topic_model),
+        ));
+    }
     write_report(&arguments.output, &report)?;
     println!("wrote {}", arguments.output.display());
     Ok(())
+}
+
+fn evaluated_sample(
+    input: &EvaluationInput,
+    relative_path: String,
+    latency_ms: f64,
+    output: photo_organizer_lib::semantic::SemanticAnalysisOutput,
+) -> EvaluatedSample {
+    let top3 = output
+        .raw_similarities
+        .iter()
+        .take(3)
+        .map(|score| score.label_id.clone())
+        .collect::<Vec<_>>();
+    let top1 = top3.first().cloned();
+    let mut predicted_labels = output
+        .predictions
+        .iter()
+        .map(|prediction| prediction.label_id.clone())
+        .collect::<Vec<_>>();
+    if predicted_labels.is_empty() {
+        predicted_labels.push("unknown".into());
+    }
+    EvaluatedSample {
+        path: relative_path,
+        expected_labels: input.expected_labels.clone(),
+        predicted_labels,
+        top1,
+        top3,
+        raw_similarities: output.raw_similarities,
+        latency_ms,
+        error: None,
+    }
 }
 
 fn failed_sample(
@@ -272,6 +413,7 @@ fn discover_evaluation_inputs(
     let known_labels = semantic_catalog()
         .into_iter()
         .map(|label| label.id)
+        .chain(std::iter::once("unknown".into()))
         .collect::<HashSet<_>>();
     let mut inputs = Vec::new();
     for entry in std::fs::read_dir(root)? {
@@ -465,7 +607,7 @@ fn build_report(
     });
 
     EvaluationReport {
-        schema_version: 1,
+        schema_version: 2,
         generated_at: Utc::now().to_rfc3339(),
         status: if failure_count == 0 {
             "completed"
@@ -502,8 +644,279 @@ fn build_report(
         peak_memory_bytes: process_stats.peak_memory_bytes,
         process_cpu_seconds,
         average_cpu_core_percent,
+        calibration: None,
         samples,
     }
+}
+
+fn build_calibration_report(
+    samples: &[EvaluatedSample],
+    target_precision: f64,
+    minimum_samples_per_class: usize,
+    score_semantics: &str,
+) -> CalibrationReport {
+    const MARGIN_SWEEP: &[f32] = &[0.0, 0.01, 0.02, 0.03, 0.04, 0.05, 0.06, 0.08, 0.10];
+    let successful_samples = samples
+        .iter()
+        .filter(|sample| sample.error.is_none() && !sample.raw_similarities.is_empty())
+        .collect::<Vec<_>>();
+    let catalog = semantic_catalog();
+    let mut labels = Vec::new();
+    let mut eligible_label_count = 0;
+    for label in catalog
+        .iter()
+        .filter(|label| label.category_group == "scene")
+    {
+        let positives = successful_samples
+            .iter()
+            .filter(|sample| sample.expected_labels.contains(&label.id))
+            .count();
+        let sample_count = successful_samples.len();
+        let eligible = positives >= minimum_samples_per_class
+            && sample_count.saturating_sub(positives) >= minimum_samples_per_class;
+        if eligible {
+            eligible_label_count += 1;
+        }
+        let candidates = successful_samples
+            .iter()
+            .filter_map(|sample| candidate_score(sample, &label.id))
+            .collect::<Vec<_>>();
+        let recommended = if eligible {
+            recommend_label_threshold(
+                &successful_samples,
+                &label.id,
+                target_precision,
+                label.threshold,
+            )
+        } else {
+            None
+        };
+        let threshold = recommended.unwrap_or(label.threshold);
+        let accepted_count = candidates
+            .iter()
+            .filter(|score| **score >= threshold)
+            .count();
+        let true_positive = successful_samples
+            .iter()
+            .filter(|sample| {
+                sample.expected_labels.contains(&label.id)
+                    && candidate_score(sample, &label.id).is_some_and(|score| score >= threshold)
+            })
+            .count();
+        labels.push(CalibrationLabel {
+            label_id: label.id.clone(),
+            display_name: label.display_name.clone(),
+            sample_count,
+            positive_count: positives,
+            current_threshold: label.threshold,
+            recommended_threshold: recommended,
+            accepted_count,
+            true_positive_count: true_positive,
+            false_positive_count: accepted_count.saturating_sub(true_positive),
+            precision: ratio(true_positive, accepted_count),
+            recall: ratio(true_positive, positives),
+            eligible,
+            status: if eligible {
+                "calibrated_candidate"
+            } else {
+                "insufficient_labeled_samples"
+            }
+            .into(),
+        });
+    }
+
+    let margin_sweep = MARGIN_SWEEP
+        .iter()
+        .map(|margin| {
+            let accepted = successful_samples
+                .iter()
+                .filter(|sample| accepted_by_margin(sample, *margin, &labels))
+                .collect::<Vec<_>>();
+            let true_positive = accepted
+                .iter()
+                .filter(|sample| {
+                    sample
+                        .top1
+                        .as_ref()
+                        .is_some_and(|label| sample.expected_labels.contains(label))
+                })
+                .count();
+            let macro_recall = if eligible_label_count == 0 {
+                None
+            } else {
+                average(
+                    labels
+                        .iter()
+                        .filter(|label| label.eligible && label.recommended_threshold.is_some())
+                        .map(|label| {
+                            accepted
+                                .iter()
+                                .filter(|sample| {
+                                    sample.top1.as_deref() == Some(label.label_id.as_str())
+                                        && sample.expected_labels.contains(&label.label_id)
+                                        && candidate_score(sample, &label.label_id).is_some_and(
+                                            |score| score >= label.recommended_threshold.unwrap(),
+                                        )
+                                })
+                                .count() as f64
+                                / label.positive_count.max(1) as f64
+                        }),
+                )
+            };
+            CalibrationMarginSummary {
+                margin: *margin,
+                accepted_count: accepted.len(),
+                true_positive_count: true_positive,
+                precision: ratio(true_positive, accepted.len()),
+                macro_recall,
+                coverage: ratio(accepted.len(), successful_samples.len()),
+                meets_target_precision: ratio(true_positive, accepted.len())
+                    .is_some_and(|precision| precision >= target_precision),
+            }
+        })
+        .collect::<Vec<_>>();
+    let recommended_margin = (eligible_label_count > 0)
+        .then(|| {
+            margin_sweep
+                .iter()
+                .filter(|summary| summary.meets_target_precision)
+                .max_by(|left, right| {
+                    left.macro_recall
+                        .unwrap_or(0.0)
+                        .total_cmp(&right.macro_recall.unwrap_or(0.0))
+                        .then(right.margin.total_cmp(&left.margin))
+                })
+                .map(|summary| summary.margin)
+        })
+        .flatten();
+
+    let mut notes = vec![
+        format!("本次校准使用 {score_semantics}；不同模型不得共用阈值。"),
+        "每类阈值只在正负样本数达到最低要求时给出建议，不会用小样本覆盖运行时默认值。".into(),
+        "margin 只用于互斥主题拒识；它不把多标签主体或环境属性变成互斥类别。".into(),
+    ];
+    if successful_samples.is_empty() {
+        notes.push("没有可用于校准的成功推理样本。".into());
+    }
+    CalibrationReport {
+        status: if eligible_label_count > 0 {
+            "candidate_thresholds_ready"
+        } else {
+            "insufficient_labeled_samples"
+        }
+        .into(),
+        score_semantics: score_semantics.into(),
+        target_precision,
+        minimum_samples_per_class,
+        evaluated_sample_count: successful_samples.len(),
+        eligible_label_count,
+        recommended_margin,
+        labels,
+        margin_sweep,
+        notes,
+    }
+}
+
+fn score_semantics(topic_model: TopicModelKind) -> &'static str {
+    match topic_model {
+        TopicModelKind::Siglip2Base => {
+            "SigLIP 2 sigmoid(logits_per_image), per-label independent score"
+        }
+        _ => unreachable!("only the bundled SigLIP 2 topic model is accepted"),
+    }
+}
+
+fn candidate_score(sample: &EvaluatedSample, label_id: &str) -> Option<f32> {
+    sample
+        .raw_similarities
+        .iter()
+        .find(|candidate| candidate.label_id == label_id)
+        .map(|candidate| candidate.similarity)
+}
+
+fn recommend_label_threshold(
+    samples: &[&EvaluatedSample],
+    label_id: &str,
+    target_precision: f64,
+    current_threshold: f32,
+) -> Option<f32> {
+    let mut candidates = samples
+        .iter()
+        .filter_map(|sample| candidate_score(sample, label_id))
+        .collect::<Vec<_>>();
+    candidates.push(current_threshold);
+    candidates.sort_by(|left, right| left.total_cmp(right));
+    candidates.dedup_by(|left, right| (*left - *right).abs() < f32::EPSILON);
+    candidates
+        .into_iter()
+        .filter_map(|threshold| {
+            let accepted = samples
+                .iter()
+                .filter(|sample| {
+                    candidate_score(sample, label_id).is_some_and(|score| score >= threshold)
+                })
+                .collect::<Vec<_>>();
+            let true_positive = accepted
+                .iter()
+                .filter(|sample| {
+                    sample
+                        .expected_labels
+                        .iter()
+                        .any(|expected| expected == label_id)
+                })
+                .count();
+            let precision = ratio(true_positive, accepted.len())?;
+            (precision >= target_precision).then_some((threshold, accepted.len(), true_positive))
+        })
+        .max_by(|left, right| {
+            let left_recall = left.2 as f64
+                / samples
+                    .iter()
+                    .filter(|sample| {
+                        sample
+                            .expected_labels
+                            .iter()
+                            .any(|expected| expected == label_id)
+                    })
+                    .count()
+                    .max(1) as f64;
+            let right_recall = right.2 as f64
+                / samples
+                    .iter()
+                    .filter(|sample| {
+                        sample
+                            .expected_labels
+                            .iter()
+                            .any(|expected| expected == label_id)
+                    })
+                    .count()
+                    .max(1) as f64;
+            left_recall
+                .total_cmp(&right_recall)
+                .then(right.0.total_cmp(&left.0))
+        })
+        .map(|(threshold, _, _)| threshold)
+}
+
+fn accepted_by_margin(sample: &EvaluatedSample, margin: f32, labels: &[CalibrationLabel]) -> bool {
+    let Some(top1) = sample.raw_similarities.first() else {
+        return false;
+    };
+    let threshold = labels
+        .iter()
+        .find(|label| label.label_id == top1.label_id)
+        .map(|label| {
+            label
+                .recommended_threshold
+                .unwrap_or(label.current_threshold)
+        })
+        .unwrap_or(top1.threshold);
+    let second = sample
+        .raw_similarities
+        .get(1)
+        .map(|candidate| candidate.similarity)
+        .unwrap_or(0.0);
+    top1.similarity >= threshold && top1.similarity - second >= margin
 }
 
 fn ratio(numerator: usize, denominator: usize) -> Option<f64> {
@@ -578,24 +991,24 @@ mod tests {
     #[test]
     fn discovers_single_and_multi_label_directories() {
         let temporary = tempdir().expect("temp dir");
-        let portrait = temporary.path().join("portrait");
-        let night_group = temporary.path().join("group+night");
+        let portrait = temporary.path().join("photo_portrait");
+        let landscape_outdoor = temporary.path().join("photo_landscape+outdoor");
         std::fs::create_dir_all(&portrait).expect("portrait dir");
-        std::fs::create_dir_all(&night_group).expect("night group dir");
+        std::fs::create_dir_all(&landscape_outdoor).expect("landscape outdoor dir");
         std::fs::write(portrait.join("one.jpg"), b"fixture").expect("portrait fixture");
-        std::fs::write(night_group.join("two.webp"), b"fixture").expect("group fixture");
+        std::fs::write(landscape_outdoor.join("two.webp"), b"fixture").expect("landscape fixture");
 
         let discovered = discover_evaluation_inputs(temporary.path()).expect("discover inputs");
         assert_eq!(discovered.len(), 2);
         assert!(
             discovered
                 .iter()
-                .any(|input| input.expected_labels == ["group", "night"])
+                .any(|input| input.expected_labels == ["outdoor", "photo_landscape"])
         );
         assert!(
             discovered
                 .iter()
-                .any(|input| input.expected_labels == ["portrait"])
+                .any(|input| input.expected_labels == ["photo_portrait"])
         );
     }
 
@@ -632,6 +1045,91 @@ mod tests {
         assert!(report.confusion.iter().any(|item| {
             item.expected_label == "group" && item.predicted_top1 == "unknown" && item.count == 1
         }));
+    }
+
+    #[test]
+    fn calibration_applies_per_label_threshold_before_margin() {
+        let samples = vec![
+            calibration_sample(
+                "portrait/positive.jpg",
+                "photo_portrait",
+                0.40,
+                "photo_landscape",
+                0.20,
+            ),
+            calibration_sample(
+                "landscape/negative-for-portrait.jpg",
+                "photo_landscape",
+                0.10,
+                "photo_landscape",
+                0.35,
+            ),
+            calibration_sample(
+                "landscape/low-score-negative.jpg",
+                "photo_landscape",
+                0.10,
+                "photo_landscape",
+                0.00,
+            ),
+            calibration_sample(
+                "landscape/false-positive-for-portrait.jpg",
+                "photo_landscape",
+                0.25,
+                "photo_landscape",
+                0.35,
+            ),
+        ];
+        let report = build_calibration_report(&samples, 0.85, 1, "test score");
+        let portrait = report
+            .labels
+            .iter()
+            .find(|label| label.label_id == "photo_portrait")
+            .expect("portrait calibration");
+        assert_eq!(portrait.recommended_threshold, Some(0.40));
+        assert_eq!(portrait.accepted_count, 1);
+        assert_eq!(portrait.false_positive_count, 0);
+        assert!(report.recommended_margin.is_some());
+        assert_eq!(report.margin_sweep[0].accepted_count, 3);
+    }
+
+    fn calibration_sample(
+        path: &str,
+        expected_label: &str,
+        portrait_score: f32,
+        second_label: &str,
+        second_score: f32,
+    ) -> EvaluatedSample {
+        let mut raw_similarities = vec![
+            SemanticSimilarity {
+                label_id: "photo_portrait".into(),
+                display_name: "人像".into(),
+                category_group: "topic_candidate".into(),
+                similarity: portrait_score,
+                threshold: 0.22,
+            },
+            SemanticSimilarity {
+                label_id: second_label.into(),
+                display_name: "第二候选".into(),
+                category_group: "topic_candidate".into(),
+                similarity: second_score,
+                threshold: 0.18,
+            },
+        ];
+        raw_similarities.sort_by(|left, right| right.similarity.total_cmp(&left.similarity));
+        let top1 = raw_similarities[0].label_id.clone();
+        EvaluatedSample {
+            path: path.into(),
+            expected_labels: vec![expected_label.into()],
+            predicted_labels: vec![top1.clone()],
+            top1: Some(top1),
+            top3: raw_similarities
+                .iter()
+                .map(|candidate| candidate.label_id.clone())
+                .collect(),
+            raw_similarities,
+            latency_ms: 1.0,
+            error: None,
+        }
     }
 
     fn evaluated_sample(
