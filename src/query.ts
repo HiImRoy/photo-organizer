@@ -1,6 +1,7 @@
 import {
   emptyAssetFilter,
   type AssetFilter,
+  type AssetQuery,
   type AssetQueryV1,
   type AssetScopeDescription,
   type AssetScopeInputV1,
@@ -9,6 +10,33 @@ import {
 } from "./types";
 
 export const DEFAULT_ASSET_PAGE_SIZE = 120;
+
+export function assetQueryFromV1(query: AssetQueryV1): AssetQuery {
+  const normalized = normalizeAssetQueryV1(query);
+  const { favoriteOnly, collectionId } = normalized.filter;
+  const root =
+    collectionId !== null
+      ? { kind: "collection" as const, collectionId }
+      : favoriteOnly
+        ? { kind: "favorites" as const }
+        : normalized.libraryId === null
+          ? { kind: "all" as const }
+          : { kind: "source" as const, libraryId: normalized.libraryId };
+  return {
+    version: 2,
+    root,
+    includeDescendants: true,
+    filter: {
+      ...normalized.filter,
+      favoriteOnly: false,
+      collectionId: null,
+    },
+    sort: normalized.sort,
+    direction: normalized.direction,
+    page: normalized.page,
+    pageSize: normalized.pageSize,
+  };
+}
 
 export function createAssetQueryV1(
   libraryId: number | null = null,
@@ -20,7 +48,6 @@ export function createAssetQueryV1(
     filter: { ...emptyAssetFilter },
     sort: "capture_time",
     direction: "desc",
-    groupBySemantic: false,
     page: 1,
     pageSize,
   };

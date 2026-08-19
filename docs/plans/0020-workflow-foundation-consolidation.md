@@ -29,7 +29,8 @@ AssetQueryV1 {
   filter: AssetFilter;
   sort: SortField;
   direction: SortDirection;
-  groupBySemantic: boolean;
+  // Presentation-only grouping is intentionally not part of query membership.
+  // The current browse surface stores it as AssetGroupBy in React state.
   page: number;
   pageSize: number;
 }

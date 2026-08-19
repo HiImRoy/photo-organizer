@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  assetQueryFromV1,
   createAssetQueryV1,
   describeAssetScopeV1,
   normalizeAssetQueryV1,
@@ -35,5 +36,27 @@ describe("AssetQueryV1", () => {
       count: 2,
       isExplicitSelection: true,
     });
+  });
+
+  it("converts legacy source and virtual roots into one query contract", () => {
+    const source = assetQueryFromV1(createAssetQueryV1(7));
+    expect(source).toMatchObject({
+      version: 2,
+      root: { kind: "source", libraryId: 7 },
+      includeDescendants: true,
+      filter: { favoriteOnly: false, collectionId: null },
+    });
+
+    const favorite = assetQueryFromV1({
+      ...createAssetQueryV1(7),
+      filter: { ...createAssetQueryV1(7).filter, favoriteOnly: true },
+    });
+    expect(favorite.root).toEqual({ kind: "favorites" });
+
+    const collection = assetQueryFromV1({
+      ...createAssetQueryV1(7),
+      filter: { ...createAssetQueryV1(7).filter, collectionId: 12 },
+    });
+    expect(collection.root).toEqual({ kind: "collection", collectionId: 12 });
   });
 });

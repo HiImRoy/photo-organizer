@@ -1823,15 +1823,8 @@ select:disabled {
   justify-content: space-between;
   gap: 16px;
 }
-.dialog-heading small {
-  color: var(--accent-strong);
-  font-size: 10px;
-  font-weight: 600;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
-}
 .dialog-heading h2 {
-  margin: 4px 0 0;
+  margin: 0;
   font-size: 17px;
 }
 .dialog-close {
@@ -1881,15 +1874,6 @@ select:disabled {
 }
 .import-option strong {
   font-size: 12px;
-}
-.import-option small,
-.dialog-hint {
-  color: var(--text-muted);
-  font-size: 11px;
-  line-height: 1.55;
-}
-.dialog-hint {
-  margin: 10px 2px 0;
 }
 .dialog-actions {
   display: flex;
@@ -4974,7 +4958,7 @@ button:disabled {
 }
 
 .asset-card-shell:hover .asset-mark-controls,
-.asset-card-shell:focus-within .asset-mark-controls,
+.asset-card-shell:has(.asset-mark-controls button:focus-visible) .asset-mark-controls,
 .asset-card-shell.has-rating .asset-mark-controls,
 .asset-card-shell.has-color-label .asset-mark-controls {
   opacity: 1;
@@ -4986,6 +4970,12 @@ button:disabled {
 .manual-rating-controls,
 .manual-color-label-controls,
 .manual-color-filter {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+}
+
+.rating-stars {
   display: flex;
   align-items: center;
   gap: 3px;
@@ -5554,9 +5544,8 @@ button:disabled {
   margin-top: 3px;
 }
 
-/* Lightroom-style filter strip: the manual marks belong to the image browser
-   footer, not to the content taxonomy sidebar. Both views reserve the same
-   compact row so the controls stay in one predictable place. */
+/* Lightroom-style browser shell: the manual marks live in the shared result
+   toolbar, while the image results keep the remaining vertical space. */
 .grid-workspace-shell {
   display: flex;
   min-height: 0;
@@ -5574,7 +5563,7 @@ button:disabled {
 }
 
 .single-workspace {
-  grid-template-rows: minmax(0, 1fr) 44px 112px;
+  grid-template-rows: minmax(0, 1fr) 112px;
 }
 
 .manual-mark-filter-bar {
@@ -7430,7 +7419,7 @@ button.primary-action:active:not(:disabled) {
 }
 
 .single-workspace {
-  grid-template-rows: minmax(0, 1fr) 38px 96px;
+  grid-template-rows: minmax(0, 1fr) 96px;
 }
 
 .single-canvas {
@@ -8557,7 +8546,7 @@ button.primary-action:active:not(:disabled) {
 }
 
 .asset-card-shell:hover .asset-mark-controls,
-.asset-card-shell:focus-within .asset-mark-controls {
+.asset-card-shell:has(.asset-mark-controls button:focus-visible) .asset-mark-controls {
   opacity: 1;
   pointer-events: auto;
   transform: translateY(0);
@@ -9733,4 +9722,6168 @@ button.primary-action:active:not(:disabled) {
   color: var(--text-low, #737b85);
   font-size: 8px;
   line-height: 1.35;
+}
+
+/* Flat Photo Workbench
+   The application is a desktop darkroom, not a card-based SaaS dashboard.
+   Keep the existing behavior and component structure, but make the final
+   visual layer deliberate: calm surfaces, quiet separators, and hierarchy
+   carried by spacing and typography instead of neumorphic shadows. */
+.photo-app {
+  --app: #191919;
+  --topbar: #202020;
+  --panel: #202020;
+  --panel-raised: #242424;
+  --panel-inset: #171717;
+  --canvas: #191919;
+  --canvas-soft: #202020;
+  --border: #3a3a3a;
+  --border-soft: #303030;
+  --line-subtle: #343434;
+  --line-visible: #555555;
+  --text: #eeeeee;
+  --text-high: #eeeeee;
+  --text-normal: #c6c6c6;
+  --text-secondary: #c1c1c1;
+  --text-muted: #8d8d8d;
+  --text-low: #707070;
+  --accent: #9eb5c1;
+  --accent-strong: #c7d6dc;
+  --accent-soft: #2d3b42;
+  --success: #82b89a;
+  --warning: #c9a66c;
+  --error: #d78b8b;
+  --focus: #c7d6dc;
+  --neu-bg: #191919;
+  --neu-surface: #242424;
+  --neu-surface-raised: #2b2b2b;
+  --neu-surface-pressed: #171717;
+  --neu-input: #171717;
+  --neu-detail-inner-bg: #1c1c1c;
+  --neu-shadow-raised: none;
+  --neu-shadow-control: none;
+  --neu-shadow-pressed: none;
+  --neu-shadow-float: 0 12px 32px rgba(0, 0, 0, 0.35);
+  --neu-workspace-card-radius: 0px;
+  --neu-workspace-card-shadow: none;
+  color: var(--text);
+  color-scheme: dark;
+  background: var(--app);
+}
+
+.photo-app.theme-light {
+  --app: #f7f7f5;
+  --topbar: #f0f1f1;
+  --panel: #f0f1f1;
+  --panel-raised: #ffffff;
+  --panel-inset: #e8e9e8;
+  --canvas: #f7f7f5;
+  --canvas-soft: #ffffff;
+  --border: #cfd3d4;
+  --border-soft: #daddde;
+  --line-subtle: #d8dcdd;
+  --line-visible: #9fa7aa;
+  --text: #25282a;
+  --text-high: #202223;
+  --text-normal: #454a4d;
+  --text-secondary: #555b5e;
+  --text-muted: #737a7d;
+  --text-low: #92999b;
+  --accent: #607985;
+  --accent-strong: #405b66;
+  --accent-soft: #dde5e8;
+  --success: #397653;
+  --warning: #946b2d;
+  --error: #a84f4f;
+  --focus: #405b66;
+  --neu-bg: #f7f7f5;
+  --neu-surface: #ffffff;
+  --neu-surface-raised: #ffffff;
+  --neu-surface-pressed: #e4e7e7;
+  --neu-input: #ffffff;
+  --neu-detail-inner-bg: #f0f1f1;
+  --neu-shadow-raised: none;
+  --neu-shadow-control: none;
+  --neu-shadow-pressed: none;
+  --neu-shadow-float: 0 12px 30px rgba(32, 38, 40, 0.14);
+  color-scheme: light;
+}
+
+.photo-app,
+.photo-app:not(.has-batch-classification),
+.photo-app.has-batch-classification {
+  grid-template-rows: 48px minmax(0, 1fr);
+  background: var(--app);
+}
+
+.photo-app.has-batch-classification {
+  grid-template-rows: 48px auto minmax(0, 1fr);
+}
+
+.photo-app .topbar {
+  min-height: 48px;
+  padding: 0 10px 0 12px;
+  gap: 10px;
+  border-bottom: 1px solid var(--line-subtle);
+  background: var(--topbar);
+  box-shadow: none;
+}
+
+.photo-app .app-identity {
+  gap: 8px;
+}
+
+.photo-app .brand-mark {
+  width: 28px;
+  height: 28px;
+  border: 1px solid var(--line-visible);
+  border-radius: 0;
+  background: var(--panel-raised);
+  box-shadow: none;
+}
+
+.photo-app .app-identity strong {
+  font-size: 13px;
+  font-weight: 650;
+}
+
+.photo-app .app-identity small {
+  color: var(--text-low);
+  font-size: 8px;
+  letter-spacing: 0.1em;
+}
+
+.photo-app .library-stat {
+  color: var(--text-muted);
+  font-size: 10px;
+}
+
+.photo-app .library-stat strong {
+  color: var(--text-normal);
+}
+
+.photo-app .topbar-actions {
+  gap: 2px;
+}
+
+.photo-app
+  :is(
+    .segmented,
+    .search-control,
+    .sort-select,
+    .tool-button,
+    .primary-action,
+    .secondary-action,
+    .direction-control,
+    .pagination button,
+    .quiet-button,
+    .icon-button
+  ) {
+  min-height: 30px;
+  border-radius: 0 !important;
+  box-shadow: none !important;
+}
+
+.photo-app .segmented {
+  padding: 0;
+  border: 1px solid var(--line-subtle);
+  background: transparent;
+}
+
+.photo-app .segmented button {
+  width: 30px;
+  height: 29px;
+  border-radius: 0;
+  color: var(--text-muted);
+}
+
+.photo-app .segmented button.is-active {
+  color: var(--text-high);
+  background: var(--accent-soft);
+  box-shadow: inset 0 -2px 0 var(--accent) !important;
+}
+
+.photo-app .search-control,
+.photo-app .sort-select {
+  border: 1px solid var(--line-subtle);
+  background: var(--panel-inset);
+}
+
+.photo-app .search-control input,
+.photo-app .sort-select select {
+  color: var(--text-normal);
+}
+
+.photo-app :is(.tool-button, .secondary-action, .direction-control, .quiet-button, .icon-button) {
+  color: var(--text-secondary);
+  border-color: transparent;
+  background: transparent;
+}
+
+.photo-app
+  :is(.tool-button, .secondary-action, .direction-control, .quiet-button, .icon-button):hover,
+.photo-app
+  :is(.tool-button, .secondary-action, .direction-control, .quiet-button, .icon-button).is-active {
+  color: var(--text-high);
+  border-color: var(--line-subtle);
+  background: var(--panel-raised);
+}
+
+.photo-app .primary-action {
+  color: #182126;
+  border-color: var(--accent);
+  background: var(--accent);
+}
+
+.photo-app .primary-action:hover:not(:disabled) {
+  color: #101619;
+  border-color: var(--accent-strong);
+  background: var(--accent-strong);
+}
+
+.photo-app .batch-classification-bar {
+  min-height: 40px;
+  padding: 5px 12px;
+  border-bottom: 1px solid var(--line-subtle);
+  background: var(--panel);
+}
+
+.photo-app
+  :is(
+    .batch-classification-bar select,
+    .classification-control select,
+    .classification-tag-add select
+  ) {
+  border: 1px solid var(--line-subtle);
+  border-radius: 0;
+  background: var(--panel-inset);
+}
+
+.photo-app .workspace-shell {
+  gap: 0;
+  background: var(--canvas);
+}
+
+.photo-app :is(.left-panel, .right-panel) {
+  border-radius: 0 !important;
+  background: var(--panel);
+  box-shadow: none !important;
+}
+
+.photo-app .left-panel {
+  border-right: 1px solid var(--line-subtle);
+}
+
+.photo-app .right-panel {
+  border-left: 1px solid var(--line-subtle);
+}
+
+.photo-app :is(.panel-titlebar, .sidebar-area-heading) {
+  min-height: 42px;
+  border-bottom: 1px solid var(--line-subtle);
+  border-radius: 0;
+  background: var(--panel);
+  box-shadow: none;
+}
+
+.photo-app
+  :is(.panel-section, .sidebar-library-module, .sidebar-filter-module, .sidebar-source-module) {
+  border-radius: 0 !important;
+  background: var(--panel);
+  box-shadow: none !important;
+}
+
+.photo-app .panel-section + .panel-section {
+  border-top: 1px solid var(--line-subtle);
+}
+
+.photo-app :is(.nav-row, .source-chip, .filter-chip, .color-filter) {
+  border-radius: 0 !important;
+  box-shadow: none !important;
+}
+
+.photo-app :is(.library-root-drop-target, .left-panel-footer, .sidebar-source-note) {
+  border-radius: 0 !important;
+  background: var(--panel) !important;
+  box-shadow: none !important;
+}
+
+.photo-app :is(.nav-row, .source-chip, .filter-chip, .color-filter):hover {
+  background: var(--panel-raised);
+}
+
+.photo-app
+  :is(.nav-row.is-active, .source-chip.is-active, .filter-chip.is-active, .color-filter.is-active) {
+  color: var(--text-high);
+  border-color: transparent;
+  background: var(--accent-soft);
+  box-shadow: inset 3px 0 0 var(--accent) !important;
+}
+
+.photo-app .nav-row.is-active::before {
+  display: none;
+}
+
+.photo-app .center-column,
+.photo-app .center-workspace,
+.photo-app .organization-workspace {
+  background: var(--canvas);
+}
+
+.photo-app .content-toolbar {
+  min-height: 44px;
+  margin: 0;
+  padding: 0 12px;
+  border-bottom: 1px solid var(--line-subtle);
+  border-radius: 0;
+  background: var(--canvas);
+  box-shadow: none;
+}
+
+.photo-app .content-toolbar strong {
+  color: var(--text-high);
+}
+
+.photo-app .content-toolbar span,
+.photo-app .group-toggle {
+  color: var(--text-muted);
+}
+
+.photo-app :is(.analysis-status-filter-bar, .scan-panel, .semantic-taskbar, .global-error) {
+  margin: 8px 10px 0;
+  border: 1px solid var(--line-subtle);
+  border-radius: 0 !important;
+  background: var(--panel);
+  box-shadow: none !important;
+}
+
+.photo-app :is(.analysis-status-filter-controls button, .semantic-taskbar button) {
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+}
+
+.photo-app .grid-workspace-results,
+.photo-app .single-canvas,
+.photo-app .filmstrip {
+  border-radius: 0 !important;
+  background: var(--canvas);
+  box-shadow: none !important;
+}
+
+.photo-app :is(.asset-card-shell, .asset-card-frame, .asset-card, .asset-image-wrap) {
+  border-radius: 0 !important;
+  box-shadow: none !important;
+}
+
+.photo-app .asset-card {
+  border: 1px solid var(--line-subtle);
+  background: var(--panel);
+}
+
+.photo-app .asset-card:hover {
+  border-color: var(--line-visible);
+  background: var(--panel-raised);
+}
+
+.photo-app .asset-card.is-selected,
+.photo-app .asset-card-shell.is-active .asset-card {
+  border-color: var(--accent);
+  box-shadow: inset 3px 0 0 var(--accent) !important;
+}
+
+.photo-app .asset-image-wrap {
+  background: var(--panel-inset);
+}
+
+.photo-app :is(.thumbnail-image, .thumbnail-skeleton, .thumbnail-placeholder) {
+  border-radius: 0 !important;
+}
+
+.photo-app .right-panel-card {
+  border-radius: 0 !important;
+  background: var(--panel);
+  box-shadow: none !important;
+}
+
+.photo-app .right-panel-card > .panel-titlebar {
+  border-bottom: 1px solid var(--line-subtle);
+}
+
+.photo-app
+  :is(
+    .detail-preview,
+    .preview-navigator,
+    .detail-section,
+    .classification-field,
+    .classification-tags-editor,
+    .analysis-grid > div
+  ) {
+  border-radius: 0 !important;
+  box-shadow: none !important;
+}
+
+.photo-app :is(.detail-section, .classification-editor, .analysis-grid > div) {
+  background: var(--panel);
+}
+
+.photo-app .detail-section {
+  border-bottom: 1px solid var(--line-subtle);
+}
+
+.photo-app .analysis-grid > div {
+  border: 0;
+  border-left: 2px solid var(--line-subtle);
+  background: var(--panel-raised);
+}
+
+.photo-app :is(.property-list > div, .semantic-detail-list > div) {
+  border-bottom-color: var(--line-subtle);
+}
+
+.photo-app
+  :is(.color-range-filter, .range-filter-card, .date-range-filter, .filter-conditions-popover) {
+  border-radius: 0 !important;
+  box-shadow: none !important;
+}
+
+.photo-app :is(.range-filter-card, .date-range-filter) {
+  border-color: var(--line-subtle);
+  background: var(--panel);
+}
+
+.photo-app .range-slider::before {
+  background: var(--panel-inset);
+  box-shadow: none;
+}
+
+.photo-app :is(.filmstrip button, .single-selection-toggle, .single-selection-mark) {
+  border-radius: 0 !important;
+  box-shadow: none !important;
+}
+
+.photo-app .filmstrip button {
+  border: 1px solid transparent;
+  background: var(--panel);
+}
+
+.photo-app .filmstrip button.is-active,
+.photo-app .filmstrip button.is-selected:not(.is-active) {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+
+.photo-app .welcome-state {
+  border: 1px solid var(--line-subtle);
+  border-left: 3px solid var(--accent);
+  border-radius: 0 !important;
+  background: var(--panel);
+  box-shadow: none !important;
+}
+
+.photo-app .welcome-state > svg {
+  border-radius: 0;
+  background: var(--panel-raised);
+  box-shadow: none;
+}
+
+.photo-app :is(.modal-backdrop, .import-library-dialog, .dialog-path, .import-option) {
+  border-radius: 0 !important;
+}
+
+.photo-app .import-library-dialog {
+  border-color: var(--line-visible);
+  background: var(--panel-raised);
+  box-shadow: var(--neu-shadow-float) !important;
+}
+
+.photo-app :is(.dialog-path, .import-option) {
+  border-color: var(--line-subtle);
+  background: var(--panel-inset);
+}
+
+.photo-app
+  :is(
+    .organization-fieldset,
+    .organization-level,
+    .organization-metric,
+    .organization-issue,
+    .path-card,
+    .workflow-asset,
+    .workflow-section,
+    .workflow-nav,
+    .workflow-header,
+    .collection-rail,
+    .face-status-card,
+    .face-metrics span
+  ) {
+  border-radius: 0 !important;
+  box-shadow: none !important;
+}
+
+.photo-app
+  :is(
+    .organization-fieldset,
+    .organization-level,
+    .organization-metric,
+    .organization-issue,
+    .path-card,
+    .workflow-asset,
+    .face-status-card
+  ) {
+  background: var(--panel);
+  border-color: var(--line-subtle);
+}
+
+.photo-app
+  :is(
+    .organization-target-input input,
+    .template-input,
+    .organization-control-group select,
+    .organization-rule-row select,
+    .organization-rule-row input,
+    .workflow-inline-form input,
+    .ai-search-form input
+  ) {
+  border-radius: 0 !important;
+  border-color: var(--line-subtle);
+  background: var(--panel-inset);
+  box-shadow: none !important;
+}
+
+.photo-app
+  :is(
+    .organization-target-input button,
+    .organization-actions button,
+    .organization-level button,
+    .subtle-button,
+    .workflow-actions button,
+    .editor-controls button,
+    .workflow-asset-action
+  ) {
+  border-radius: 0 !important;
+  border-color: transparent;
+  background: transparent;
+  box-shadow: none !important;
+}
+
+.photo-app
+  :is(
+    .organization-target-input button,
+    .organization-actions button,
+    .organization-level button,
+    .subtle-button,
+    .workflow-actions button,
+    .editor-controls button,
+    .workflow-asset-action
+  ):hover {
+  border-color: var(--line-subtle);
+  background: var(--panel-raised);
+}
+
+.photo-app .filter-conditions-popover {
+  border: 1px solid var(--line-visible);
+  background: var(--panel-raised);
+  box-shadow: var(--neu-shadow-float) !important;
+}
+
+.photo-app :is(.panel-toggle, .dialog-close) {
+  border-radius: 0;
+  background: transparent;
+}
+
+.photo-app :is(.panel-toggle, .dialog-close):hover {
+  background: var(--panel-raised);
+}
+
+.photo-app.theme-light
+  :is(
+    .topbar,
+    .left-panel,
+    .right-panel,
+    .panel-titlebar,
+    .sidebar-area-heading,
+    .panel-section,
+    .sidebar-library-module,
+    .sidebar-filter-module,
+    .sidebar-source-module
+  ) {
+  border-color: var(--line-subtle);
+  background: var(--panel);
+}
+
+.photo-app.theme-light
+  :is(
+    .center-column,
+    .center-workspace,
+    .organization-workspace,
+    .grid-workspace-results,
+    .single-canvas,
+    .filmstrip,
+    .content-toolbar
+  ) {
+  background: var(--canvas);
+}
+
+.photo-app.theme-light .asset-card {
+  border-color: var(--line-subtle);
+  background: var(--panel-raised);
+}
+
+.photo-app.theme-light .asset-card:hover {
+  border-color: var(--line-visible);
+  background: #f3f4f3;
+}
+
+.photo-app.theme-light .asset-card.is-selected,
+.photo-app.theme-light .asset-card-shell.is-active .asset-card {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+
+.photo-app.theme-light
+  :is(
+    .search-control,
+    .sort-select,
+    .batch-classification-bar select,
+    .classification-control select,
+    .classification-tag-add select,
+    .range-pair input,
+    .date-filter input
+  ) {
+  border-color: var(--line-subtle);
+  background: var(--panel-raised);
+  box-shadow: none !important;
+}
+
+.photo-app.theme-light .primary-action {
+  color: #ffffff;
+  background: var(--accent-strong);
+}
+
+@media (max-width: 1080px) {
+  .photo-app .topbar {
+    min-height: 48px;
+  }
+}
+
+/* Balanced Workbench
+   The previous pass removed too much visual softness.  This layer keeps the
+   flat information hierarchy, but restores the restrained radius and space
+   that make a desktop workbench feel calm rather than like a data table. */
+.photo-app {
+  --app: #1c1d1f;
+  --topbar: #252628;
+  --panel: #232527;
+  --panel-raised: #2b2d30;
+  --panel-inset: #1a1b1d;
+  --canvas: #1d1f21;
+  --canvas-soft: #25272a;
+  --border: rgba(255, 255, 255, 0.1);
+  --border-soft: rgba(255, 255, 255, 0.07);
+  --line-subtle: rgba(255, 255, 255, 0.08);
+  --line-visible: rgba(255, 255, 255, 0.17);
+  --text: #e8e9ea;
+  --text-high: #f0f1f2;
+  --text-normal: #c7c9cb;
+  --text-secondary: #b6b9bc;
+  --text-muted: #8e9297;
+  --text-low: #6f747a;
+  --accent: #a9c1cc;
+  --accent-strong: #c9dce4;
+  --accent-soft: rgba(169, 193, 204, 0.16);
+  --success: #8dbda0;
+  --warning: #d1ad72;
+  --error: #d99595;
+  --focus: #c9dce4;
+  --neu-bg: #1c1d1f;
+  --neu-surface: #25272a;
+  --neu-surface-raised: #2b2d30;
+  --neu-surface-pressed: #18191b;
+  --neu-input: #1a1b1d;
+  --neu-detail-inner-bg: #202225;
+  --neu-shadow-raised: 0 4px 18px rgba(0, 0, 0, 0.16);
+  --neu-shadow-control: 0 2px 8px rgba(0, 0, 0, 0.14);
+  --neu-shadow-pressed: inset 0 1px 2px rgba(0, 0, 0, 0.16);
+  --neu-shadow-float: 0 16px 44px rgba(0, 0, 0, 0.34);
+  --neu-workspace-card-radius: 14px;
+  --neu-workspace-card-shadow: 0 4px 18px rgba(0, 0, 0, 0.16);
+  background: var(--app);
+}
+
+.photo-app.theme-light {
+  --app: #eef1f2;
+  --topbar: #f5f7f8;
+  --panel: #f4f6f7;
+  --panel-raised: #ffffff;
+  --panel-inset: #e8edef;
+  --canvas: #f8fafb;
+  --canvas-soft: #eef2f4;
+  --border: rgba(31, 43, 49, 0.11);
+  --border-soft: rgba(31, 43, 49, 0.07);
+  --line-subtle: rgba(31, 43, 49, 0.1);
+  --line-visible: rgba(31, 43, 49, 0.2);
+  --text: #272c30;
+  --text-high: #1f2528;
+  --text-normal: #4c555a;
+  --text-secondary: #5d676c;
+  --text-muted: #788388;
+  --text-low: #a0aaae;
+  --accent: #607b87;
+  --accent-strong: #466570;
+  --accent-soft: rgba(96, 123, 135, 0.14);
+  --success: #397653;
+  --warning: #936c31;
+  --error: #a84f4f;
+  --focus: #466570;
+  --neu-bg: #eef1f2;
+  --neu-surface: #f7f9fa;
+  --neu-surface-raised: #ffffff;
+  --neu-surface-pressed: #e3e8ea;
+  --neu-input: #ffffff;
+  --neu-detail-inner-bg: #eef2f4;
+  --neu-shadow-raised: 0 4px 18px rgba(31, 43, 49, 0.08);
+  --neu-shadow-control: 0 2px 8px rgba(31, 43, 49, 0.08);
+  --neu-shadow-pressed: inset 0 1px 2px rgba(31, 43, 49, 0.08);
+  --neu-shadow-float: 0 16px 44px rgba(31, 43, 49, 0.14);
+}
+
+.photo-app .workspace-shell {
+  gap: 8px;
+  padding: 8px;
+  background: var(--app);
+}
+
+.photo-app :is(.left-panel, .right-panel, .center-column) {
+  min-width: 0;
+  border: 1px solid var(--border-soft) !important;
+  border-radius: 14px !important;
+  background: var(--panel) !important;
+  box-shadow: var(--neu-workspace-card-shadow) !important;
+  overflow: hidden;
+}
+
+.photo-app .left-panel,
+.photo-app .right-panel {
+  border-left: 1px solid var(--border-soft) !important;
+  border-right: 1px solid var(--border-soft) !important;
+}
+
+.photo-app .center-column {
+  background: var(--canvas) !important;
+}
+
+.photo-app :is(.panel-titlebar, .sidebar-area-heading) {
+  min-height: 46px;
+  padding-inline: 14px;
+  border-bottom: 1px solid var(--border-soft) !important;
+  border-radius: 0 !important;
+  background: transparent !important;
+}
+
+.photo-app .panel-section {
+  border-top: 0 !important;
+  border-bottom: 1px solid var(--border-soft);
+  background: transparent !important;
+}
+
+.photo-app :is(.sidebar-source-module, .right-panel-card) {
+  margin: 8px;
+  border: 1px solid var(--border-soft) !important;
+  border-radius: var(--control-radius) !important;
+  background: var(--panel-raised) !important;
+  box-shadow: none !important;
+  overflow: hidden;
+}
+
+.photo-app .right-panel-card {
+  height: calc(100% - 16px);
+  margin: 8px;
+}
+
+.photo-app .right-panel-card > .panel-titlebar {
+  background: var(--panel-raised) !important;
+}
+
+.photo-app .nav-row,
+.photo-app .source-chip {
+  margin-inline: 6px;
+  border: 0 !important;
+  border-radius: 8px !important;
+  background: transparent !important;
+  box-shadow: none !important;
+}
+
+.photo-app :is(.nav-row, .source-chip):hover {
+  background: rgba(255, 255, 255, 0.055) !important;
+}
+
+.photo-app :is(.nav-row.is-active, .source-chip.is-active) {
+  border: 0 !important;
+  background: var(--accent-soft) !important;
+  box-shadow: none !important;
+}
+
+.photo-app .nav-row.is-active::before {
+  display: block;
+  width: 3px;
+  border-radius: 3px;
+  background: var(--accent);
+}
+
+.photo-app .filter-chip,
+.photo-app .color-filter {
+  border: 0 !important;
+  border-radius: 8px !important;
+  background: transparent !important;
+  box-shadow: none !important;
+}
+
+.photo-app .filter-chip:hover,
+.photo-app .color-filter:hover {
+  background: rgba(255, 255, 255, 0.055) !important;
+}
+
+.photo-app .filter-chip.is-active,
+.photo-app .color-filter.is-active {
+  border: 0 !important;
+  background: var(--accent-soft) !important;
+  box-shadow: none !important;
+}
+
+.photo-app .topbar {
+  min-height: 52px;
+  padding-inline: 14px;
+  gap: 12px;
+  border-bottom: 1px solid var(--border-soft);
+  background: var(--topbar);
+  box-shadow: none !important;
+}
+
+.photo-app .brand-mark {
+  width: 30px;
+  height: 30px;
+  border: 1px solid var(--border);
+  border-radius: 9px !important;
+  background: var(--panel-raised);
+  box-shadow: none !important;
+}
+
+.photo-app .topbar-actions {
+  gap: 4px;
+}
+
+.photo-app
+  :is(
+    .segmented,
+    .search-control,
+    .sort-select,
+    .tool-button,
+    .primary-action,
+    .secondary-action,
+    .direction-control,
+    .pagination button,
+    .quiet-button,
+    .icon-button
+  ) {
+  min-height: 32px;
+  border-radius: 8px !important;
+  box-shadow: none !important;
+}
+
+.photo-app .segmented {
+  padding: 2px;
+  border: 1px solid var(--border-soft);
+  background: var(--panel-inset);
+}
+
+.photo-app .segmented button {
+  width: 29px;
+  height: 27px;
+  border-radius: 6px !important;
+}
+
+.photo-app .segmented button.is-active {
+  color: var(--text-high);
+  background: var(--panel-raised);
+  box-shadow: var(--neu-shadow-control) !important;
+}
+
+.photo-app .search-control,
+.photo-app .sort-select {
+  border: 1px solid var(--border-soft);
+  background: var(--panel-inset);
+}
+
+.photo-app :is(.tool-button, .secondary-action, .direction-control, .quiet-button, .icon-button) {
+  border-color: transparent;
+  background: transparent;
+}
+
+.photo-app
+  :is(.tool-button, .secondary-action, .direction-control, .quiet-button, .icon-button):hover,
+.photo-app
+  :is(.tool-button, .secondary-action, .direction-control, .quiet-button, .icon-button).is-active {
+  border-color: transparent;
+  background: var(--panel-raised);
+}
+
+.photo-app .primary-action {
+  color: #182126;
+  border-color: transparent;
+  border-radius: 9px !important;
+  background: var(--accent);
+}
+
+.photo-app .primary-action:hover:not(:disabled) {
+  border-color: transparent;
+  background: var(--accent-strong);
+}
+
+.photo-app .content-toolbar {
+  min-height: 48px;
+  margin: 8px 10px 0;
+  padding-inline: 12px;
+  border: 0 !important;
+  border-radius: 10px !important;
+  background: var(--panel) !important;
+  box-shadow: none !important;
+}
+
+.photo-app :is(.analysis-status-filter-bar, .scan-panel, .semantic-taskbar, .global-error) {
+  margin: 8px 10px 0;
+  border: 0 !important;
+  border-radius: 10px !important;
+  background: var(--panel) !important;
+  box-shadow: none !important;
+}
+
+.photo-app .grid-workspace-results {
+  padding: 10px;
+  border-radius: 10px !important;
+  background: transparent !important;
+  box-shadow: none !important;
+}
+
+.photo-app .asset-grid,
+.photo-app .grid-loading {
+  gap: 10px;
+}
+
+.photo-app :is(.asset-card-shell, .asset-card-frame, .asset-card) {
+  border: 0 !important;
+  border-radius: 12px !important;
+  box-shadow: none !important;
+  overflow: hidden;
+}
+
+.photo-app .asset-card {
+  background: var(--panel) !important;
+  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.12) !important;
+}
+
+.photo-app .asset-card:hover {
+  border: 0 !important;
+  background: var(--panel-raised) !important;
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.2) !important;
+  transform: translateY(-1px);
+}
+
+.photo-app .asset-card.is-selected,
+.photo-app .asset-card-shell.is-active .asset-card {
+  border: 0 !important;
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+  background: var(--panel-raised) !important;
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.2) !important;
+}
+
+.photo-app .asset-image-wrap {
+  border-radius: 12px 12px 0 0 !important;
+  background: var(--panel-inset);
+}
+
+.photo-app .asset-card-body {
+  background: var(--panel) !important;
+}
+
+.photo-app :is(.filmstrip, .manual-mark-filter-bar) {
+  margin: 0 10px 10px;
+  border: 0 !important;
+  border-radius: 10px !important;
+  background: var(--panel) !important;
+  box-shadow: none !important;
+}
+
+.photo-app .filmstrip button {
+  border-radius: 8px !important;
+  border: 1px solid transparent !important;
+  background: var(--panel-raised);
+}
+
+.photo-app .filmstrip button.is-active,
+.photo-app .filmstrip button.is-selected:not(.is-active) {
+  border-color: var(--accent) !important;
+  background: var(--accent-soft);
+}
+
+.photo-app :is(.detail-preview, .preview-navigator) {
+  margin: 10px;
+  border-radius: 10px !important;
+  background: var(--panel-inset);
+  box-shadow: none !important;
+  overflow: hidden;
+}
+
+.photo-app .detail-section {
+  margin-inline: 10px;
+  padding-inline: 2px;
+  border-bottom: 1px solid var(--border-soft);
+  background: transparent !important;
+}
+
+.photo-app .analysis-grid > div {
+  border: 0 !important;
+  border-radius: 8px !important;
+  background: var(--panel-raised);
+}
+
+.photo-app :is(.range-filter-card, .date-range-filter, .filter-conditions-popover) {
+  border: 0 !important;
+  border-radius: 10px !important;
+  background: var(--panel-raised);
+  box-shadow: none !important;
+}
+
+.photo-app :is(.range-pair input, .date-filter input, .date-range-fields input) {
+  border-radius: 7px !important;
+  border-color: var(--border-soft);
+  background: var(--panel-inset);
+  box-shadow: none !important;
+}
+
+.photo-app :is(.modal-backdrop, .import-library-dialog, .dialog-path, .import-option) {
+  border-radius: 12px !important;
+}
+
+.photo-app .import-library-dialog {
+  border: 1px solid var(--border);
+  background: var(--panel-raised);
+  box-shadow: var(--neu-shadow-float) !important;
+}
+
+.photo-app
+  :is(
+    .organization-fieldset,
+    .organization-level,
+    .organization-metric,
+    .organization-issue,
+    .path-card,
+    .workflow-asset,
+    .face-status-card
+  ) {
+  border: 0 !important;
+  border-radius: 10px !important;
+  background: var(--panel) !important;
+  box-shadow: none !important;
+}
+
+.photo-app.theme-light :is(.topbar, .left-panel, .right-panel, .center-column) {
+  border-color: var(--border-soft) !important;
+}
+
+.photo-app.theme-light .asset-card {
+  box-shadow: 0 2px 10px rgba(31, 43, 49, 0.08) !important;
+}
+
+.photo-app.theme-light .asset-card:hover,
+.photo-app.theme-light .asset-card.is-selected,
+.photo-app.theme-light .asset-card-shell.is-active .asset-card {
+  box-shadow: 0 6px 18px rgba(31, 43, 49, 0.12) !important;
+}
+
+@media (max-width: 1080px) {
+  .photo-app .workspace-shell {
+    gap: 6px;
+    padding: 6px;
+  }
+
+  .photo-app :is(.left-panel, .right-panel, .center-column) {
+    border-radius: 11px !important;
+  }
+}
+
+/* Current workbench cleanup: keep navigation, image cells and global actions
+   on one visual level.  These rules intentionally come last because the
+   stylesheet still contains older visual experiments for the same classes. */
+.photo-app .left-panel:not(.is-collapsed) {
+  gap: 6px;
+  padding: 8px !important;
+}
+
+.photo-app .sidebar-library-module {
+  flex: 0 0 auto !important;
+  min-height: 0 !important;
+  max-height: none !important;
+}
+
+.photo-app .sidebar-library-area {
+  flex: 0 1 auto !important;
+  height: auto !important;
+  min-height: 0 !important;
+  max-height: clamp(190px, 30vh, 300px) !important;
+  padding: 4px 8px 8px !important;
+  border-bottom: 0 !important;
+  overflow-x: hidden;
+}
+
+.photo-app .sidebar-filter-module {
+  flex: 1 1 0 !important;
+  min-height: 0 !important;
+}
+
+.photo-app .sidebar-source-module {
+  flex: 0 0 auto !important;
+  margin: 0 !important;
+  border-radius: 10px !important;
+}
+
+.photo-app .sidebar-source-module .sidebar-area-heading {
+  min-height: 36px;
+  padding: 9px 11px 5px;
+}
+
+.photo-app .sidebar-source-note {
+  margin: 0;
+  padding: 0 11px 4px;
+  font-size: 9px;
+  line-height: 1.4;
+}
+
+.photo-app .sidebar-source-list {
+  gap: 1px;
+  padding: 2px 5px 5px;
+}
+
+.photo-app .sidebar-source-list .source-chip {
+  min-height: 27px;
+  margin-inline: 0;
+  padding: 4px 7px;
+  border-radius: 7px !important;
+}
+
+.photo-app .sidebar-filter-module > .sidebar-area-heading {
+  min-height: 42px;
+  margin-bottom: 0;
+  padding: 11px 12px 7px;
+}
+
+.photo-app .sidebar-filter-area {
+  padding: 0 8px 12px !important;
+  overflow-x: hidden;
+}
+
+.photo-app .sidebar-filter-module .panel-section {
+  padding: 9px 4px 10px 7px;
+  border-bottom: 1px solid var(--border-soft);
+  border-radius: 0;
+}
+
+.photo-app .sidebar-filter-module .panel-section:last-child {
+  border-bottom: 0;
+}
+
+.photo-app .date-range-fields {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 5px;
+  min-width: 0;
+}
+
+.photo-app .date-range-fields label {
+  display: grid;
+  grid-template-columns: 16px minmax(0, 1fr);
+  min-width: 0;
+  gap: 5px;
+}
+
+.photo-app .date-range-fields input {
+  box-sizing: border-box;
+  min-width: 0;
+  max-width: 100%;
+}
+
+.photo-app .date-range-separator {
+  display: none;
+}
+
+.photo-app .date-range-footer {
+  min-width: 0;
+}
+
+.photo-app .date-range-footer > span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* The inspector itself owns the only outer silhouette.  The old card inside
+   the right panel repeated the same rounded rectangle, so the information
+   column looked like a card placed inside another card. */
+.photo-app .right-panel {
+  padding: 0 !important;
+  border-radius: 14px !important;
+}
+
+.photo-app .right-panel-card {
+  width: 100%;
+  height: 100% !important;
+  margin: 0 !important;
+  border: 0 !important;
+  border-radius: 0 !important;
+  background: transparent !important;
+  box-shadow: none !important;
+}
+
+.photo-app .right-panel-card > .panel-titlebar {
+  border-radius: 0 !important;
+  background: transparent !important;
+}
+
+/* Classification is a navigation surface, not a pile of tags.  Equal cells,
+   right-aligned counts and one quiet selected rail make the taxonomy scan like
+   a Lightroom side panel instead of a cloud of unrelated pills. */
+.photo-app .sidebar-filter-module .panel-section-heading {
+  min-height: 22px;
+  padding: 0 2px 7px 0;
+  color: var(--text-high);
+  font-size: 10px;
+  font-weight: 650;
+  letter-spacing: 0.02em;
+  text-transform: none;
+}
+
+.photo-app .sidebar-filter-module .panel-section-heading small {
+  min-width: 20px;
+  height: 18px;
+  padding: 0;
+  color: var(--text-muted);
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+  font-variant-numeric: tabular-nums;
+}
+
+.photo-app .sidebar-filter-area .chip-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 3px 5px;
+  min-width: 0;
+}
+
+.photo-app .sidebar-filter-area .chip-grid.three {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.photo-app .sidebar-filter-area .filter-chip {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  width: 100%;
+  min-width: 0;
+  min-height: 28px;
+  gap: 4px;
+  padding: 0 7px;
+  color: var(--text-secondary);
+  text-align: left;
+  border: 1px solid transparent !important;
+  border-radius: 6px !important;
+  background: color-mix(in srgb, var(--panel-raised) 44%, transparent) !important;
+  box-shadow: none !important;
+  font-size: 10px;
+  line-height: 1;
+}
+
+.photo-app .sidebar-filter-area .filter-chip:hover {
+  color: var(--text-high);
+  border-color: var(--border-soft) !important;
+  background: var(--panel-raised) !important;
+}
+
+.photo-app .sidebar-filter-area .filter-chip.is-active {
+  color: var(--text-high);
+  border-color: color-mix(in srgb, var(--accent) 36%, transparent) !important;
+  background: var(--accent-soft) !important;
+  box-shadow: inset 2px 0 0 var(--accent) !important;
+}
+
+.photo-app .sidebar-filter-area .filter-chip small {
+  flex: 0 0 auto;
+  min-width: 18px;
+  margin-left: auto;
+  color: var(--text-muted);
+  text-align: right;
+  font-size: 9px;
+  font-variant-numeric: tabular-nums;
+}
+
+.photo-app .sidebar-filter-area .filter-chip.is-active small {
+  color: var(--accent-strong);
+}
+
+.photo-app .sidebar-filter-area .chip-grid.three .filter-chip {
+  justify-content: center;
+  padding-inline: 4px;
+}
+
+.photo-app .sidebar-filter-area .match-mode {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 2px;
+  margin-top: 6px;
+  padding: 2px;
+  border: 1px solid var(--border-soft);
+  border-radius: 7px;
+  background: var(--panel-inset);
+  box-shadow: none;
+}
+
+.photo-app .sidebar-filter-area .match-mode button {
+  min-width: 0;
+  min-height: 24px;
+  padding-inline: 3px;
+  color: var(--text-muted);
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  box-shadow: none;
+  font-size: 9px;
+}
+
+.photo-app .sidebar-filter-area .match-mode button.is-active {
+  color: var(--text-high);
+  background: var(--accent-soft);
+}
+
+/* A light histogram needs a darker neutral well and darker channel fills;
+   screen blending and pale blue fills disappear against a white inspector. */
+.photo-app {
+  --histogram-luma-top: rgba(214, 224, 232, 0.62);
+  --histogram-luma-bottom: rgba(214, 224, 232, 0.1);
+}
+
+.photo-app .right-panel .histogram-chart {
+  border: 1px solid var(--border-soft);
+  background: var(--panel-inset);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.035);
+}
+
+.photo-app.theme-light {
+  --histogram-luma-top: rgba(76, 103, 114, 0.48);
+  --histogram-luma-bottom: rgba(76, 103, 114, 0.07);
+}
+
+.photo-app.theme-light .right-panel .histogram-chart {
+  border-color: rgba(45, 61, 68, 0.16);
+  background: #e1e7e9;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.72);
+}
+
+.photo-app.theme-light .right-panel .histogram-grid-lines {
+  color: #5d7078;
+  opacity: 0.34;
+}
+
+.photo-app.theme-light .right-panel .histogram-red,
+.photo-app.theme-light .right-panel .histogram-green,
+.photo-app.theme-light .right-panel .histogram-blue {
+  mix-blend-mode: multiply;
+}
+
+.photo-app.theme-light .right-panel .histogram-red {
+  fill: rgba(180, 52, 52, 0.56);
+}
+
+.photo-app.theme-light .right-panel .histogram-green {
+  fill: rgba(36, 126, 76, 0.5);
+}
+
+.photo-app.theme-light .right-panel .histogram-blue {
+  fill: rgba(43, 91, 155, 0.54);
+}
+
+.photo-app.theme-light .right-panel .histogram-channel-controls button {
+  color: #53656d;
+  border: 1px solid rgba(45, 61, 68, 0.09);
+  background: #e5ebed;
+  box-shadow: none;
+}
+
+.photo-app.theme-light .right-panel .histogram-channel-controls button.is-active {
+  color: #263b43;
+  border-color: rgba(70, 101, 112, 0.24);
+  background: #cddbe0;
+  box-shadow: inset 0 1px 2px rgba(45, 61, 68, 0.12);
+}
+
+.photo-app.theme-light .right-panel .histogram-scale {
+  color: #63767d;
+  opacity: 1;
+}
+
+.photo-app .right-panel .histogram-luma,
+.photo-app .right-panel .histogram-red,
+.photo-app .right-panel .histogram-green,
+.photo-app .right-panel .histogram-blue {
+  stroke-linejoin: round;
+  stroke-width: 0.45;
+}
+
+.photo-app .right-panel .histogram-luma {
+  stroke: color-mix(in srgb, var(--text-muted) 45%, transparent);
+}
+
+.photo-app.theme-light .right-panel .histogram-luma {
+  stroke: rgba(55, 78, 86, 0.58);
+  stroke-width: 0.75;
+}
+
+.photo-app.theme-light .right-panel .histogram-red {
+  stroke: rgba(142, 43, 43, 0.68);
+}
+
+.photo-app.theme-light .right-panel .histogram-green {
+  stroke: rgba(25, 103, 62, 0.66);
+}
+
+.photo-app.theme-light .right-panel .histogram-blue {
+  stroke: rgba(35, 78, 135, 0.7);
+}
+
+.photo-app .topbar-actions {
+  gap: 10px;
+}
+
+.photo-app .topbar-browse-controls,
+.photo-app .topbar-action-controls {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+  gap: 4px;
+}
+
+.photo-app .topbar-browse-controls {
+  flex: 1 1 auto;
+}
+
+.photo-app .topbar-action-controls {
+  flex: 0 0 auto;
+  padding-left: 6px;
+  border-left: 1px solid var(--border-soft);
+}
+
+.photo-app .topbar-browse-controls .search-control {
+  flex: 1 1 190px;
+  width: clamp(150px, 17vw, 245px);
+  min-width: 120px;
+}
+
+.photo-app .topbar-more-anchor {
+  position: relative;
+  display: flex;
+  flex: 0 0 auto;
+}
+
+.photo-app .topbar-more-anchor > .tool-button {
+  min-width: 48px;
+  white-space: nowrap;
+}
+
+.photo-app .topbar-more-menu {
+  position: absolute;
+  top: calc(100% + 8px);
+  right: 0;
+  z-index: 45;
+  display: grid;
+  width: 188px;
+  gap: 2px;
+  padding: 5px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--panel-raised);
+  box-shadow: var(--neu-shadow-float);
+}
+
+.photo-app .topbar-more-menu button {
+  display: grid;
+  min-width: 0;
+  gap: 2px;
+  padding: 8px 9px;
+  color: var(--text-normal);
+  text-align: left;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  cursor: pointer;
+}
+
+.photo-app .topbar-more-menu button:hover,
+.photo-app .topbar-more-menu button.is-active {
+  color: var(--text-high);
+  background: var(--accent-soft);
+}
+
+.photo-app .topbar-more-menu button strong {
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.photo-app .topbar-more-menu button small {
+  color: var(--text-muted);
+  font-size: 9px;
+}
+
+/* The mark controls are an interaction overlay, not a second empty footer.
+   The previous static rule reserved a dark strip even while the controls were
+   transparent, which made every card look as if it had an extra layer. */
+.photo-app .asset-card-frame {
+  position: relative;
+  height: auto;
+  border-radius: 12px !important;
+  background: var(--panel) !important;
+}
+
+.photo-app .asset-card-frame .asset-card {
+  height: auto;
+  min-height: 0;
+  border-radius: 12px !important;
+  background: var(--panel) !important;
+  box-shadow: none !important;
+}
+
+.photo-app .asset-card-body {
+  min-height: 0;
+  padding: 10px 11px 11px;
+  background: var(--panel) !important;
+}
+
+.photo-app .asset-card-frame .asset-mark-controls {
+  position: absolute !important;
+  right: 7px;
+  bottom: 7px;
+  left: 7px;
+  z-index: 5;
+  display: flex;
+  min-height: 24px;
+  padding: 2px 5px !important;
+  border: 1px solid var(--border) !important;
+  border-radius: 7px !important;
+  background: color-mix(in srgb, var(--panel-raised) 92%, transparent) !important;
+  box-shadow: 0 5px 14px rgba(0, 0, 0, 0.2) !important;
+  opacity: 0;
+  pointer-events: none;
+  transform: translateY(4px);
+  transition:
+    opacity 150ms ease,
+    transform 150ms ease;
+  backdrop-filter: blur(8px);
+}
+
+.photo-app .asset-card-shell:hover .asset-mark-controls,
+.photo-app .asset-card-shell:has(.asset-mark-controls button:focus-visible) .asset-mark-controls,
+.photo-app .asset-card-shell.has-rating .asset-mark-controls,
+.photo-app .asset-card-shell.has-color-label .asset-mark-controls {
+  opacity: 1;
+  pointer-events: auto;
+  transform: translateY(0);
+}
+
+.photo-app .asset-card-frame .asset-rating-controls button,
+.photo-app .asset-card-frame .asset-color-label-controls button {
+  background: transparent;
+  box-shadow: none;
+}
+
+.photo-app.theme-light .topbar-more-menu {
+  box-shadow: 0 14px 34px rgba(31, 43, 49, 0.18);
+}
+
+@media (max-width: 1080px) {
+  .photo-app .topbar-actions {
+    gap: 5px;
+  }
+
+  .photo-app .topbar-browse-controls,
+  .photo-app .topbar-action-controls {
+    gap: 2px;
+  }
+
+  .photo-app .topbar-action-controls {
+    padding-left: 4px;
+  }
+
+  .photo-app .topbar-browse-controls .search-control {
+    flex: 0 1 145px;
+    width: 145px;
+  }
+
+  .photo-app .topbar-more-anchor > .tool-button {
+    font-size: 10px !important;
+    padding-inline: 7px;
+  }
+}
+
+/* Source is a query dimension, not a permanent third sidebar module. Keep it
+   reachable from the toolbar filter popover without stealing vertical space
+   from the library tree or content taxonomy. */
+.photo-app .filter-conditions-popover {
+  gap: 0;
+  padding: 10px;
+  border-radius: 8px !important;
+  background: var(--panel-raised);
+  box-shadow: 0 14px 30px rgba(0, 0, 0, 0.28) !important;
+}
+
+.photo-app .filter-source-section {
+  padding-bottom: 9px;
+  border-bottom: 1px solid var(--border-soft);
+}
+
+.photo-app .filter-source-heading {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  min-width: 0;
+}
+
+.photo-app .filter-source-heading strong {
+  color: var(--text-high);
+  font-size: 11px;
+  font-weight: 650;
+}
+
+.photo-app .filter-source-heading span {
+  overflow: hidden;
+  color: var(--text-muted);
+  font-size: 9px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.photo-app .filter-source-options {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 2px 4px;
+  margin-top: 6px;
+}
+
+.photo-app .filter-source-options button {
+  display: flex;
+  min-width: 0;
+  min-height: 26px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  padding: 0 7px;
+  overflow: hidden;
+  color: var(--text-secondary);
+  text-align: left;
+  border: 0;
+  border-left: 2px solid transparent;
+  border-radius: 3px;
+  background: transparent;
+  box-shadow: none;
+  cursor: pointer;
+  font-size: 10px;
+}
+
+.photo-app .filter-source-options button:hover {
+  color: var(--text-high);
+  background: color-mix(in srgb, var(--panel) 72%, transparent);
+}
+
+.photo-app .filter-source-options button.is-active {
+  color: var(--text-high);
+  border-left-color: var(--accent);
+  background: var(--accent-soft);
+}
+
+.photo-app .filter-source-options button span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.photo-app .filter-source-options button small {
+  flex: 0 0 auto;
+  color: var(--text-muted);
+  font-size: 9px;
+  font-variant-numeric: tabular-nums;
+}
+
+.photo-app .filter-source-options .filter-source-manage {
+  grid-column: 1 / -1;
+  justify-content: flex-start;
+  min-height: 24px;
+  margin-top: 2px;
+  padding-left: 9px;
+  color: var(--text-muted);
+  border-top: 1px solid var(--border-soft);
+  border-left: 0;
+}
+
+.photo-app .filter-source-options .filter-source-manage:hover {
+  color: var(--text-high);
+}
+
+/* The library and taxonomy are the two permanent rail bands. Keep tree rows
+   dense enough to scan several libraries at once, while retaining a usable
+   pointer target for selection and drag/re-parenting. */
+.photo-app .sidebar-library-module > .panel-titlebar {
+  flex-basis: 40px;
+  min-height: 40px;
+  padding-inline: 11px 8px;
+}
+
+.photo-app :is(.sidebar-library-module, .sidebar-filter-module) {
+  border: 1px solid var(--border-soft) !important;
+  border-radius: 10px !important;
+  background: var(--panel) !important;
+  box-shadow: none !important;
+}
+
+.photo-app .sidebar-filter-module {
+  margin-top: 0;
+}
+
+.photo-app .sidebar-library-area {
+  max-height: clamp(150px, 27vh, 250px) !important;
+  padding: 2px 6px 6px !important;
+}
+
+.photo-app .sidebar-library-area .library-tree {
+  gap: 0;
+}
+
+.photo-app .sidebar-library-area .library-tree-row {
+  min-height: 26px;
+}
+
+.photo-app .sidebar-library-area .library-tree-expander {
+  width: 16px;
+  height: 26px;
+  flex-basis: 16px;
+}
+
+.photo-app .sidebar-library-area .library-tree-row > .nav-row {
+  min-height: 26px;
+  gap: 5px;
+  padding-inline: 6px;
+  border-radius: 5px;
+}
+
+.photo-app .sidebar-library-area .library-tree-row > .nav-row > span {
+  font-size: 10px;
+}
+
+.photo-app .sidebar-library-area .library-tree-row > .nav-row > small {
+  font-size: 8px;
+}
+
+.photo-app .sidebar-library-area .library-menu-trigger {
+  width: 21px;
+  height: 23px;
+  flex-basis: 21px;
+}
+
+.photo-app .sidebar-library-area .library-root-drop-target {
+  min-height: 20px;
+  padding: 3px 6px;
+  font-size: 9px;
+}
+
+.photo-app .sidebar-library-area .library-root-drop-target {
+  display: none;
+}
+
+.photo-app .sidebar-library-area .library-root-drop-target.is-dragging,
+.photo-app .sidebar-library-area .library-root-drop-target.is-active {
+  display: block;
+}
+
+/* A/R/G/B are one instrument control. A shared track and separators read as
+   a histogram mode switch; five floating mini-cards read as decoration. */
+.photo-app .right-panel .histogram-channel-controls {
+  gap: 0;
+  padding: 1px;
+  border: 1px solid var(--border-soft);
+  border-radius: 5px;
+  background: var(--panel-inset);
+  box-shadow: none;
+}
+
+.photo-app .right-panel .histogram-channel-controls button,
+.photo-app.theme-light .right-panel .histogram-channel-controls button {
+  width: 22px;
+  height: 20px;
+  border: 0;
+  border-left: 1px solid var(--border-soft);
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+  font-size: 9px;
+}
+
+.photo-app .right-panel .histogram-channel-controls button:first-child {
+  border-left: 0;
+}
+
+.photo-app .right-panel .histogram-channel-controls button:hover,
+.photo-app.theme-light .right-panel .histogram-channel-controls button:hover {
+  background: color-mix(in srgb, var(--panel-raised) 78%, transparent);
+}
+
+.photo-app .right-panel .histogram-channel-controls button.is-active,
+.photo-app.theme-light .right-panel .histogram-channel-controls button.is-active {
+  color: var(--text-high);
+  border-bottom: 2px solid var(--accent);
+  background: color-mix(in srgb, var(--accent-soft) 82%, transparent);
+  box-shadow: none;
+}
+
+/* Use restrained ink colours for the light histogram. Lower opacity and no
+   multiply blend keep overlaps readable instead of turning into black bands. */
+.photo-app.theme-light .right-panel .histogram-luma {
+  stroke: rgba(55, 78, 86, 0.42);
+  stroke-width: 0.65;
+}
+
+.photo-app.theme-light .right-panel .histogram-red,
+.photo-app.theme-light .right-panel .histogram-green,
+.photo-app.theme-light .right-panel .histogram-blue {
+  mix-blend-mode: normal;
+  stroke-width: 0.35;
+}
+
+.photo-app.theme-light .right-panel .histogram-red {
+  fill: rgba(168, 76, 76, 0.3);
+  stroke: rgba(132, 55, 55, 0.52);
+}
+
+.photo-app.theme-light .right-panel .histogram-green {
+  fill: rgba(67, 132, 92, 0.26);
+  stroke: rgba(43, 103, 68, 0.5);
+}
+
+.photo-app.theme-light .right-panel .histogram-blue {
+  fill: rgba(67, 106, 157, 0.28);
+  stroke: rgba(42, 78, 128, 0.54);
+}
+
+/* Manual marks return to the Lightroom interaction model: the saved mark is
+   quiet and visible, while the editor is revealed only while the card is
+   being inspected. */
+.photo-app .asset-card-shell.has-rating .asset-mark-controls,
+.photo-app .asset-card-shell.has-color-label .asset-mark-controls,
+.photo-app .asset-card-shell.has-rating.has-color-label .asset-mark-controls {
+  opacity: 0;
+  pointer-events: none;
+  transform: translateY(4px);
+}
+
+.photo-app .asset-card-shell:hover .asset-mark-controls,
+.photo-app .asset-card-shell:has(.asset-mark-controls button:focus-visible) .asset-mark-controls {
+  opacity: 1;
+  pointer-events: auto;
+  transform: translateY(0);
+}
+
+.photo-app .asset-mark-summary {
+  position: absolute;
+  right: 8px;
+  bottom: 8px;
+  z-index: 4;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  min-height: 20px;
+  margin: 0;
+  padding: 2px 5px;
+  color: #f1d38c;
+  border: 1px solid color-mix(in srgb, var(--border) 82%, transparent);
+  border-radius: 5px;
+  background: color-mix(in srgb, var(--panel-raised) 90%, transparent);
+  box-shadow: 0 3px 9px rgba(0, 0, 0, 0.18);
+  font-size: 10px;
+  line-height: 1;
+  transition: opacity 150ms ease;
+}
+
+.photo-app .asset-card-shell:hover .asset-mark-summary,
+.photo-app .asset-card-shell:focus-within .asset-mark-summary {
+  opacity: 0;
+  pointer-events: none;
+}
+
+.photo-app .asset-mark-summary span {
+  letter-spacing: 0.01em;
+}
+
+.photo-app .asset-mark-summary i {
+  display: inline-block;
+  width: 9px;
+  height: 9px;
+  border: 1px solid rgba(255, 255, 255, 0.64);
+  border-radius: 50%;
+  box-shadow: none;
+}
+
+.photo-app .asset-card-shell.has-color-label .asset-card-frame {
+  background: color-mix(in srgb, var(--manual-label-color) 24%, var(--panel-raised)) !important;
+}
+
+.photo-app .asset-card-shell.has-color-label .asset-card,
+.photo-app .asset-card-shell.has-color-label .asset-card-body {
+  background: color-mix(in srgb, var(--manual-label-color) 14%, var(--panel)) !important;
+}
+
+.photo-app .asset-card-shell.has-rating .asset-card-frame {
+  border: 1px solid color-mix(in srgb, #f1d38c 72%, var(--border)) !important;
+}
+
+.photo-app .asset-card-frame .asset-rating-controls button {
+  color: transparent !important;
+  -webkit-text-stroke: 1px color-mix(in srgb, var(--text-muted) 86%, transparent);
+  text-shadow: none;
+}
+
+.photo-app .asset-card-frame .asset-rating-controls button:hover,
+.photo-app .asset-card-frame .asset-rating-controls button.is-active {
+  color: #f1d38c !important;
+  -webkit-text-stroke: 0.5px #f7dfa5;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .photo-app .asset-mark-summary {
+    transition: none;
+  }
+}
+
+/* The workspace shell already owns the shared three-column inset.  Do not
+   inset the two visible left-rail modules a second time: their top, bottom,
+   and outer edge should align with the center canvas and inspector. */
+.photo-app .left-panel:not(.is-collapsed) {
+  padding: 0 !important;
+}
+
+/* The left rail has two bands, not cards nested inside cards. The module owns
+   the single silhouette; tree/filter bodies remain transparent and use rules
+   only for separation. */
+.photo-app .left-panel > .sidebar-module {
+  overflow: hidden;
+  border-radius: 10px !important;
+}
+
+.photo-app .left-panel {
+  border-radius: 0 !important;
+}
+
+.photo-app .left-panel > .sidebar-module > :is(.sidebar-library-area, .sidebar-filter-area),
+.photo-app .left-panel > .sidebar-module .library-tree,
+.photo-app .left-panel > .sidebar-module .panel-section {
+  border: 0 !important;
+  border-radius: 0 !important;
+  background: transparent !important;
+  box-shadow: none !important;
+}
+
+.photo-app .sidebar-library-module > .panel-titlebar,
+.photo-app .sidebar-filter-module > .sidebar-area-heading {
+  border-radius: 0 !important;
+  box-shadow: inset 0 -1px 0 var(--border-soft) !important;
+}
+
+.photo-app .sidebar-library-area .library-tree-row > .nav-row {
+  border-radius: 4px !important;
+}
+
+.photo-app .library-tree-expander:not(:disabled) svg {
+  transform: rotate(0deg);
+}
+
+.photo-app .library-tree-expander:not(:disabled).is-expanded svg {
+  transform: rotate(90deg);
+}
+
+/* The single-preview selection control is a compact action, not a square
+   checkbox. A modest radius keeps it tactile without turning it into a
+   decorative floating pill. */
+.photo-app .single-selection-toggle {
+  padding: 4px 10px 4px 6px;
+  border: 1px solid var(--border) !important;
+  border-radius: 9px !important;
+  background: color-mix(in srgb, var(--panel-raised) 94%, transparent) !important;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.22) !important;
+}
+
+.photo-app .single-selection-toggle:hover {
+  border-color: var(--accent) !important;
+  background: color-mix(in srgb, var(--accent-soft) 72%, var(--panel-raised)) !important;
+}
+
+.photo-app .single-selection-mark {
+  border-radius: 5px !important;
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--border) 72%, transparent) !important;
+}
+
+.photo-app .single-selection-toggle.is-selected {
+  border-color: var(--accent) !important;
+  box-shadow:
+    0 0 0 2px color-mix(in srgb, var(--accent) 22%, transparent),
+    0 4px 12px rgba(0, 0, 0, 0.24) !important;
+}
+
+.photo-app .filter-conditions-popover {
+  width: min(380px, calc(100vw - 24px));
+  max-height: min(82vh, 700px);
+  overflow-y: auto;
+}
+
+.photo-app .filter-advanced-section {
+  display: grid;
+  gap: 8px;
+  padding: 10px 0;
+  border-bottom: 1px solid var(--border-soft);
+}
+
+.photo-app .filter-advanced-heading,
+.photo-app .filter-advanced-group-heading {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.photo-app .filter-advanced-heading strong {
+  color: var(--text-high);
+  font-size: 11px;
+}
+
+.photo-app .filter-advanced-heading span,
+.photo-app .filter-advanced-group-heading span {
+  color: var(--text-muted);
+  font-size: 9px;
+}
+
+.photo-app .filter-advanced-group {
+  display: grid;
+  gap: 5px;
+  padding-top: 7px;
+}
+
+.photo-app .filter-advanced-group + .filter-advanced-group {
+  border-top: 1px solid var(--border-soft);
+}
+
+.photo-app .filter-advanced-group-heading strong {
+  color: var(--text-secondary);
+  font-size: 10px;
+  font-weight: 650;
+}
+
+.photo-app .filter-advanced-group .color-range-filter {
+  padding: 0 2px 2px;
+}
+
+.photo-app .filter-advanced-group .color-range-wheel-wrap {
+  min-height: 148px;
+}
+
+.photo-app .filter-advanced-group .color-range-hue-gradient,
+.photo-app .filter-advanced-group .color-range-wheel {
+  width: min(100%, 152px);
+}
+
+.photo-app .filter-advanced-group .range-filters {
+  gap: 6px;
+}
+
+.photo-app .filter-advanced-group .range-filter-card {
+  padding: 7px 8px 6px;
+  border: 0 !important;
+  border-radius: 0 !important;
+  border-top: 1px solid var(--border-soft) !important;
+  background: transparent !important;
+}
+
+.photo-app .filter-advanced-group .range-filter-card:first-child {
+  border-top: 0 !important;
+}
+
+.photo-app .filter-advanced-group .range-slider-scale {
+  font-size: 8px;
+}
+
+/* Settings is a workspace dialog rather than another floating card in the
+   toolbar. Keep sections separated by rules so the surface stays quiet. */
+.photo-app .settings-backdrop {
+  z-index: 60;
+  padding: 20px;
+  background: rgba(8, 10, 12, 0.62);
+  backdrop-filter: blur(5px);
+}
+
+.photo-app .settings-dialog {
+  display: flex;
+  width: min(620px, 100%);
+  max-height: min(760px, 92vh);
+  flex-direction: column;
+  overflow: hidden;
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--panel-raised);
+  box-shadow: 0 22px 56px rgba(0, 0, 0, 0.38);
+}
+
+.photo-app .settings-dialog-heading,
+.photo-app .settings-dialog-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 14px 18px;
+  border-bottom: 1px solid var(--border-soft);
+}
+
+.photo-app .settings-dialog-heading h2 {
+  margin: 3px 0 0;
+  color: var(--text-high);
+  font-size: 17px;
+}
+
+.photo-app .settings-dialog-kicker {
+  color: var(--text-muted);
+  font-size: 9px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.photo-app .settings-dialog-content {
+  min-height: 0;
+  overflow-y: auto;
+}
+
+.photo-app .settings-section {
+  display: grid;
+  gap: 10px;
+  padding: 15px 18px;
+  border-bottom: 1px solid var(--border-soft);
+}
+
+.photo-app .settings-section-heading {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.photo-app .settings-section-heading h3 {
+  margin: 0;
+  color: var(--text-high);
+  font-size: 12px;
+}
+
+.photo-app .settings-section-heading span,
+.photo-app .settings-number-field small,
+.photo-app .settings-readonly-row small,
+.photo-app .settings-shortcut-note {
+  color: var(--text-muted);
+  font-size: 9px;
+}
+
+.photo-app .settings-choice-row {
+  display: flex;
+  gap: 6px;
+}
+
+.photo-app .settings-choice-row label {
+  display: inline-flex;
+  min-width: 72px;
+  min-height: 28px;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  color: var(--text-secondary);
+  border-bottom: 2px solid transparent;
+  background: var(--panel-inset);
+  cursor: pointer;
+  font-size: 10px;
+}
+
+.photo-app .settings-choice-row label.is-active {
+  color: var(--text-high);
+  border-bottom-color: var(--accent);
+  background: var(--accent-soft);
+}
+
+.photo-app .settings-choice-row input {
+  accent-color: var(--accent);
+}
+
+.photo-app .settings-number-field,
+.photo-app .settings-readonly-row {
+  display: flex;
+  min-height: 42px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 20px;
+  padding: 0 10px;
+  border-bottom: 1px solid var(--border-soft);
+}
+
+.photo-app .settings-number-field > span,
+.photo-app .settings-readonly-row > span {
+  display: grid;
+  gap: 3px;
+}
+
+.photo-app .settings-number-field strong,
+.photo-app .settings-readonly-row strong {
+  color: var(--text-secondary);
+  font-size: 10px;
+  font-weight: 600;
+}
+
+.photo-app .settings-number-field select,
+.photo-app .settings-shortcut-field input {
+  min-width: 48px;
+  min-height: 28px;
+  padding: 0 7px;
+  color: var(--text-high);
+  border: 1px solid var(--border-soft);
+  border-radius: 4px;
+  outline: 0;
+  background: var(--panel-inset);
+  text-align: center;
+  font-size: 11px;
+}
+
+.photo-app .settings-number-field select:focus,
+.photo-app .settings-shortcut-field input:focus {
+  border-color: var(--accent);
+}
+
+.photo-app .settings-readonly-row b {
+  color: var(--text-muted);
+  font-size: 11px;
+  font-weight: 500;
+}
+
+.photo-app .settings-shortcut-list {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 6px;
+}
+
+.photo-app .settings-color-shortcuts {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+.photo-app .settings-step-shortcuts {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.photo-app .settings-shortcut-field {
+  display: flex;
+  min-height: 30px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 5px;
+  padding: 0 6px 0 8px;
+  color: var(--text-secondary);
+  background: var(--panel-inset);
+  font-size: 9px;
+}
+
+.photo-app .settings-shortcut-field input {
+  width: 28px;
+  min-width: 28px;
+  padding: 0;
+}
+
+.photo-app .settings-shortcut-note {
+  margin: 0;
+}
+
+.photo-app .settings-dialog-footer {
+  justify-content: flex-end;
+  border-top: 1px solid var(--border-soft);
+  border-bottom: 0;
+}
+
+@media (max-width: 560px) {
+  .photo-app .settings-shortcut-list,
+  .photo-app .settings-color-shortcuts {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 1080px) {
+  .photo-app .settings-button-label {
+    display: none;
+  }
+
+  .photo-app .tool-button[aria-label="打开设置"] {
+    width: 30px;
+    padding-inline: 0;
+    justify-content: center;
+  }
+}
+
+/* Settings follows the Codex-style workspace pattern: a quiet navigation
+   rail on the left and one focused page on the right. It keeps the dialog
+   useful at narrow desktop sizes without turning every preference into a
+   stacked card. */
+.photo-app .settings-dialog {
+  width: min(820px, calc(100vw - 36px));
+  height: min(620px, calc(100vh - 48px));
+  max-height: none;
+  border-radius: 10px;
+  background: var(--panel-raised);
+}
+
+.photo-app .settings-dialog-heading {
+  min-height: 66px;
+  padding: 14px 20px;
+  background: var(--panel-raised);
+}
+
+.photo-app .settings-dialog-heading h2 {
+  font-size: 18px;
+  letter-spacing: -0.02em;
+}
+
+.photo-app .settings-dialog-body {
+  display: grid;
+  min-height: 0;
+  flex: 1 1 auto;
+  grid-template-columns: 178px minmax(0, 1fr);
+}
+
+.photo-app .settings-side-nav {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 3px;
+  padding: 16px 10px;
+  border-right: 1px solid var(--border-soft);
+  background: var(--panel);
+}
+
+.photo-app .settings-side-nav-label {
+  padding: 0 10px 9px;
+  color: var(--text-muted);
+  font-size: 9px;
+  letter-spacing: 0.04em;
+}
+
+.photo-app .settings-side-nav button {
+  display: flex;
+  width: 100%;
+  min-height: 48px;
+  align-items: center;
+  gap: 10px;
+  padding: 7px 10px;
+  color: var(--text-secondary);
+  text-align: left;
+  border: 0;
+  border-left: 2px solid transparent;
+  border-radius: 6px;
+  background: transparent;
+  cursor: pointer;
+}
+
+.photo-app .settings-side-nav button:hover {
+  color: var(--text-high);
+  background: color-mix(in srgb, var(--panel-raised) 78%, transparent);
+}
+
+.photo-app .settings-side-nav button.is-active {
+  color: var(--text-high);
+  border-left-color: var(--accent);
+  background: var(--accent-soft);
+}
+
+.photo-app .settings-side-nav button > svg {
+  flex: 0 0 auto;
+  color: var(--text-muted);
+}
+
+.photo-app .settings-side-nav button.is-active > svg {
+  color: var(--accent-strong);
+}
+
+.photo-app .settings-side-nav button > span {
+  display: grid;
+  min-width: 0;
+  gap: 3px;
+}
+
+.photo-app .settings-side-nav button strong {
+  color: inherit;
+  font-size: 11px;
+  font-weight: 650;
+}
+
+.photo-app .settings-side-nav button small {
+  overflow: hidden;
+  color: var(--text-muted);
+  font-size: 9px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.photo-app .settings-side-nav-note {
+  margin: auto 10px 0;
+  padding-top: 14px;
+  color: var(--text-muted);
+  border-top: 1px solid var(--border-soft);
+  font-size: 9px;
+  line-height: 1.5;
+}
+
+.photo-app .settings-dialog-content {
+  min-width: 0;
+  overflow-y: auto;
+  background: var(--panel-raised);
+}
+
+.photo-app .settings-page {
+  display: block;
+  min-height: 100%;
+  padding: 28px 34px 34px;
+  border: 0;
+}
+
+.photo-app .settings-page-heading {
+  padding-bottom: 21px;
+  border-bottom: 1px solid var(--border-soft);
+}
+
+.photo-app .settings-page-heading > span {
+  color: var(--accent-strong);
+  font-size: 9px;
+  letter-spacing: 0.08em;
+}
+
+.photo-app .settings-page-heading h3 {
+  margin: 7px 0 5px;
+  color: var(--text-high);
+  font-size: 20px;
+  font-weight: 650;
+  letter-spacing: -0.025em;
+}
+
+.photo-app .settings-page-heading p {
+  max-width: 480px;
+  margin: 0;
+  color: var(--text-muted);
+  font-size: 10px;
+  line-height: 1.55;
+}
+
+.photo-app .settings-form {
+  display: grid;
+}
+
+.photo-app .settings-field-row,
+.photo-app .settings-number-field,
+.photo-app .settings-readonly-row {
+  display: flex;
+  min-height: 70px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 24px;
+  padding: 12px 4px;
+  border: 0;
+  border-bottom: 1px solid var(--border-soft);
+  background: transparent;
+}
+
+.photo-app .settings-field-row > div:first-child,
+.photo-app .settings-field-row > span:first-child,
+.photo-app .settings-number-field > span,
+.photo-app .settings-readonly-row > span {
+  display: grid;
+  min-width: 0;
+  gap: 4px;
+}
+
+.photo-app .settings-field-row strong,
+.photo-app .settings-number-field strong,
+.photo-app .settings-readonly-row strong {
+  color: var(--text-secondary);
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.photo-app .settings-field-row small,
+.photo-app .settings-number-field small,
+.photo-app .settings-readonly-row small {
+  color: var(--text-muted);
+  font-size: 9px;
+  line-height: 1.45;
+}
+
+.photo-app .settings-choice-row {
+  flex: 0 0 auto;
+  gap: 0;
+  overflow: hidden;
+  border: 1px solid var(--border-soft);
+  border-radius: 6px;
+  background: var(--panel-inset);
+}
+
+.photo-app .settings-choice-row label {
+  min-width: 76px;
+  min-height: 30px;
+  border: 0;
+  border-right: 1px solid var(--border-soft);
+  border-radius: 0;
+  background: transparent;
+}
+
+.photo-app .settings-choice-row label:last-child {
+  border-right: 0;
+}
+
+.photo-app .settings-choice-row label.is-active {
+  color: var(--text-high);
+  background: var(--accent-soft);
+}
+
+.photo-app .settings-number-field select,
+.photo-app .settings-shortcut-field input {
+  min-width: 58px;
+  min-height: 30px;
+  border-radius: 6px;
+  background: var(--panel-inset);
+}
+
+.photo-app .settings-readonly-row b {
+  min-width: 58px;
+  color: var(--text-muted);
+  text-align: center;
+}
+
+.photo-app .settings-shortcut-groups {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 24px;
+  padding-top: 22px;
+}
+
+.photo-app .settings-shortcut-group {
+  min-width: 0;
+}
+
+.photo-app .settings-shortcut-group h4 {
+  margin: 0 0 9px;
+  color: var(--text-secondary);
+  font-size: 11px;
+  font-weight: 650;
+}
+
+.photo-app .settings-shortcut-list,
+.photo-app .settings-color-shortcuts,
+.photo-app .settings-step-shortcuts {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 7px;
+}
+
+.photo-app .settings-shortcut-field {
+  min-height: 34px;
+  gap: 7px;
+  padding: 0 6px 0 9px;
+  border: 1px solid var(--border-soft);
+  border-radius: 6px;
+  background: var(--panel-inset);
+}
+
+.photo-app .settings-shortcut-field input {
+  width: 27px;
+  min-width: 27px;
+  min-height: 25px;
+  padding: 0;
+  border-color: var(--border);
+  border-radius: 4px;
+}
+
+.photo-app .settings-step-group {
+  grid-column: 1 / -1;
+  padding-top: 20px;
+  border-top: 1px solid var(--border-soft);
+}
+
+.photo-app .settings-dialog-footer {
+  min-height: 58px;
+  padding: 10px 20px;
+  border-top: 1px solid var(--border-soft);
+}
+
+.photo-app .settings-footer-note {
+  margin-right: auto;
+  color: var(--text-muted);
+  font-size: 9px;
+}
+
+@media (max-width: 640px) {
+  .photo-app .settings-dialog {
+    width: calc(100vw - 20px);
+    height: calc(100vh - 24px);
+  }
+
+  .photo-app .settings-dialog-body {
+    grid-template-columns: 142px minmax(0, 1fr);
+  }
+
+  .photo-app .settings-page {
+    padding: 24px 22px 28px;
+  }
+}
+
+@media (max-width: 500px) {
+  .photo-app .settings-dialog-body {
+    display: flex;
+    flex-direction: column;
+  }
+
+  .photo-app .settings-side-nav {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    padding: 8px;
+    border-right: 0;
+    border-bottom: 1px solid var(--border-soft);
+  }
+
+  .photo-app .settings-side-nav-label,
+  .photo-app .settings-side-nav-note,
+  .photo-app .settings-side-nav button small {
+    display: none;
+  }
+
+  .photo-app .settings-side-nav button {
+    min-height: 36px;
+    justify-content: center;
+    padding: 6px 4px;
+    border-left: 0;
+    border-bottom: 2px solid transparent;
+  }
+
+  .photo-app .settings-side-nav button.is-active {
+    border-bottom-color: var(--accent);
+  }
+
+  .photo-app .settings-side-nav button > span {
+    display: block;
+  }
+
+  .photo-app .settings-shortcut-groups {
+    grid-template-columns: 1fr;
+    gap: 20px;
+  }
+
+  .photo-app .settings-step-group {
+    grid-column: auto;
+  }
+}
+
+/* The result summary, manual marks, grouping choice and analysis state share
+   one flat instrument strip. It is a workspace edge, not another card. */
+.photo-app .content-toolbar {
+  min-height: 44px;
+  margin: 0;
+  padding: 0 12px;
+  border: 0 !important;
+  border-bottom: 1px solid var(--line-subtle) !important;
+  border-radius: 0 !important;
+  background: var(--canvas) !important;
+  box-shadow: none !important;
+}
+
+.photo-app .content-toolbar-summary,
+.photo-app .content-toolbar-controls {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+}
+
+.photo-app .content-toolbar-summary {
+  gap: 8px;
+}
+
+.photo-app .content-toolbar-manual {
+  display: flex;
+  min-width: 0;
+  flex: 1 1 auto;
+  align-items: center;
+  justify-content: center;
+}
+
+.photo-app .content-toolbar .manual-mark-filter-bar {
+  display: inline-flex;
+  min-width: 0;
+  min-height: 32px;
+  margin: 0;
+  padding: 0 8px;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  color: var(--text-muted);
+  border: 0 !important;
+  border-radius: 0 !important;
+  background: transparent !important;
+  box-shadow: none !important;
+}
+
+.photo-app .content-toolbar .manual-mark-filter-title {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: 9px;
+  letter-spacing: 0;
+  white-space: nowrap;
+}
+
+.photo-app .content-toolbar .manual-mark-filter-controls {
+  gap: 7px;
+}
+
+.photo-app .content-toolbar-controls {
+  flex: 0 0 auto;
+  gap: 10px;
+}
+
+.photo-app .content-toolbar .content-toolbar-query,
+.photo-app .content-toolbar .group-select-control select,
+.photo-app .content-toolbar .analysis-status-filter-controls button {
+  height: var(--control-height-compact);
+  min-height: var(--control-height-compact);
+  border-radius: var(--control-radius) !important;
+}
+
+.photo-app .content-toolbar .content-toolbar-query {
+  padding-inline: 10px;
+  color: var(--text-muted);
+  border: 1px solid var(--border-soft);
+  background: var(--panel-inset);
+  box-shadow: none;
+  font-size: 10px;
+  font-weight: 500;
+  transform: none;
+  transition:
+    color var(--transition),
+    border-color var(--transition),
+    background var(--transition);
+}
+
+.photo-app .content-toolbar .content-toolbar-query:hover {
+  color: var(--text-high);
+  border-color: var(--accent);
+  background: var(--panel-raised);
+  transform: none;
+}
+
+.photo-app .content-toolbar .content-toolbar-query.is-active {
+  color: var(--accent-strong);
+  border-color: var(--accent);
+  background: var(--accent-soft);
+  box-shadow: none;
+  transform: none;
+}
+
+.photo-app .group-select-control {
+  display: inline-flex;
+  min-height: var(--control-height-compact);
+  align-items: center;
+  gap: 6px;
+  color: var(--text-muted);
+  font-size: 9px;
+}
+
+.photo-app .group-select-control select {
+  min-width: 104px;
+  height: var(--control-height-compact);
+  padding: 0 24px 0 8px;
+  color: var(--text-secondary);
+  border: 1px solid var(--border-soft);
+  border-radius: 6px;
+  outline: 0;
+  background: var(--panel-inset);
+  cursor: pointer;
+  font-size: 10px;
+}
+
+.photo-app .group-select-control select:hover,
+.photo-app .group-select-control select:focus {
+  color: var(--text-high);
+  border-color: var(--accent);
+}
+
+.photo-app .analysis-status-filter-bar {
+  display: inline-flex;
+  min-height: var(--control-height-compact);
+  margin: 0 !important;
+  padding: 0;
+  align-items: center;
+  gap: 7px;
+  border: 0 !important;
+  border-radius: 0 !important;
+  background: transparent !important;
+  box-shadow: none !important;
+}
+
+.photo-app .analysis-status-filter-heading {
+  flex: 0 0 auto;
+}
+
+.photo-app .analysis-status-filter-heading strong {
+  color: var(--text-muted);
+  font-size: 9px;
+  font-weight: 500;
+}
+
+.photo-app .analysis-status-filter-controls {
+  gap: 3px;
+}
+
+.photo-app .analysis-status-filter-controls button {
+  min-height: var(--control-height-compact);
+  gap: 5px;
+  padding: 0 7px;
+  color: var(--text-muted);
+  border: 1px solid transparent;
+  border-radius: var(--control-radius) !important;
+  background: transparent;
+  box-shadow: none !important;
+  font-size: 9px;
+}
+
+.photo-app .analysis-status-filter-controls button:hover:not(.is-active) {
+  color: var(--text-high);
+  background: var(--panel-inset);
+}
+
+.photo-app .analysis-status-filter-controls button.is-active {
+  color: var(--accent-strong);
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+
+@media (max-width: 720px) {
+  .photo-app .content-toolbar {
+    min-height: 48px;
+    flex-wrap: wrap;
+    padding-block: 5px;
+  }
+
+  .photo-app .content-toolbar-manual {
+    order: 3;
+    flex-basis: 100%;
+    justify-content: flex-start;
+  }
+
+  .photo-app .content-toolbar-controls {
+    margin-left: auto;
+  }
+}
+
+@media (max-width: 540px) {
+  .photo-app .content-toolbar {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 4px;
+  }
+
+  .photo-app .content-toolbar-controls {
+    width: 100%;
+    justify-content: space-between;
+    margin-left: 0;
+  }
+
+  .photo-app .content-toolbar .manual-mark-filter-bar {
+    justify-content: flex-start;
+    padding-inline: 0;
+  }
+}
+
+/* Large libraries stay one continuous surface, but only cards near the
+   scroll viewport need layout and paint work. Thumbnail fetching is gated in
+   thumbnailSource.ts; this keeps the browser work bounded as well. */
+.photo-app .asset-card-shell {
+  content-visibility: auto;
+  contain-intrinsic-size: 320px 280px;
+}
+
+.photo-app .asset-load-status {
+  min-height: 30px;
+  padding: 8px 0 14px;
+  color: var(--text-muted);
+  font-size: 10px;
+  text-align: center;
+}
+
+/* Selection belongs to the whole gallery cell.  The inner image button used
+   to own the outline, but its frame clips that outline at the image/body
+   boundary.  Keep one continuous ring on the shell instead. */
+.photo-app .asset-card-shell {
+  overflow: visible !important;
+}
+
+.photo-app .asset-card-shell.is-selected,
+.photo-app .asset-card-shell.is-active {
+  position: relative;
+  z-index: 1;
+  border-radius: 12px;
+  outline: none !important;
+}
+
+.photo-app .asset-card-shell.is-selected::after,
+.photo-app .asset-card-shell.is-active::after {
+  position: absolute;
+  z-index: 20;
+  inset: 0;
+  box-sizing: border-box;
+  border: 2px solid var(--accent);
+  border-radius: 12px;
+  content: "";
+  pointer-events: none;
+}
+
+.photo-app .asset-card-shell.is-selected .asset-card,
+.photo-app .asset-card-shell.is-active .asset-card {
+  outline: none !important;
+}
+
+/* Control-group consistency contract: adjacent actions must share one
+   geometry.  Variants may change emphasis, but never height, radius, or
+   baseline alignment. */
+.photo-app {
+  --control-height-compact: 32px;
+  --control-radius: 8px;
+  --control-group-gap: 8px;
+  --settings-footer-primary-bg: #5b7e9d;
+  --settings-footer-primary-hover-bg: #668caf;
+  --settings-footer-primary-fg: #f8fbff;
+}
+
+.photo-app.theme-light {
+  --settings-footer-primary-bg: #4f76a0;
+  --settings-footer-primary-hover-bg: #5d87b4;
+}
+
+.photo-app .settings-footer-actions {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: var(--control-group-gap);
+}
+
+.photo-app .settings-footer-actions > .settings-footer-action {
+  display: inline-flex;
+  width: 76px;
+  min-width: 76px;
+  height: var(--control-height-compact);
+  min-height: var(--control-height-compact);
+  margin: 0;
+  align-items: center;
+  justify-content: center;
+  padding: 0 12px;
+  color: var(--text-secondary);
+  border: 1px solid var(--line-subtle);
+  border-radius: var(--control-radius) !important;
+  background: var(--panel-inset);
+  box-shadow: none;
+  cursor: pointer;
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1;
+  white-space: nowrap;
+  transition:
+    color 140ms ease,
+    border-color 140ms ease,
+    background 140ms ease,
+    transform 140ms ease;
+}
+
+.photo-app .settings-footer-actions > .settings-footer-action:hover:not(:disabled) {
+  color: var(--text-high);
+  border-color: var(--line-visible);
+  background: var(--panel-raised);
+  transform: translateY(-1px);
+}
+
+.photo-app .settings-footer-actions > .settings-footer-action:active:not(:disabled) {
+  transform: translateY(1px);
+}
+
+.photo-app .settings-footer-actions > .settings-footer-action:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+}
+
+.photo-app .settings-footer-actions > .settings-footer-action-primary {
+  color: var(--settings-footer-primary-fg);
+  border-color: var(--settings-footer-primary-bg);
+  background: var(--settings-footer-primary-bg);
+}
+
+.photo-app .settings-footer-actions > .settings-footer-action-primary:hover:not(:disabled) {
+  color: var(--settings-footer-primary-fg);
+  border-color: var(--settings-footer-primary-hover-bg);
+  background: var(--settings-footer-primary-hover-bg);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .photo-app .settings-footer-actions > .settings-footer-action {
+    transition: none;
+  }
+}
+
+/* Mark controls belong to the card inspection state, not to card selection.
+   Only hover and keyboard-visible focus reveal the editor; a mouse click must
+   not keep it visible after the pointer has left the card. */
+.photo-app .asset-card-shell:hover .asset-mark-controls,
+.photo-app .asset-card-shell:has(.asset-mark-controls button:focus-visible) .asset-mark-controls {
+  opacity: 1 !important;
+  pointer-events: auto !important;
+  transform: translateY(0) !important;
+}
+
+.photo-app
+  .asset-card-shell:focus-within:not(:hover):not(:has(.asset-mark-controls button:focus-visible))
+  .asset-mark-controls {
+  opacity: 0 !important;
+  pointer-events: none !important;
+  transform: translateY(4px) !important;
+}
+
+/* Group headings are compact disclosure controls.  The heading remains
+   visible while only its preview grid is removed from layout. */
+.photo-app .semantic-groups > section {
+  border-bottom: 1px solid var(--border-soft);
+}
+
+.photo-app .group-heading {
+  display: flex;
+  width: 100%;
+  min-height: 34px;
+  align-items: center;
+  gap: 5px;
+  margin: 0;
+  padding: 8px 12px 5px;
+  color: var(--text-secondary);
+  text-align: left;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  cursor: pointer;
+  font: inherit;
+}
+
+.photo-app .group-heading:hover {
+  color: var(--text-high);
+  background: color-mix(in srgb, var(--panel-raised) 72%, transparent);
+}
+
+.photo-app .group-heading:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: -2px;
+}
+
+.photo-app .group-heading-chevron {
+  flex: 0 0 auto;
+  color: var(--text-muted);
+  transition: transform 140ms ease;
+}
+
+.photo-app .group-heading-chevron.is-collapsed {
+  transform: rotate(-90deg);
+}
+
+.photo-app .group-heading strong {
+  color: inherit;
+  font-size: 11px;
+  font-weight: 650;
+}
+
+.photo-app .group-heading-count {
+  margin-left: auto;
+  color: var(--text-muted);
+  font-size: 9px;
+  font-variant-numeric: tabular-nums;
+}
+
+.photo-app .semantic-group-items {
+  display: block;
+}
+
+.photo-app .semantic-group-items[hidden] {
+  display: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .photo-app .group-heading-chevron {
+    transition: none;
+  }
+}
+
+/* The left rail is a layout boundary, not another card.  The two direct
+   sidebar modules own the visible silhouettes; keeping the rail transparent
+   prevents a redundant rectangle around both of them. */
+.photo-app .left-panel {
+  border: 0 !important;
+  border-radius: 0 !important;
+  background: transparent !important;
+  box-shadow: none !important;
+}
+
+/* The two left-rail modules share the available height by default. The
+   separator is an interaction target rather than a third visual panel; a
+   drag changes the grid track weights while each module keeps its own scroll. */
+.photo-app .left-panel:not(.is-collapsed) {
+  display: grid !important;
+  grid-template-rows:
+    minmax(0, var(--sidebar-library-track, 1fr))
+    10px
+    minmax(0, var(--sidebar-filter-track, 1fr));
+  gap: 0 !important;
+  padding: 0 !important;
+}
+
+.photo-app .left-panel:not(.is-collapsed) > .sidebar-module {
+  min-height: 0 !important;
+  max-height: none !important;
+  flex: none !important;
+}
+
+.photo-app .sidebar-vertical-resize-handle {
+  position: relative;
+  z-index: 4;
+  min-height: 10px;
+  cursor: row-resize;
+  touch-action: none;
+  user-select: none;
+}
+
+.photo-app .sidebar-vertical-resize-handle::before {
+  position: absolute;
+  top: 50%;
+  right: 10px;
+  left: 10px;
+  height: 1px;
+  content: "";
+  background: transparent;
+  transform: translateY(-50%);
+  transition:
+    height var(--motion-ui),
+    background-color var(--motion-ui),
+    box-shadow var(--motion-ui);
+}
+
+.photo-app .sidebar-vertical-resize-handle:hover::before,
+.photo-app .sidebar-vertical-resize-handle:focus-visible::before {
+  height: 2px;
+  background: var(--accent-strong);
+  box-shadow: 0 0 7px color-mix(in srgb, var(--accent-strong) 42%, transparent);
+}
+
+.photo-app .sidebar-vertical-resize-handle:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--accent-strong) 72%, transparent);
+  outline-offset: -1px;
+}
+
+/* Motion restraint: the photo grid is the one place where a small lift helps
+   locate the pointer. Other controls stay in place and respond through
+   color/background changes instead of a shared floating animation. */
+.photo-app {
+  --motion-ui: 150ms cubic-bezier(0.25, 1, 0.5, 1);
+  --shadow-hover-soft: 0 3px 10px rgba(0, 0, 0, 0.14);
+  --neu-shadow-float: 0 8px 22px rgba(0, 0, 0, 0.18);
+}
+
+.photo-app.theme-light {
+  --shadow-hover-soft: 0 3px 10px rgba(31, 43, 49, 0.12);
+  --neu-shadow-float: 0 8px 22px rgba(31, 43, 49, 0.12);
+}
+
+.photo-app .asset-card-shell {
+  transition: transform var(--motion-ui);
+}
+
+.photo-app .asset-card-shell:hover {
+  transform: translateY(-2px);
+}
+
+.photo-app .asset-card-frame,
+.photo-app .asset-card-frame:hover,
+.photo-app .asset-card,
+.photo-app .asset-card:hover {
+  transform: none !important;
+}
+
+.photo-app .asset-card {
+  box-shadow: 0 1px 5px rgba(0, 0, 0, 0.1) !important;
+  transition:
+    color var(--motion-ui),
+    background-color var(--motion-ui),
+    border-color var(--motion-ui),
+    box-shadow var(--motion-ui);
+}
+
+.photo-app .asset-card:hover,
+.photo-app .asset-card-frame:hover {
+  box-shadow: var(--shadow-hover-soft) !important;
+}
+
+.photo-app .asset-card-shell.is-selected .asset-card,
+.photo-app .asset-card-shell.is-active .asset-card {
+  box-shadow: 0 2px 7px rgba(0, 0, 0, 0.12) !important;
+}
+
+.photo-app .asset-card-frame .asset-mark-controls,
+.photo-app .asset-card-shell .asset-mark-controls,
+.photo-app .asset-card-shell.has-rating .asset-mark-controls,
+.photo-app .asset-card-shell.has-color-label .asset-mark-controls,
+.photo-app
+  .asset-card-shell:focus-within:not(:hover):not(:has(.asset-mark-controls button:focus-visible))
+  .asset-mark-controls {
+  transform: none !important;
+  box-shadow: 0 3px 8px rgba(0, 0, 0, 0.12) !important;
+  transition: opacity var(--motion-ui);
+}
+
+.photo-app
+  :is(
+    .tool-button,
+    .primary-action,
+    .secondary-action,
+    .direction-control,
+    .quiet-button,
+    .icon-button,
+    .pagination button,
+    .nav-row,
+    .source-chip,
+    .filter-chip,
+    .color-filter,
+    .group-heading,
+    .filmstrip button,
+    .settings-footer-action,
+    .library-import-button,
+    .asset-check,
+    .asset-favorite,
+    .manual-mark-filter-group button,
+    .manual-mark-color-group button,
+    .asset-rating-controls button,
+    .asset-color-label-controls button
+  ) {
+  transition:
+    color var(--motion-ui),
+    background-color var(--motion-ui),
+    border-color var(--motion-ui),
+    opacity var(--motion-ui);
+}
+
+.photo-app
+  :is(
+    .tool-button,
+    .primary-action,
+    .secondary-action,
+    .direction-control,
+    .quiet-button,
+    .icon-button,
+    .pagination button,
+    .nav-row,
+    .source-chip,
+    .filter-chip,
+    .color-filter,
+    .group-heading,
+    .filmstrip button,
+    .settings-footer-action,
+    .library-import-button,
+    .asset-check,
+    .asset-favorite,
+    .manual-mark-filter-group button,
+    .manual-mark-color-group button,
+    .asset-rating-controls button,
+    .asset-color-label-controls button
+  ):hover {
+  transform: none !important;
+}
+
+.photo-app :is(.topbar-more-menu, .library-context-menu, .filter-conditions-popover) {
+  box-shadow: var(--neu-shadow-float) !important;
+}
+
+.photo-app :is(.import-library-dialog, .settings-dialog) {
+  box-shadow: 0 8px 22px rgba(0, 0, 0, 0.18) !important;
+}
+
+.photo-app.theme-light :is(.import-library-dialog, .settings-dialog) {
+  box-shadow: 0 8px 22px rgba(31, 43, 49, 0.12) !important;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .photo-app .asset-card-shell,
+  .photo-app .asset-card,
+  .photo-app :is(.asset-card-frame, .asset-mark-controls) {
+    transform: none !important;
+    transition: none !important;
+  }
+}
+
+/* Restore the rounded single-preview selection control. The control itself
+   is a rounded rectangle, while its check target remains circular. */
+.photo-app .single-selection-toggle {
+  border: 1px solid var(--border) !important;
+  border-radius: 10px !important;
+}
+
+.photo-app .single-selection-mark {
+  border: 1px solid color-mix(in srgb, var(--border) 82%, transparent) !important;
+  border-radius: 50% !important;
+  background: color-mix(in srgb, var(--panel-inset) 88%, transparent) !important;
+}
+
+/* Rating filters use the star glyph as the state indicator. Do not put each
+   star inside a pale square; hover and active states only change the glyph. */
+.photo-app .manual-mark-filter-group:not(.manual-mark-color-group) button,
+.photo-app .manual-mark-filter-group:not(.manual-mark-color-group) button:hover,
+.photo-app .manual-mark-filter-group:not(.manual-mark-color-group) button.is-active {
+  border: 0 !important;
+  border-radius: var(--control-radius) !important;
+  background: transparent !important;
+  box-shadow: none !important;
+}
+
+.photo-app .manual-mark-filter-group button:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--accent-strong) 68%, transparent);
+  outline-offset: 2px;
+}
+
+/* Grid density is controlled from the result toolbar and applies to every
+   grouped or ungrouped asset grid through the inherited custom property. */
+.photo-app .asset-grid,
+.photo-app .grid-loading {
+  grid-template-columns: repeat(var(--grid-column-count, 6), minmax(0, 1fr)) !important;
+}
+
+.photo-app .content-toolbar {
+  justify-content: flex-start !important;
+}
+
+.photo-app .content-toolbar-manual {
+  flex: 0 1 auto !important;
+  justify-content: flex-start !important;
+}
+
+.photo-app .content-toolbar .manual-mark-filter-bar {
+  justify-content: flex-start;
+  padding-inline: 0;
+}
+
+.photo-app .content-toolbar-controls {
+  margin-left: auto;
+}
+
+.photo-app .grid-zoom-control {
+  display: inline-flex;
+  min-width: 166px;
+  align-items: center;
+  gap: 7px;
+  margin-left: 14px;
+  color: var(--text-muted);
+  font-size: 9px;
+  white-space: nowrap;
+}
+
+.photo-app .grid-zoom-control .grid-zoom-slider {
+  width: 112px;
+  height: 18px;
+  margin: 0;
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+
+.photo-app .grid-zoom-control output {
+  min-width: 31px;
+  color: var(--text-secondary);
+  font-size: 9px;
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+
+@media (max-width: 720px) {
+  .photo-app .content-toolbar-summary {
+    order: 1;
+  }
+
+  .photo-app .content-toolbar-controls {
+    order: 2;
+    margin-left: auto;
+  }
+
+  .photo-app .content-toolbar-manual {
+    order: 3;
+  }
+
+  .photo-app .grid-zoom-control {
+    order: 4;
+    margin-left: auto;
+  }
+}
+
+@media (max-width: 540px) {
+  .photo-app .content-toolbar-controls,
+  .photo-app .grid-zoom-control {
+    width: 100%;
+    margin-left: 0;
+  }
+
+  .photo-app .grid-zoom-control .grid-zoom-slider {
+    flex: 1 1 auto;
+  }
+}
+
+/* The rail split controls the module tracks, so neither content body may keep
+   the old viewport-based cap. Each body fills its track and owns the scroll
+   bar; resizing the divider therefore changes the visible library/filter
+   area instead of exposing an empty band inside the library module. */
+.photo-app .left-panel:not(.is-collapsed) > .sidebar-library-module,
+.photo-app .left-panel:not(.is-collapsed) > .sidebar-filter-module {
+  align-self: stretch;
+  height: auto !important;
+  min-height: 0 !important;
+  max-height: none !important;
+}
+
+.photo-app .left-panel:not(.is-collapsed) > .sidebar-library-module > .sidebar-library-area,
+.photo-app .left-panel:not(.is-collapsed) > .sidebar-filter-module > .sidebar-filter-area {
+  height: auto !important;
+  min-height: 0 !important;
+  max-height: none !important;
+  flex: 1 1 0 !important;
+  overflow-x: hidden;
+  overflow-y: auto;
+}
+
+/* The filter rail has one deliberate reading order: ranges first, taxonomy
+   next, and source last. It is a continuous navigation surface rather than a
+   stack of nested cards. */
+.photo-app .sidebar-filter-area {
+  display: flex;
+  flex-direction: column;
+}
+
+.photo-app .sidebar-filter-module .panel-section {
+  flex: 0 0 auto;
+  border-bottom: 1px solid var(--border-soft) !important;
+}
+
+.photo-app .sidebar-tone-color-section {
+  padding-top: 10px !important;
+}
+
+.photo-app .sidebar-filter-subsection {
+  display: grid;
+  gap: 4px;
+  padding-top: 2px;
+}
+
+.photo-app .sidebar-filter-subsection + .sidebar-filter-subsection {
+  margin-top: 7px;
+  padding-top: 8px;
+  border-top: 1px solid var(--border-soft);
+}
+
+.photo-app .sidebar-filter-subsection-heading {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  min-width: 0;
+  padding: 0 2px;
+}
+
+.photo-app .sidebar-filter-subsection-heading strong {
+  color: var(--text-secondary);
+  font-size: 10px;
+  font-weight: 650;
+}
+
+.photo-app .sidebar-filter-subsection-heading span {
+  overflow: hidden;
+  color: var(--text-muted);
+  font-size: 9px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.photo-app .sidebar-tone-color-section .color-range-filter {
+  gap: 5px;
+  padding: 0 0 2px;
+}
+
+.photo-app .sidebar-tone-color-section .color-range-wheel-wrap {
+  min-height: 154px;
+}
+
+.photo-app .sidebar-tone-color-section .color-range-hue-gradient,
+.photo-app .sidebar-tone-color-section .color-range-wheel {
+  width: min(100%, 154px);
+}
+
+.photo-app .sidebar-tone-range-subsection .range-filters {
+  gap: 5px;
+}
+
+.photo-app .sidebar-tone-range-subsection .range-filter-card {
+  padding: 7px 0 6px;
+  border: 0 !important;
+  border-top: 1px solid var(--border-soft) !important;
+  border-radius: 0 !important;
+  background: transparent !important;
+  box-shadow: none !important;
+}
+
+.photo-app .sidebar-tone-range-subsection .range-filter-card:first-child {
+  border-top: 0 !important;
+}
+
+.photo-app .sidebar-source-section {
+  margin-top: auto;
+  padding-bottom: 8px !important;
+  border-top: 1px solid var(--border-soft) !important;
+  border-bottom: 0 !important;
+}
+
+.photo-app .sidebar-source-options {
+  display: grid;
+  gap: 2px;
+}
+
+.photo-app .sidebar-source-option {
+  display: flex;
+  min-width: 0;
+  min-height: 28px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 0 7px;
+  overflow: hidden;
+  color: var(--text-secondary);
+  text-align: left;
+  border: 0;
+  border-left: 2px solid transparent;
+  border-radius: 5px;
+  background: transparent;
+  box-shadow: none;
+  cursor: pointer;
+  font-size: 10px;
+}
+
+.photo-app .sidebar-source-option:hover {
+  color: var(--text-high);
+  background: color-mix(in srgb, var(--panel-raised) 68%, transparent);
+}
+
+.photo-app .sidebar-source-option.is-active {
+  color: var(--text-high);
+  border-left-color: var(--accent);
+  background: var(--accent-soft);
+}
+
+.photo-app .sidebar-source-option > span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.photo-app .sidebar-source-option small {
+  flex: 0 0 auto;
+  color: var(--text-muted);
+  font-size: 9px;
+  font-variant-numeric: tabular-nums;
+}
+
+.photo-app .sidebar-source-manage {
+  justify-content: flex-start;
+  margin-top: 2px;
+  border-top: 1px solid var(--border-soft);
+  border-left: 0;
+  color: var(--text-muted);
+}
+
+.photo-app .sidebar-source-manage:hover {
+  color: var(--text-high);
+}
+
+/* Phase 3: one browse tree, with a quiet distinction between physical
+   Sources and virtual Collections. The add menu is a compact action surface,
+   not another panel inside the sidebar. */
+.photo-app .sidebar-add-control {
+  position: relative;
+}
+
+.photo-app .sidebar-add-control .library-import-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.photo-app .sidebar-add-control .library-import-button svg {
+  transition: transform var(--transition);
+}
+
+.photo-app .sidebar-add-control .library-import-button[aria-expanded="true"] svg {
+  transform: rotate(90deg);
+}
+
+.photo-app .sidebar-add-menu {
+  position: absolute;
+  z-index: 30;
+  top: calc(100% + 5px);
+  right: 0;
+  display: grid;
+  min-width: 156px;
+  padding: 4px;
+  border: 1px solid var(--border);
+  border-radius: var(--control-radius);
+  background: var(--panel-raised);
+  box-shadow: var(--shadow-panel);
+}
+
+.photo-app .sidebar-add-menu button {
+  display: flex;
+  min-height: 30px;
+  align-items: center;
+  gap: 8px;
+  padding: 0 8px;
+  color: var(--text-secondary);
+  border: 0;
+  border-radius: var(--control-radius);
+  background: transparent;
+  text-align: left;
+  font-size: 11px;
+}
+
+.photo-app .sidebar-add-menu button:hover,
+.photo-app .sidebar-add-menu button:focus-visible {
+  color: var(--text-high);
+  background: var(--accent-soft);
+}
+
+.photo-app .sidebar-create-collection {
+  display: grid;
+  gap: 6px;
+  padding: 8px 8px 7px;
+  border-bottom: 1px solid var(--border-soft);
+}
+
+.photo-app .sidebar-create-collection-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  gap: 4px;
+}
+
+.photo-app .sidebar-create-collection input,
+.photo-app .sidebar-create-collection select {
+  min-width: 0;
+  height: 28px;
+  padding: 0 7px;
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: var(--control-radius);
+  background: var(--panel-inset);
+  font-size: 10px;
+}
+
+.photo-app .sidebar-create-collection button {
+  min-height: 28px;
+  padding-inline: 8px;
+  color: var(--text-secondary);
+  border: 1px solid var(--border);
+  border-radius: var(--control-radius);
+  background: transparent;
+  font-size: 10px;
+}
+
+.photo-app .sidebar-create-collection button[type="submit"] {
+  color: var(--text-high);
+  border-color: color-mix(in srgb, var(--accent) 70%, var(--border));
+  background: var(--accent-soft);
+}
+
+.photo-app .sidebar-create-collection button:hover:not(:disabled) {
+  color: var(--text-high);
+  background: var(--panel-raised);
+}
+
+.photo-app .sidebar-create-collection-parent {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: center;
+  gap: 8px;
+  color: var(--text-muted);
+  font-size: 10px;
+}
+
+.photo-app .browse-node-divider {
+  margin: 7px 6px 3px;
+  padding: 6px 6px 3px;
+  color: var(--text-muted);
+  border-top: 1px solid var(--border-soft);
+  font-size: 9px;
+  letter-spacing: 0.04em;
+}
+
+.photo-app .browse-collection-row.is-active > .nav-row {
+  color: var(--text-high);
+}
+
+.photo-app .browse-collection-row > .nav-row svg {
+  color: var(--accent-strong);
+}
+
+.photo-app .browse-collection-row > .nav-row small {
+  font-variant-numeric: tabular-nums;
+}
+
+/* Button geometry guard: visible buttons are rounded controls throughout the
+   desktop app. The asset card is a button-shaped content surface and the
+   listed color/selection indicators are intentionally circular states. */
+.photo-app button:not(.asset-card) {
+  border-radius: var(--control-radius) !important;
+}
+
+.photo-app
+  :is(
+    .asset-check,
+    .asset-card-frame .asset-color-label-controls button,
+    .manual-color-label-controls button,
+    .manual-mark-color-group button,
+    .manual-color-filter button
+  ) {
+  border-radius: 50% !important;
+}
+
+.photo-app .single-selection-toggle {
+  border-radius: 10px !important;
+}
+
+/* Inspector cleanup: the navigator is already inside the single information
+   surface, so its map must not introduce a second black well. The image and
+   viewport remain visible; only the redundant inner rectangle is removed. */
+.photo-app .right-panel .preview-navigator-map,
+.photo-app.theme-light .right-panel .preview-navigator-map {
+  border: 0 !important;
+  border-radius: 0 !important;
+  background: transparent !important;
+  box-shadow: none !important;
+}
+
+/* Semantic empty states are text on the inspector surface, not an input-like
+   recessed control. Keep the spacing for readability without another shape. */
+.photo-app .right-panel .semantic-empty,
+.photo-app.theme-light .right-panel .semantic-empty {
+  margin: 0;
+  padding: 6px 0;
+  border: 0 !important;
+  border-radius: 0 !important;
+  background: transparent !important;
+  box-shadow: none !important;
+  text-align: center;
+}
+
+.photo-app .right-panel .detail-reanalyze-action {
+  display: flex;
+  width: max-content !important;
+  min-width: 128px;
+  min-height: 30px;
+  margin: 8px 0 0 auto;
+  border: 0 !important;
+  border-radius: 8px !important;
+  background: var(--accent) !important;
+  box-shadow: none !important;
+}
+
+.photo-app .right-panel .detail-reanalyze-action:hover:not(:disabled) {
+  border: 0 !important;
+  background: var(--accent-strong) !important;
+  box-shadow: none !important;
+}
+
+/* Histogram channels are one mode switch, but each mode still gets a quiet
+   rounded hit target. This is scoped to the inspector and does not restyle
+   the outlined controls in the left filter rail. */
+.photo-app .right-panel .histogram-channel-controls,
+.photo-app.theme-light .right-panel .histogram-channel-controls {
+  gap: 3px !important;
+  padding: 2px !important;
+  border: 0 !important;
+  border-radius: 8px !important;
+  background: transparent !important;
+  box-shadow: none !important;
+}
+
+.photo-app .right-panel .histogram-channel-controls button,
+.photo-app.theme-light .right-panel .histogram-channel-controls button {
+  width: 24px;
+  height: 22px;
+  border: 0 !important;
+  border-radius: 6px !important;
+  background: transparent !important;
+  box-shadow: none !important;
+}
+
+.photo-app .right-panel .histogram-channel-controls button:hover,
+.photo-app.theme-light .right-panel .histogram-channel-controls button:hover {
+  border: 0 !important;
+  background: color-mix(in srgb, var(--panel-raised) 74%, transparent) !important;
+  box-shadow: none !important;
+}
+
+.photo-app .right-panel .histogram-channel-controls button.is-active,
+.photo-app.theme-light .right-panel .histogram-channel-controls button.is-active {
+  border: 0 !important;
+  border-radius: 6px !important;
+  background: var(--accent-soft) !important;
+  box-shadow: none !important;
+}
+
+/* The title bar follows the quiet Codex-style action language in both themes:
+   secondary controls have no hard edge or shadow by default, and only a
+   restrained surface change on hover. Filter-rail controls are intentionally
+   outside this selector and keep their readable outlines. */
+.photo-app
+  .topbar
+  :is(.topbar-browse-controls, .topbar-action-controls)
+  :is(.tool-button, .direction-control),
+.photo-app .topbar .filter-popover-anchor > .tool-button,
+.photo-app .topbar .topbar-more-anchor > .tool-button {
+  min-height: 32px;
+  border: 0 !important;
+  border-radius: 8px !important;
+  background: transparent !important;
+  box-shadow: none !important;
+  transform: none !important;
+}
+
+.photo-app
+  .topbar
+  :is(.topbar-browse-controls, .topbar-action-controls)
+  :is(.tool-button, .direction-control):hover:not(:disabled),
+.photo-app
+  .topbar
+  :is(.topbar-browse-controls, .topbar-action-controls)
+  :is(.tool-button, .direction-control).is-active,
+.photo-app .topbar .filter-popover-anchor > .tool-button:hover:not(:disabled),
+.photo-app .topbar .filter-popover-anchor > .tool-button.is-active,
+.photo-app .topbar .topbar-more-anchor > .tool-button:hover:not(:disabled),
+.photo-app .topbar .topbar-more-anchor > .tool-button.is-active {
+  color: var(--text-high);
+  border: 0 !important;
+  background: color-mix(in srgb, var(--panel-raised) 72%, transparent) !important;
+  box-shadow: none !important;
+  transform: none !important;
+}
+
+.photo-app .topbar .topbar-analysis-action {
+  min-height: 32px;
+  margin-left: 2px;
+  border: 0 !important;
+  border-radius: 8px !important;
+  background: var(--accent) !important;
+  box-shadow: none !important;
+  transform: none !important;
+}
+
+.photo-app .topbar .topbar-analysis-action:hover:not(:disabled) {
+  border: 0 !important;
+  background: var(--accent-strong) !important;
+  box-shadow: none !important;
+  transform: none !important;
+}
+
+/* The embedded review surface shares the center-column height budget with the
+   gallery. Keep the divider quiet until it is needed, then let pointer or
+   keyboard interaction adjust one explicit height value. */
+.photo-app .workflow-height-resize-handle {
+  position: relative;
+  flex: 0 0 10px;
+  min-height: 10px;
+  cursor: row-resize;
+  touch-action: none;
+}
+
+.photo-app .workflow-height-resize-handle::before {
+  position: absolute;
+  top: 50%;
+  right: 14px;
+  left: 14px;
+  height: 1px;
+  border-radius: 1px;
+  background: transparent;
+  content: "";
+  pointer-events: none;
+  transform: translateY(-50%);
+  transition:
+    background-color 140ms ease,
+    height 140ms ease;
+}
+
+.photo-app .workflow-height-resize-handle:hover::before,
+.photo-app .workflow-height-resize-handle:focus-visible::before {
+  height: 2px;
+  background: var(--accent);
+}
+
+.photo-app .workflow-height-resize-handle:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--focus) 70%, transparent);
+  outline-offset: -1px;
+}
+
+.photo-app .workflow-embedded-shell {
+  flex: 0 0 var(--workflow-height);
+  width: 100%;
+  height: var(--workflow-height);
+  min-height: 0;
+  margin: 0 0 12px;
+  overflow: hidden;
+}
+
+.photo-app .workflow-embedded-shell > .workflow-workspace-embedded {
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+  max-height: none;
+  margin: 0;
+  flex: 0 0 auto;
+}
+
+/* Search is a real local query composer, not a decorative AI prompt. A quiet
+   bordered shell gives the input the same breathing room as the Codex
+   composer without adding fake attachment, microphone, or suggestion tools. */
+.photo-app .ai-search-form {
+  display: grid;
+  max-width: 760px;
+  gap: 0;
+  margin: 14px 0 12px;
+  padding: 9px 10px 8px;
+  border: 1px solid var(--line-subtle);
+  border-radius: 14px;
+  background: color-mix(in srgb, var(--panel-raised) 86%, transparent);
+  box-shadow: 0 3px 12px rgba(0, 0, 0, 0.12);
+  transition:
+    border-color 140ms ease,
+    background-color 140ms ease;
+}
+
+.photo-app .ai-search-form:focus-within {
+  border-color: color-mix(in srgb, var(--accent) 72%, var(--line-visible));
+  background: var(--panel-raised);
+}
+
+.photo-app .ai-search-form textarea,
+.photo-app .ai-search-form input {
+  width: 100%;
+  min-width: 0;
+  min-height: 46px;
+  margin: 0;
+  padding: 5px 4px 8px;
+  resize: vertical;
+  color: var(--text);
+  border: 0 !important;
+  border-radius: 8px !important;
+  outline: none;
+  background: transparent !important;
+  box-shadow: none !important;
+  font: inherit;
+  line-height: 1.5;
+}
+
+.photo-app .ai-search-form textarea::placeholder,
+.photo-app .ai-search-form input::placeholder {
+  color: var(--text-muted);
+}
+
+.photo-app .ai-search-composer-footer {
+  display: flex;
+  min-height: 32px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding-top: 6px;
+  border-top: 1px solid var(--line-subtle);
+}
+
+.photo-app .ai-search-composer-note {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text-muted);
+  font-size: 10px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.photo-app .ai-search-form .ai-search-submit {
+  display: inline-flex;
+  min-width: 92px;
+  min-height: var(--control-height-compact);
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 0 12px;
+  color: #eef5fb;
+  border: 0 !important;
+  border-radius: var(--control-radius) !important;
+  background: var(--accent);
+  box-shadow: none !important;
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.photo-app .ai-search-form .ai-search-submit:hover:not(:disabled) {
+  background: var(--accent-strong);
+}
+
+.photo-app.theme-light .ai-search-form {
+  background: color-mix(in srgb, #ffffff 86%, var(--panel));
+  box-shadow: 0 3px 12px rgba(31, 43, 49, 0.08);
+}
+
+.photo-app.theme-light .ai-search-form:focus-within {
+  background: #ffffff;
+}
+
+@media (max-width: 880px) {
+  .photo-app .workflow-height-resize-handle {
+    flex-basis: 9px;
+    min-height: 9px;
+  }
+
+  .photo-app .ai-search-composer-footer {
+    gap: 6px;
+  }
+}
+
+/* The app rail is the quiet spine of the photographer's workspace. It owns
+   navigation only; browsing controls and filters remain in their existing
+   surfaces so this strip never becomes a second toolbar. */
+.photo-app {
+  --app-navigation-rail-width: 54px;
+}
+
+.photo-app .workspace-shell {
+  grid-template-columns:
+    var(--app-navigation-rail-width)
+    var(--left-panel-width, 270px)
+    minmax(0, 1fr)
+    var(--right-panel-width, 320px);
+}
+
+.photo-app .workspace-shell > .organization-mode-shell {
+  grid-column: 2 / -1;
+}
+
+.photo-app .panel-resize-handle-left {
+  left: calc(
+    var(--app-navigation-rail-width) + var(--left-panel-width, 270px) -
+      var(--panel-resize-edge-inset) - var(--panel-resize-hit-offset)
+  );
+}
+
+.photo-app .app-navigation-rail {
+  display: flex;
+  min-width: 0;
+  min-height: 0;
+  flex-direction: column;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 6px 12px;
+  color: var(--text-muted);
+  border-right: 1px solid var(--line-subtle);
+  background: var(--app);
+}
+
+.photo-app .app-navigation-rail-main,
+.photo-app .app-navigation-rail-footer {
+  display: grid;
+  gap: 6px;
+  width: 100%;
+  justify-items: center;
+}
+
+.photo-app .app-navigation-rail-footer {
+  padding-top: 10px;
+  border-top: 1px solid var(--line-subtle);
+}
+
+.photo-app .app-navigation-rail-button {
+  display: grid;
+  width: 40px;
+  height: 40px;
+  min-height: 40px;
+  margin: 0;
+  padding: 0;
+  place-items: center;
+  color: var(--text-muted);
+  border: 0 !important;
+  border-radius: 10px !important;
+  background: transparent !important;
+  box-shadow: none !important;
+  cursor: pointer;
+  transition:
+    color 140ms ease,
+    background-color 140ms ease;
+}
+
+.photo-app .app-navigation-rail-button > svg {
+  display: block;
+  width: 20px;
+  height: 20px;
+}
+
+.photo-app .app-navigation-rail-button:hover:not(:disabled) {
+  color: var(--text-high);
+  background: color-mix(in srgb, var(--panel-raised) 76%, transparent) !important;
+}
+
+.photo-app .app-navigation-rail-button.is-active {
+  color: var(--accent-strong);
+  background: var(--accent-soft) !important;
+  box-shadow: inset 2px 0 var(--accent) !important;
+}
+
+.photo-app .app-navigation-rail-button:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--focus) 72%, transparent);
+  outline-offset: 2px;
+}
+
+.photo-app .app-navigation-rail-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.32;
+}
+
+.photo-app .topbar-action-controls {
+  padding-left: 0;
+  border-left: 0;
+}
+
+@media (max-width: 1260px) {
+  .photo-app {
+    --app-navigation-rail-width: 50px;
+  }
+
+  .photo-app .workspace-shell {
+    grid-template-columns: 50px 210px minmax(0, 1fr) 260px;
+  }
+
+  .photo-app .panel-resize-handle-left {
+    left: calc(50px + 210px - var(--panel-resize-edge-inset) - var(--panel-resize-hit-offset));
+  }
+}
+
+@media (max-width: 1080px) {
+  .photo-app {
+    --app-navigation-rail-width: 48px;
+  }
+
+  .photo-app .workspace-shell {
+    grid-template-columns: 48px 195px minmax(0, 1fr) 236px;
+  }
+
+  .photo-app .panel-resize-handle-left {
+    left: calc(48px + 195px - var(--panel-resize-edge-inset) - var(--panel-resize-hit-offset));
+  }
+
+  .photo-app .app-navigation-rail {
+    padding-inline: 4px;
+  }
+
+  .photo-app .app-navigation-rail-button {
+    width: 36px;
+    height: 36px;
+    min-height: 36px;
+  }
+}
+
+/* AI search stays a tool, not a second page.  The gallery remains the working
+   surface while the query composer floats above the lower edge of the center
+   canvas, with results appearing in the same quiet surface when available. */
+.photo-app .workflow-embedded-shell.is-floating-search {
+  flex: 0 0 0;
+  width: 0;
+  height: 0;
+  min-height: 0;
+  margin: 0;
+  overflow: visible;
+}
+
+.photo-app .workflow-embedded-shell.is-floating-search > .workflow-workspace-floating-search {
+  position: fixed;
+  z-index: 30;
+  top: auto;
+  right: calc(var(--right-panel-width, 320px) + 22px);
+  bottom: 18px;
+  left: calc(var(--app-navigation-rail-width, 54px) + var(--left-panel-width, 270px) + 22px);
+  display: block;
+  width: auto;
+  height: auto;
+  max-height: min(70vh, 620px);
+  min-height: 0;
+  margin: 0;
+  overflow: visible;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+}
+
+.photo-app .workflow-workspace-floating-search .workflow-content {
+  display: flex;
+  width: 100%;
+  height: auto;
+  max-height: min(70vh, 620px);
+  min-height: 0;
+  flex-direction: column;
+  overflow: hidden;
+  border: 1px solid var(--line-visible);
+  border-radius: 16px;
+  background: color-mix(in srgb, var(--panel-raised) 96%, transparent);
+  box-shadow:
+    0 10px 26px rgba(0, 0, 0, 0.2),
+    0 1px 1px rgba(255, 255, 255, 0.04);
+  backdrop-filter: blur(14px);
+}
+
+.photo-app .workflow-workspace-floating-search .workflow-header {
+  display: none;
+}
+
+.photo-app .workflow-workspace-floating-search .workflow-search-floating-section {
+  display: flex;
+  min-height: 0;
+  height: auto;
+  max-height: min(70vh, 620px);
+  flex-direction: column;
+  overflow: hidden;
+  padding: 0 14px 12px;
+}
+
+.photo-app .ai-search-floating-heading {
+  display: flex;
+  min-height: 38px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  order: 0;
+  border-bottom: 1px solid var(--line-subtle);
+}
+
+.photo-app .ai-search-floating-heading > div {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 7px;
+}
+
+.photo-app .ai-search-floating-heading svg {
+  flex: 0 0 auto;
+  color: var(--accent-strong);
+}
+
+.photo-app .ai-search-floating-heading strong {
+  color: var(--text-high);
+  font-size: 11px;
+  font-weight: 650;
+}
+
+.photo-app .ai-search-floating-heading span {
+  overflow: hidden;
+  color: var(--text-muted);
+  font-size: 10px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.photo-app .ai-search-floating-heading small {
+  overflow: hidden;
+  color: var(--text-low);
+  font-size: 9px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.photo-app .ai-search-dismiss {
+  display: grid;
+  width: 28px;
+  height: 28px;
+  min-height: 28px;
+  flex: 0 0 auto;
+  padding: 0;
+  place-items: center;
+  color: var(--text-muted);
+  border: 0 !important;
+  border-radius: 50% !important;
+  background: transparent !important;
+  box-shadow: none !important;
+}
+
+.photo-app .ai-search-dismiss:hover {
+  color: var(--text-high);
+  background: color-mix(in srgb, var(--panel) 72%, transparent) !important;
+}
+
+.photo-app .workflow-search-floating-section > .workflow-meta,
+.photo-app .workflow-search-floating-section > .workflow-mosaic {
+  order: 1;
+}
+
+.photo-app .workflow-search-floating-section > .workflow-meta {
+  flex: 0 0 auto;
+  margin: 9px 0 7px;
+  color: var(--text-muted);
+  font-size: 10px;
+}
+
+.photo-app .workflow-search-floating-section > .workflow-mosaic {
+  min-height: 0;
+  max-height: min(42vh, 320px);
+  margin-bottom: 9px;
+  overflow: auto;
+  grid-template-columns: repeat(auto-fill, minmax(124px, 1fr));
+  gap: 8px;
+}
+
+.photo-app .workflow-search-floating-section .ai-search-form-floating {
+  display: grid;
+  max-width: none;
+  margin: 0;
+  padding: 0;
+  order: 2;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+}
+
+.photo-app .workflow-search-floating-section .ai-search-form-floating:focus-within {
+  border: 0;
+  background: transparent;
+}
+
+.photo-app .ai-search-form-floating textarea,
+.photo-app .ai-search-form-floating input {
+  min-height: 58px;
+  padding: 9px 2px 7px;
+  color: var(--text-high);
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.photo-app .ai-search-form-floating textarea::placeholder,
+.photo-app .ai-search-form-floating input::placeholder {
+  color: var(--text-muted);
+}
+
+.photo-app .ai-search-form-floating .ai-search-composer-footer {
+  min-height: 36px;
+  padding-top: 7px;
+}
+
+.photo-app .ai-search-form-floating .ai-search-submit {
+  display: grid;
+  width: 30px;
+  height: 30px;
+  min-width: 30px;
+  min-height: 30px;
+  padding: 0;
+  place-items: center;
+  border-radius: 50% !important;
+  background: var(--accent) !important;
+}
+
+.photo-app .ai-search-form-floating .ai-search-submit:hover:not(:disabled) {
+  background: var(--accent-strong) !important;
+}
+
+.photo-app .ai-search-form-floating .ai-search-submit:disabled {
+  color: var(--text-low);
+  background: var(--panel-inset) !important;
+  opacity: 1;
+}
+
+.photo-app .workflow-workspace-floating-search .workflow-progress,
+.photo-app .workflow-workspace-floating-search .workflow-banner {
+  flex: 0 0 auto;
+  margin: 8px 14px 0;
+  font-size: 10px;
+}
+
+@media (max-width: 880px) {
+  .photo-app .workflow-embedded-shell.is-floating-search > .workflow-workspace-floating-search {
+    right: 14px;
+    bottom: 12px;
+    left: 14px;
+  }
+
+  .photo-app .workflow-workspace-floating-search .workflow-content,
+  .photo-app .workflow-workspace-floating-search .workflow-search-floating-section {
+    max-height: min(76vh, 560px);
+  }
+}
+
+/* Settings is the persistent footer action, so give it a slightly larger
+   target without changing the alignment of the main workspace rail. */
+.photo-app .app-navigation-rail-footer > .app-navigation-rail-button {
+  width: 44px;
+  height: 44px;
+  min-height: 44px;
+}
+
+.photo-app .app-navigation-rail-footer > .app-navigation-rail-button > svg {
+  width: 22px;
+  height: 22px;
+}
+
+@media (max-width: 1260px) {
+  .photo-app .app-navigation-rail-footer > .app-navigation-rail-button {
+    width: 42px;
+    height: 42px;
+    min-height: 42px;
+  }
+
+  .photo-app .app-navigation-rail-footer > .app-navigation-rail-button > svg {
+    width: 21px;
+    height: 21px;
+  }
+}
+
+@media (max-width: 1080px) {
+  .photo-app .app-navigation-rail-footer > .app-navigation-rail-button {
+    width: 40px;
+    height: 40px;
+    min-height: 40px;
+  }
+
+  .photo-app .app-navigation-rail-footer > .app-navigation-rail-button > svg {
+    width: 20px;
+    height: 20px;
+  }
+}
+
+/* Organization workspace: a quiet contact-sheet for planning, not another
+   dashboard. The final block intentionally overrides the older dry-run
+   experiments above so all three columns share one current visual language. */
+.photo-app .organization-mode-shell,
+.photo-app .organization-workspace {
+  min-width: 0;
+  min-height: 0;
+  background: var(--canvas) !important;
+}
+
+.photo-app .organization-workspace {
+  color: var(--text-secondary);
+}
+
+.photo-app .organization-safety-banner {
+  min-height: 48px;
+  padding: 0 18px;
+  gap: 10px;
+  color: var(--text-muted);
+  border-bottom: 1px solid var(--line-subtle);
+  background: var(--panel) !important;
+  font-size: 11px;
+}
+
+.photo-app .organization-safety-banner > strong {
+  flex: 0 0 auto;
+  color: var(--text-high);
+  font-size: 12px;
+  letter-spacing: 0;
+}
+
+.photo-app .organization-safety-banner > strong + span {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text-muted);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.photo-app .organization-scope-chip {
+  flex: 0 0 auto;
+  padding: 5px 9px;
+  color: var(--accent-strong);
+  border: 1px solid var(--line-visible);
+  border-radius: var(--control-radius);
+  background: var(--accent-soft);
+  font-size: 10px;
+  letter-spacing: 0;
+}
+
+.photo-app .organization-safety-banner button {
+  flex: 0 0 auto;
+  height: var(--control-height-compact);
+  min-height: var(--control-height-compact);
+  margin-left: auto;
+  padding-inline: 11px;
+  color: var(--text-secondary);
+  border: 1px solid var(--line-subtle);
+  border-radius: var(--control-radius);
+  background: transparent;
+  box-shadow: none;
+  font-size: 10px;
+}
+
+.photo-app .organization-safety-banner button:hover {
+  color: var(--text-high);
+  border-color: var(--line-visible);
+  background: var(--panel-raised);
+}
+
+.photo-app .organization-message {
+  min-height: 34px;
+  padding: 8px 18px;
+  color: var(--success);
+  border-bottom: 1px solid color-mix(in srgb, var(--success) 28%, transparent);
+  background: color-mix(in srgb, var(--success) 9%, var(--canvas));
+  font-size: 10px;
+}
+
+.photo-app .organization-message.is-error {
+  color: var(--error);
+  border-bottom-color: color-mix(in srgb, var(--error) 30%, transparent);
+  background: color-mix(in srgb, var(--error) 9%, var(--canvas));
+}
+
+.photo-app .organization-columns {
+  grid-template-columns: minmax(304px, 330px) minmax(0, 1fr) minmax(276px, 320px);
+  background: var(--canvas);
+}
+
+.photo-app .organization-controls,
+.photo-app .organization-detail {
+  min-height: 0;
+  padding: 18px 16px;
+  background: var(--panel) !important;
+}
+
+.photo-app .organization-controls {
+  border-right: 1px solid var(--line-subtle);
+}
+
+.photo-app .organization-detail {
+  border-left: 1px solid var(--line-subtle);
+}
+
+.photo-app .organization-preview {
+  min-height: 0;
+  background: var(--canvas) !important;
+}
+
+.photo-app .organization-panel-heading,
+.photo-app .organization-preview-heading {
+  min-height: 38px;
+  padding: 0 0 12px;
+  border-bottom: 1px solid var(--line-subtle);
+}
+
+.photo-app .organization-panel-heading {
+  margin-bottom: 16px;
+}
+
+.photo-app .organization-panel-heading h2,
+.photo-app .organization-preview-heading h2 {
+  margin: 0;
+  color: var(--text-high);
+  font-size: 14px;
+  font-weight: 650;
+  letter-spacing: 0;
+}
+
+.photo-app .organization-panel-heading small,
+.photo-app .organization-preview-heading small {
+  display: block;
+  margin-top: 4px;
+  color: var(--text-muted);
+  font-size: 9px;
+  letter-spacing: 0;
+}
+
+.photo-app .read-only-chip {
+  padding: 4px 8px;
+  color: var(--accent-strong);
+  border: 1px solid var(--line-visible);
+  border-radius: var(--control-radius);
+  background: var(--accent-soft);
+  font-size: 9px;
+  letter-spacing: 0;
+}
+
+.photo-app .organization-fieldset {
+  gap: 4px;
+  margin: 0 0 20px;
+  padding: 0 0 16px;
+  border: 0 !important;
+  border-bottom: 1px solid var(--line-subtle);
+  border-radius: 0 !important;
+  background: transparent !important;
+}
+
+.photo-app .organization-fieldset legend {
+  width: 100%;
+  margin-bottom: 8px;
+  padding: 0;
+  color: var(--text-high);
+  font-size: 11px;
+  font-weight: 650;
+}
+
+.photo-app .organization-fieldset label {
+  min-height: 32px;
+  padding: 0 9px;
+  gap: 8px;
+  color: var(--text-secondary);
+  border-radius: var(--control-radius);
+  font-size: 10px;
+  cursor: pointer;
+}
+
+.photo-app .organization-fieldset label:hover,
+.photo-app .organization-fieldset label:has(input:checked) {
+  color: var(--text-high);
+  background: var(--panel-raised);
+}
+
+.photo-app .organization-fieldset label:has(input:checked) {
+  box-shadow: inset 2px 0 var(--accent);
+}
+
+.photo-app .organization-fieldset input {
+  width: 14px;
+  height: 14px;
+  margin: 0;
+  accent-color: var(--accent);
+}
+
+.photo-app .organization-fieldset label span {
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.photo-app .organization-control-group {
+  gap: 8px;
+  margin-bottom: 20px;
+  padding-bottom: 18px;
+  border-bottom: 1px solid var(--line-subtle);
+}
+
+.photo-app .organization-control-group > label,
+.photo-app .organization-label-row label,
+.photo-app .organization-rule-row label {
+  color: var(--text-high);
+  font-size: 10px;
+  font-weight: 600;
+}
+
+.photo-app .organization-control-group small,
+.photo-app .organization-scope-note {
+  color: var(--text-muted);
+  font-size: 9px;
+  line-height: 1.45;
+}
+
+.photo-app .organization-target-input {
+  gap: 6px;
+}
+
+.photo-app
+  :is(
+    .organization-target-input input,
+    .template-input,
+    .organization-control-group select,
+    .organization-rule-row select,
+    .organization-rule-row input
+  ) {
+  height: 32px;
+  min-height: 32px;
+  padding: 0 9px;
+  color: var(--text-high);
+  border: 1px solid var(--line-subtle);
+  border-radius: var(--control-radius) !important;
+  background: var(--panel-inset);
+  box-shadow: none !important;
+  font-size: 10px;
+}
+
+.photo-app
+  :is(
+    .organization-target-input input,
+    .template-input,
+    .organization-control-group select,
+    .organization-rule-row select,
+    .organization-rule-row input
+  ):focus {
+  border-color: var(--accent);
+  outline: 2px solid color-mix(in srgb, var(--accent) 22%, transparent);
+  outline-offset: 0;
+}
+
+.photo-app
+  :is(
+    .organization-target-input button,
+    .organization-actions button,
+    .organization-level button,
+    .subtle-button
+  ) {
+  min-height: var(--control-height-compact);
+  padding-inline: 10px;
+  color: var(--text-secondary);
+  border: 1px solid var(--line-subtle);
+  border-radius: var(--control-radius) !important;
+  background: var(--panel-raised);
+  box-shadow: none !important;
+  font-size: 10px;
+  font-weight: 550;
+}
+
+.photo-app
+  :is(
+    .organization-target-input button,
+    .organization-actions button,
+    .organization-level button,
+    .subtle-button
+  ):hover:not(:disabled) {
+  color: var(--text-high);
+  border-color: var(--line-visible);
+  background: var(--panel-raised);
+}
+
+.photo-app .organization-label-row {
+  min-height: 20px;
+}
+
+.photo-app .organization-label-row small {
+  color: var(--text-muted);
+  font-size: 9px;
+}
+
+.photo-app .organization-level-guide {
+  display: grid;
+  gap: 2px;
+  margin: 2px 0 8px;
+  padding: 7px 8px;
+  color: var(--text-muted);
+  border-left: 2px solid var(--accent);
+  background: color-mix(in srgb, var(--accent) 6%, transparent);
+  font-size: 9px;
+  line-height: 1.45;
+}
+
+.photo-app .organization-level-guide strong {
+  color: var(--text-secondary);
+  font-size: 9px;
+  font-weight: 650;
+}
+
+.photo-app .organization-levels {
+  gap: 8px;
+}
+
+.photo-app .organization-level-entry {
+  display: grid;
+  gap: 2px;
+}
+
+.photo-app .organization-level {
+  min-height: 38px;
+  grid-template-columns: 16px 16px minmax(0, 1fr) minmax(0, 1fr) repeat(3, 28px);
+  gap: 3px;
+  padding: 4px;
+  border: 1px solid var(--line-subtle);
+  border-radius: var(--control-radius) !important;
+  background: var(--panel-inset) !important;
+}
+
+.photo-app .organization-level.is-dragging {
+  border-color: var(--accent);
+  opacity: 0.7;
+}
+
+.photo-app .organization-level strong {
+  color: var(--text-muted);
+  font-size: 9px;
+  font-variant-numeric: tabular-nums;
+  text-align: center;
+}
+
+.photo-app .organization-level select {
+  height: 28px;
+  min-height: 28px;
+  padding: 0 3px;
+  color: var(--text-secondary);
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  font-size: 9px;
+}
+
+.photo-app .organization-level select:focus {
+  outline: 1px solid var(--accent);
+  outline-offset: -1px;
+}
+
+.photo-app .organization-level button {
+  width: 28px;
+  height: 28px;
+  min-height: 28px;
+  padding: 0;
+  color: var(--text-muted);
+  line-height: 1;
+}
+
+.photo-app .organization-level button:hover:not(:disabled) {
+  color: var(--text-high);
+}
+
+.photo-app .organization-level button:disabled {
+  opacity: 0.3;
+}
+
+.photo-app .drag-handle {
+  color: var(--text-low);
+  font-size: 11px;
+}
+
+.photo-app .organization-level-note {
+  padding: 0 6px 0 24px;
+  color: var(--text-muted);
+  font-size: 8px;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+}
+
+.photo-app .subtle-button {
+  justify-self: start;
+  margin-top: 8px;
+  color: var(--accent-strong);
+  border-color: transparent;
+  background: transparent;
+}
+
+.photo-app .subtle-button:hover:not(:disabled) {
+  border-color: var(--line-visible);
+  background: var(--panel-raised);
+}
+
+.photo-app .organization-rule-row {
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.photo-app .organization-rule-row label {
+  gap: 6px;
+  color: var(--text-muted);
+  font-weight: 500;
+}
+
+.photo-app .organization-rule-row label small {
+  color: var(--text-muted);
+  font-size: 8px;
+  font-weight: 400;
+  line-height: 1.35;
+}
+
+.photo-app .organization-generate {
+  position: sticky;
+  bottom: 0;
+  z-index: 2;
+  min-height: 38px;
+  margin-top: 2px;
+  border-radius: var(--control-radius) !important;
+  box-shadow: 0 -12px 18px color-mix(in srgb, var(--panel) 92%, transparent);
+}
+
+.photo-app .organization-preview-heading {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  min-height: 58px;
+  padding: 18px 20px 12px;
+  background: color-mix(in srgb, var(--canvas) 94%, transparent);
+  backdrop-filter: blur(8px);
+}
+
+.photo-app .organization-actions {
+  gap: 6px;
+}
+
+.photo-app .organization-summary {
+  gap: 8px;
+  padding: 16px 20px;
+  border-bottom: 1px solid var(--line-subtle);
+}
+
+.photo-app .organization-metric {
+  min-height: 58px;
+  gap: 5px;
+  padding: 10px 11px;
+  border: 1px solid var(--line-subtle) !important;
+  border-radius: var(--control-radius) !important;
+  background: var(--panel) !important;
+}
+
+.photo-app .organization-metric span {
+  color: var(--text-muted);
+  font-size: 9px;
+}
+
+.photo-app .organization-metric strong {
+  color: var(--text-high);
+  font-size: 17px;
+  font-weight: 650;
+}
+
+.photo-app .organization-space-note {
+  margin: 12px 20px 0;
+  padding: 8px 10px;
+  border: 1px solid color-mix(in srgb, var(--warning) 30%, transparent);
+  border-radius: var(--control-radius);
+  background: color-mix(in srgb, var(--warning) 8%, var(--canvas));
+  font-size: 9px;
+}
+
+.photo-app .organization-tree {
+  min-height: 120px;
+  margin: 0 20px;
+  padding: 12px 0 16px;
+  border-bottom: 1px solid var(--line-subtle);
+}
+
+.photo-app .tree-node-label {
+  min-height: 32px;
+  grid-template-columns: 18px minmax(0, 1fr) auto;
+  gap: 7px;
+  padding: 0 8px;
+  border-radius: 6px;
+}
+
+.photo-app .tree-node-label:hover {
+  background: var(--panel-raised);
+}
+
+.photo-app .tree-node-label strong {
+  color: var(--text-secondary);
+  font-size: 10px;
+}
+
+.photo-app .tree-node-label > span:last-child {
+  color: var(--text-muted);
+  font-size: 9px;
+}
+
+.photo-app .organization-mapping-heading {
+  padding: 16px 20px 9px;
+  color: var(--text-high);
+  font-size: 11px;
+}
+
+.photo-app .organization-mapping-heading span {
+  color: var(--text-muted);
+  font-size: 9px;
+}
+
+.photo-app .organization-mapping-table {
+  padding: 0 20px 20px;
+}
+
+.photo-app .organization-mapping-row {
+  min-height: 38px;
+  padding: 0 9px;
+  gap: 10px;
+  color: var(--text-secondary);
+  border-bottom: 1px solid var(--line-subtle);
+  font-size: 10px;
+}
+
+.photo-app .organization-mapping-row.is-header {
+  min-height: 28px;
+  color: var(--text-muted);
+  border-bottom-color: var(--line-visible);
+  font-size: 9px;
+}
+
+.photo-app .organization-mapping-row:not(.is-header) {
+  border-radius: 6px;
+}
+
+.photo-app .organization-mapping-row:not(.is-header):hover,
+.photo-app .organization-mapping-row.is-selected {
+  color: var(--text-high);
+  background: var(--panel-raised);
+}
+
+.photo-app .mapping-status {
+  font-size: 9px;
+}
+
+.photo-app .organization-empty {
+  min-height: 330px;
+  margin: 18px 20px;
+  padding: 42px 28px;
+  gap: 9px;
+  border: 1px dashed var(--line-visible);
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--panel) 42%, transparent);
+}
+
+.photo-app .organization-empty-kicker {
+  color: var(--accent-strong);
+  font-size: 9px;
+  letter-spacing: 0.12em;
+}
+
+.photo-app .organization-empty strong {
+  color: var(--text-high);
+  font-size: 16px;
+  font-weight: 650;
+}
+
+.photo-app .organization-empty > span:not(.organization-empty-kicker) {
+  max-width: 380px;
+  color: var(--text-muted);
+  font-size: 10px;
+  line-height: 1.5;
+}
+
+.photo-app .organization-empty-steps {
+  display: grid;
+  width: min(100%, 420px);
+  grid-template-columns: repeat(3, 1fr);
+  gap: 8px;
+  margin-top: 14px;
+}
+
+.photo-app .organization-empty-steps > div {
+  display: grid;
+  gap: 7px;
+  min-height: 58px;
+  align-content: center;
+  justify-items: center;
+  padding: 8px;
+  border-top: 1px solid var(--line-visible);
+}
+
+.photo-app .organization-empty-steps b {
+  color: var(--accent-strong);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+
+.photo-app .organization-empty-steps span {
+  color: var(--text-secondary);
+  font-size: 9px;
+}
+
+.photo-app .organization-detail > .organization-preview-heading {
+  padding: 18px 0 12px;
+}
+
+.photo-app .organization-detail .path-card,
+.photo-app .organization-detail .variable-list,
+.photo-app .organization-detail .issue-list {
+  padding: 16px 0;
+  border-bottom: 1px solid var(--line-subtle);
+  background: transparent !important;
+}
+
+.photo-app .organization-detail .path-card code {
+  padding: 7px 8px;
+  border-radius: 6px;
+  background: var(--panel-inset);
+  color: var(--accent-strong);
+}
+
+.photo-app .organization-detail .variable-list div {
+  min-height: 24px;
+  align-items: center;
+}
+
+.photo-app .organization-detail .variable-list code {
+  color: var(--text-secondary);
+}
+
+.photo-app .organization-issue {
+  padding: 9px;
+  border: 1px solid color-mix(in srgb, var(--error) 32%, transparent) !important;
+  border-radius: 8px !important;
+  background: color-mix(in srgb, var(--error) 8%, var(--panel)) !important;
+}
+
+.photo-app .organization-issue.is-warning {
+  border-color: color-mix(in srgb, var(--warning) 32%, transparent) !important;
+  background: color-mix(in srgb, var(--warning) 8%, var(--panel)) !important;
+}
+
+.photo-app .organization-empty.is-compact {
+  min-height: 150px;
+  margin: 16px 0;
+  padding: 24px 16px;
+  border-style: solid;
+  border-radius: 10px;
+}
+
+.photo-app .organization-empty.is-compact strong {
+  font-size: 12px;
+}
+
+.photo-app .organization-detail-note {
+  margin-top: 18px;
+  padding-top: 14px;
+  border-top: 1px solid var(--line-subtle);
+}
+
+@media (max-width: 1100px) {
+  .photo-app .organization-columns {
+    grid-template-columns: minmax(286px, 310px) minmax(0, 1fr);
+  }
+
+  .photo-app .organization-detail {
+    display: none;
+  }
+}
+
+@media (max-width: 820px) {
+  .photo-app .organization-columns {
+    display: block;
+    overflow: auto;
+  }
+
+  .photo-app .organization-controls,
+  .photo-app .organization-detail {
+    display: block;
+    border: 0;
+  }
+
+  .photo-app .organization-preview {
+    min-height: 540px;
+  }
+
+  .photo-app .organization-detail {
+    border-top: 1px solid var(--line-subtle);
+  }
+}
+
+@media (max-width: 560px) {
+  .photo-app .organization-safety-banner {
+    min-height: 56px;
+    flex-wrap: wrap;
+    padding-block: 8px;
+  }
+
+  .photo-app .organization-safety-banner > strong + span {
+    order: 3;
+    flex-basis: 100%;
+  }
+
+  .photo-app .organization-level {
+    grid-template-columns: 16px 16px minmax(0, 1fr) minmax(0, 1fr) repeat(3, 26px);
+  }
+
+  .photo-app .organization-level button {
+    width: 26px;
+  }
+
+  .photo-app .organization-empty-steps {
+    gap: 2px;
+  }
+}
+
+/* Single-preview selection is anchored to the upper-left edge of the canvas,
+   matching the marked position in the viewer. It is one quiet rounded action
+   with a circular state indicator, not a square checkbox or a floating card. */
+.photo-app .single-selection-toggle {
+  top: 16px;
+  left: 16px;
+  display: inline-flex;
+  min-width: 92px;
+  min-height: 38px;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 8px;
+  padding: 6px 14px 6px 7px;
+  color: var(--text-secondary);
+  border: 1px solid var(--line-visible) !important;
+  border-radius: var(--control-radius) !important;
+  background: color-mix(in srgb, var(--panel-raised) 94%, transparent) !important;
+  box-shadow: 0 2px 8px color-mix(in srgb, #000 18%, transparent) !important;
+  font-size: 11px;
+  font-weight: 550;
+  transition:
+    color 140ms ease,
+    border-color 140ms ease,
+    background-color 140ms ease;
+}
+
+.photo-app .single-selection-toggle:hover {
+  color: var(--text-high);
+  border-color: var(--accent) !important;
+  background: color-mix(in srgb, var(--accent-soft) 58%, var(--panel-raised)) !important;
+  transform: none !important;
+}
+
+.photo-app .single-selection-toggle.is-selected {
+  color: var(--text-high);
+  border-color: var(--accent) !important;
+  background: color-mix(in srgb, var(--accent-soft) 78%, var(--panel-raised)) !important;
+  box-shadow: 0 2px 8px color-mix(in srgb, #000 18%, transparent) !important;
+}
+
+.photo-app .single-selection-mark {
+  display: grid;
+  flex: 0 0 24px;
+  width: 24px;
+  height: 24px;
+  place-items: center;
+  color: var(--text-muted);
+  border: 1px solid var(--line-visible) !important;
+  border-radius: 50% !important;
+  background: var(--panel-inset) !important;
+  box-shadow: none !important;
+}
+
+.photo-app .single-selection-toggle.is-selected .single-selection-mark {
+  color: var(--text-high);
+  border-color: var(--accent) !important;
+  background: var(--accent) !important;
+}
+
+.photo-app .single-selection-mark svg {
+  width: 14px;
+  height: 14px;
+}
+
+/* The manual-mark strip follows the summary directly; the right-side tools
+   stay right-aligned, so reducing only this shared gap moves the left content
+   without disturbing the query/group/status controls. */
+.photo-app .content-toolbar {
+  column-gap: 10px;
+}
+
+@media (max-width: 560px) {
+  .photo-app .single-selection-toggle {
+    top: 12px;
+    left: 12px;
+    min-width: 88px;
+    min-height: 36px;
+  }
+}
+
+/* Restore Lightroom-style card marking without reserving a footer strip. The
+   editor wraps its two control groups when the card becomes narrow, so dense
+   10/12-column grids keep every star and color target inside the card. A
+   keyboard-visible mark focus can keep the editor open for accessibility;
+   ordinary mouse focus must never pin it open after the pointer leaves. */
+.photo-app .asset-card-frame {
+  overflow: visible !important;
+}
+
+.photo-app .asset-card-frame .asset-mark-controls,
+.photo-app .asset-card-shell.has-rating .asset-mark-controls,
+.photo-app .asset-card-shell.has-color-label .asset-mark-controls {
+  position: absolute !important;
+  right: 6px;
+  bottom: 6px;
+  left: 6px;
+  z-index: 5;
+  display: flex !important;
+  min-width: 0;
+  min-height: 0;
+  flex-wrap: wrap;
+  align-items: center;
+  align-content: center;
+  justify-content: flex-start;
+  gap: 3px 6px;
+  padding: 4px 6px !important;
+  border: 1px solid color-mix(in srgb, var(--line-visible) 88%, transparent) !important;
+  border-radius: 9px !important;
+  background: color-mix(in srgb, var(--panel-raised) 91%, transparent) !important;
+  box-shadow:
+    0 2px 5px rgba(0, 0, 0, 0.12),
+    0 7px 14px rgba(0, 0, 0, 0.08) !important;
+  opacity: 0 !important;
+  pointer-events: none !important;
+  transform: translateY(3px) !important;
+  transition:
+    opacity 150ms cubic-bezier(0.25, 1, 0.5, 1),
+    transform 150ms cubic-bezier(0.25, 1, 0.5, 1);
+}
+
+.photo-app .asset-card-shell:hover .asset-mark-controls,
+.photo-app .asset-card-shell:has(.asset-mark-controls button:focus-visible) .asset-mark-controls {
+  opacity: 1 !important;
+  pointer-events: auto !important;
+  transform: translateY(0) !important;
+}
+
+.photo-app .asset-card-frame .asset-rating-controls {
+  display: flex;
+  min-width: 0;
+  max-width: 100%;
+  flex: 1 1 80px;
+  flex-wrap: wrap;
+  align-items: center;
+  align-content: center;
+  justify-content: flex-start;
+  gap: 1px;
+}
+
+.photo-app .asset-card-frame .asset-rating-controls button {
+  flex: 0 1 16px;
+  width: 16px !important;
+  min-width: 11px;
+  height: 21px;
+  min-height: 21px;
+  margin: 0;
+  padding: 0;
+  color: color-mix(in srgb, var(--text-high) 58%, var(--text-muted)) !important;
+  border: 0 !important;
+  border-radius: var(--control-radius) !important;
+  background: transparent !important;
+  box-shadow: none !important;
+  font-size: 16px;
+  font-weight: 600;
+  line-height: 1;
+  text-align: center;
+  -webkit-text-stroke: 0.35px color-mix(in srgb, var(--text-muted) 72%, transparent);
+}
+
+.photo-app .asset-card-frame .asset-rating-controls button:hover,
+.photo-app .asset-card-frame .asset-rating-controls button:focus-visible,
+.photo-app .asset-card-frame .asset-rating-controls button.is-active {
+  color: #f1d38c !important;
+  background: transparent !important;
+  box-shadow: none !important;
+  -webkit-text-stroke: 0.15px #f7dfa5;
+}
+
+.photo-app .asset-card-frame .asset-rating-controls button:focus-visible {
+  outline: 2px solid color-mix(in srgb, #f1d38c 78%, transparent);
+  outline-offset: 1px;
+}
+
+.photo-app
+  .asset-card-frame
+  :is(.asset-rating-controls button, .asset-color-label-controls button):focus:not(:focus-visible) {
+  outline: none !important;
+}
+
+.photo-app .asset-card-frame .asset-color-label-controls {
+  display: flex;
+  min-width: 0;
+  max-width: 100%;
+  flex: 0 1 67px;
+  align-items: center;
+  justify-content: flex-start;
+  flex-wrap: wrap;
+  align-content: center;
+  gap: 3px;
+}
+
+.photo-app .asset-card-frame .asset-color-label-controls button {
+  flex: 0 0 11px;
+  width: 11px !important;
+  min-width: 11px;
+  height: 11px !important;
+  min-height: 11px;
+  margin: 0;
+  padding: 0;
+  border: 1px solid color-mix(in srgb, var(--text-high) 40%, transparent) !important;
+  border-radius: 50% !important;
+  background: var(--manual-label-color, #656565);
+  box-shadow:
+    inset 0 1px 1px rgba(255, 255, 255, 0.22),
+    inset 0 -1px 1px rgba(0, 0, 0, 0.16) !important;
+}
+
+.photo-app .asset-card-frame .asset-color-label-controls button:hover,
+.photo-app .asset-card-frame .asset-color-label-controls button:focus-visible,
+.photo-app .asset-card-frame .asset-color-label-controls button.is-active {
+  outline: 2px solid color-mix(in srgb, var(--text-high) 82%, transparent);
+  outline-offset: 1px;
+  box-shadow:
+    inset 0 1px 1px rgba(255, 255, 255, 0.22),
+    inset 0 -1px 1px rgba(0, 0, 0, 0.16) !important;
+}
+
+.photo-app .asset-card-frame .asset-color-label-controls button:focus-visible {
+  outline-color: var(--focus);
+}
+
+.photo-app.theme-light .asset-card-frame .asset-mark-controls {
+  border-color: var(--line-visible) !important;
+  background: color-mix(in srgb, #ffffff 91%, var(--panel-raised)) !important;
+  box-shadow:
+    0 2px 5px rgba(31, 43, 49, 0.1),
+    0 7px 14px rgba(31, 43, 49, 0.07) !important;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .photo-app .asset-card-frame .asset-mark-controls {
+    transform: none !important;
+    transition: none !important;
+  }
+}
+
+/* Layout density: the navigation rail is a structural spine, while the
+   gallery/filter and inspector edges remain the only width controls. Keep the
+   hit areas discoverable without adding a third card or a permanent gutter. */
+.photo-app {
+  --app-navigation-rail-width: 44px;
+  --workspace-shell-padding: 4px;
+  --workspace-column-gap: 2px;
+  --panel-resize-hit-width: 16px;
+  --panel-resize-hit-offset: 0px;
+  --panel-resize-edge-inset: 0px;
+}
+
+.photo-app .workspace-shell {
+  padding: var(--workspace-shell-padding);
+  column-gap: var(--workspace-column-gap);
+}
+
+.photo-app .workspace-shell {
+  grid-template-columns:
+    var(--app-navigation-rail-width)
+    minmax(218px, var(--left-panel-width, 270px))
+    minmax(0, 1fr)
+    minmax(256px, var(--right-panel-width, 320px));
+}
+
+.photo-app .workspace-shell > .organization-mode-shell {
+  grid-column: 2 / -1;
+}
+
+.photo-app .panel-resize-handle {
+  display: block !important;
+  width: var(--panel-resize-hit-width);
+  background: transparent;
+}
+
+.photo-app .panel-resize-handle-left {
+  left: calc(
+    var(--workspace-shell-padding) + var(--app-navigation-rail-width) +
+      var(--workspace-column-gap) + var(--left-panel-width, 270px)
+  );
+}
+
+.photo-app .panel-resize-handle-right {
+  right: calc(
+    var(--workspace-shell-padding) + var(--right-panel-width, 320px) + var(--workspace-column-gap)
+  );
+}
+
+.photo-app .panel-resize-handle::before {
+  position: absolute;
+  top: 50%;
+  bottom: auto;
+  left: 50%;
+  display: block;
+  width: 3px;
+  height: 44px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--line-visible) 76%, transparent);
+  box-shadow: none;
+  content: "";
+  opacity: 0.72;
+  transform: translate(-50%, -50%);
+  transition:
+    width 150ms cubic-bezier(0.25, 1, 0.5, 1),
+    height 150ms cubic-bezier(0.25, 1, 0.5, 1),
+    background-color 150ms cubic-bezier(0.25, 1, 0.5, 1),
+    opacity 150ms cubic-bezier(0.25, 1, 0.5, 1);
+}
+
+.photo-app .panel-resize-handle:hover::before,
+.photo-app .panel-resize-handle:focus-visible::before {
+  width: 4px;
+  height: 54px;
+  background: var(--accent-strong);
+  box-shadow: none;
+  opacity: 1;
+}
+
+.photo-app .panel-resize-handle:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--focus) 72%, transparent);
+  outline-offset: -1px;
+}
+
+.photo-app .app-navigation-rail {
+  padding: 8px 2px 10px;
+  border-right: 0 !important;
+}
+
+.photo-app .app-navigation-rail-main,
+.photo-app .app-navigation-rail-footer {
+  gap: 5px;
+}
+
+.photo-app .app-navigation-rail-footer {
+  padding-top: 8px;
+  border-top-color: var(--line-subtle);
+}
+
+.photo-app .app-navigation-rail-button,
+.photo-app .app-navigation-rail-footer > .app-navigation-rail-button {
+  width: 40px;
+  height: 40px;
+  min-height: 40px;
+}
+
+.photo-app .app-navigation-rail-button > svg,
+.photo-app .app-navigation-rail-footer > .app-navigation-rail-button > svg {
+  width: 20px;
+  height: 20px;
+}
+
+.photo-app .workflow-workspace-floating-search {
+  left: calc(var(--app-navigation-rail-width, 48px) + var(--left-panel-width, 270px) + 22px);
+}
+
+@media (max-width: 1260px) {
+  .photo-app {
+    --app-navigation-rail-width: 42px;
+  }
+
+  .photo-app .app-navigation-rail-button,
+  .photo-app .app-navigation-rail-footer > .app-navigation-rail-button {
+    width: 38px;
+    height: 38px;
+    min-height: 38px;
+  }
+
+  .photo-app .app-navigation-rail-button > svg,
+  .photo-app .app-navigation-rail-footer > .app-navigation-rail-button > svg {
+    width: 19px;
+    height: 19px;
+  }
+}
+
+@media (max-width: 1080px) {
+  .photo-app {
+    --app-navigation-rail-width: 40px;
+    --workspace-shell-padding: 4px;
+  }
+
+  .photo-app .app-navigation-rail-button,
+  .photo-app .app-navigation-rail-footer > .app-navigation-rail-button {
+    width: 36px;
+    height: 36px;
+    min-height: 36px;
+  }
+
+  .photo-app .app-navigation-rail-button > svg,
+  .photo-app .app-navigation-rail-footer > .app-navigation-rail-button > svg {
+    width: 18px;
+    height: 18px;
+  }
+}
+
+/* The center canvas, rather than the whole application window, owns the
+   toolbar breakpoint. This prevents the result controls from colliding when
+   side panels leave only a narrow strip for the gallery. */
+.photo-app .center-workspace:not(.organization-mode-shell) {
+  container: photo-center / inline-size;
+}
+
+.photo-app .content-toolbar {
+  box-sizing: border-box;
+  flex-wrap: nowrap;
+  row-gap: 3px;
+}
+
+.photo-app .content-toolbar-summary {
+  flex: 0 0 auto;
+}
+
+.photo-app .content-toolbar-manual {
+  flex: 1 1 auto !important;
+  min-width: 0;
+}
+
+.photo-app .content-toolbar-controls {
+  flex: 0 0 auto;
+  min-width: 0;
+  flex-wrap: nowrap;
+  gap: 6px;
+}
+
+.photo-app .content-toolbar .content-toolbar-query {
+  flex: 0 0 auto;
+  white-space: nowrap;
+}
+
+.photo-app .grid-zoom-control {
+  flex: 0 1 166px;
+  min-width: 146px;
+  margin-left: 8px;
+}
+
+@container photo-center (max-width: 980px) {
+  .photo-app .content-toolbar {
+    min-height: 76px;
+    padding-block: 4px;
+    flex-wrap: wrap;
+    align-content: center;
+  }
+
+  .photo-app .content-toolbar-summary {
+    order: 1;
+  }
+
+  .photo-app .content-toolbar-controls {
+    order: 2;
+    max-width: 100%;
+    margin-left: auto;
+    flex-wrap: wrap;
+    justify-content: flex-end;
+  }
+
+  .photo-app .content-toolbar-manual {
+    order: 3;
+    flex: 1 1 240px !important;
+    justify-content: flex-start !important;
+  }
+
+  .photo-app .content-toolbar .manual-mark-filter-bar {
+    justify-content: flex-start;
+    padding-inline: 0;
+  }
+
+  .photo-app .grid-zoom-control {
+    order: 4;
+    flex: 0 1 166px;
+    min-width: 146px;
+    margin-left: 0;
+  }
+}
+
+@container photo-center (max-width: 640px) {
+  .photo-app .content-toolbar {
+    min-height: 0;
+    align-items: center;
+    padding-block: 6px;
+  }
+
+  .photo-app .content-toolbar-summary,
+  .photo-app .content-toolbar-controls,
+  .photo-app .content-toolbar-manual,
+  .photo-app .grid-zoom-control {
+    width: 100%;
+    margin-left: 0;
+  }
+
+  .photo-app .content-toolbar-summary {
+    order: 1;
+    flex: 0 0 100%;
+  }
+
+  .photo-app .content-toolbar-controls {
+    order: 2;
+    flex: 0 0 100%;
+    justify-content: flex-start;
+  }
+
+  .photo-app .content-toolbar-manual {
+    order: 3;
+    flex: 1 1 100% !important;
+  }
+
+  .photo-app .grid-zoom-control {
+    order: 4;
+    flex: 1 1 100%;
+    min-width: 0;
+  }
+
+  .photo-app .grid-zoom-control .grid-zoom-slider {
+    flex: 1 1 auto;
+  }
+}
+
+@container photo-center (max-width: 420px) {
+  .photo-app .content-toolbar .content-toolbar-query > span {
+    display: none;
+  }
+
+  .photo-app .content-toolbar .content-toolbar-query {
+    padding-inline: 9px;
+  }
+
+  .photo-app .content-toolbar-controls {
+    gap: 4px;
+  }
+
+  .photo-app .content-toolbar .group-select-control select {
+    min-width: 92px;
+  }
+
+  .photo-app .content-toolbar .analysis-status-filter-bar {
+    min-width: 0;
+    flex: 1 1 180px;
+  }
+
+  .photo-app .content-toolbar .analysis-status-filter-heading strong {
+    display: none;
+  }
+}
+
+/* Search results use the same three states as the main gallery: a calm
+   current-image outline, a separate circular batch-selection control, and a
+   quiet hover editor for stars and color labels. The result surface is a
+   bridge back to the gallery, not a second visual language. */
+.photo-app .workflow-asset {
+  overflow: visible;
+  border-color: var(--line-subtle);
+  box-shadow: none;
+  transition:
+    border-color 140ms cubic-bezier(0.25, 1, 0.5, 1),
+    background-color 140ms cubic-bezier(0.25, 1, 0.5, 1);
+}
+
+.photo-app .workflow-asset.is-active {
+  border-color: color-mix(in srgb, var(--accent-strong) 78%, var(--line-visible));
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent-strong) 34%, transparent);
+}
+
+.photo-app .workflow-asset.is-selected {
+  border-color: color-mix(in srgb, var(--accent-strong) 60%, var(--line-visible));
+}
+
+.photo-app .workflow-asset.is-selected.is-active {
+  border-color: var(--accent-strong);
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent-strong) 44%, transparent);
+}
+
+.photo-app .workflow-asset-preview {
+  border-radius: 9px 9px 0 0;
+}
+
+.photo-app .workflow-asset:hover .workflow-asset-preview img {
+  transform: none;
+}
+
+.photo-app .workflow-asset-check {
+  position: absolute;
+  z-index: 6;
+  top: 7px;
+  left: 7px;
+  display: grid;
+  width: 24px;
+  height: 24px;
+  min-height: 24px;
+  place-items: center;
+  padding: 0;
+  color: var(--text-muted);
+  border: 1px solid color-mix(in srgb, var(--text-high) 44%, transparent);
+  border-radius: 50%;
+  background: color-mix(in srgb, var(--panel-inset) 90%, transparent);
+  box-shadow: none;
+  cursor: pointer;
+  opacity: 0;
+  pointer-events: none;
+  transition:
+    color 140ms cubic-bezier(0.25, 1, 0.5, 1),
+    border-color 140ms cubic-bezier(0.25, 1, 0.5, 1),
+    background-color 140ms cubic-bezier(0.25, 1, 0.5, 1),
+    opacity 140ms cubic-bezier(0.25, 1, 0.5, 1);
+}
+
+.photo-app .workflow-asset:hover .workflow-asset-check,
+.photo-app .workflow-asset-check.is-selected,
+.photo-app .workflow-asset-check:focus-visible {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.photo-app .workflow-asset-check:hover,
+.photo-app .workflow-asset-check.is-selected {
+  color: var(--text-high);
+  border-color: var(--accent-strong);
+  background: color-mix(in srgb, var(--accent-soft) 78%, var(--panel-inset));
+}
+
+.photo-app .workflow-asset-check:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--focus) 78%, transparent);
+  outline-offset: 2px;
+}
+
+.photo-app .workflow-asset-mark-controls {
+  position: absolute;
+  z-index: 5;
+  right: 6px;
+  bottom: 6px;
+  left: 6px;
+  display: flex;
+  min-width: 0;
+  min-height: 0;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 3px 6px;
+  padding: 3px 5px;
+  border: 1px solid color-mix(in srgb, var(--line-visible) 86%, transparent);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--panel-raised) 92%, transparent);
+  box-shadow:
+    0 2px 5px rgba(0, 0, 0, 0.12),
+    0 7px 14px rgba(0, 0, 0, 0.07);
+  opacity: 0;
+  pointer-events: none;
+  transform: translateY(2px);
+  transition:
+    opacity 140ms cubic-bezier(0.25, 1, 0.5, 1),
+    transform 140ms cubic-bezier(0.25, 1, 0.5, 1);
+}
+
+.photo-app .workflow-asset:hover .workflow-asset-mark-controls,
+.photo-app
+  .workflow-asset:has(.workflow-asset-mark-controls button:focus-visible)
+  .workflow-asset-mark-controls {
+  opacity: 1;
+  pointer-events: auto;
+  transform: none;
+}
+
+.photo-app .workflow-asset-rating-controls {
+  display: flex;
+  min-width: 0;
+  flex: 1 1 78px;
+  align-items: center;
+  gap: 1px;
+}
+
+.photo-app .workflow-asset-rating-controls button {
+  width: 16px;
+  min-width: 13px;
+  height: 21px;
+  min-height: 21px;
+  padding: 0;
+  color: color-mix(in srgb, var(--text-high) 56%, var(--text-muted));
+  border: 0;
+  border-radius: var(--control-radius);
+  background: transparent;
+  box-shadow: none;
+  font-size: 15px;
+  line-height: 1;
+  text-align: center;
+  -webkit-text-stroke: 0.3px color-mix(in srgb, var(--text-muted) 72%, transparent);
+}
+
+.photo-app .workflow-asset-rating-controls button:hover,
+.photo-app .workflow-asset-rating-controls button:focus-visible,
+.photo-app .workflow-asset-rating-controls button.is-active {
+  color: #f1d38c;
+  background: transparent;
+  box-shadow: none;
+  -webkit-text-stroke: 0.15px #f7dfa5;
+}
+
+.photo-app .workflow-asset-rating-controls button:focus-visible {
+  outline: 2px solid color-mix(in srgb, #f1d38c 78%, transparent);
+  outline-offset: 1px;
+}
+
+.photo-app .workflow-asset-color-label-controls {
+  display: flex;
+  min-width: 0;
+  flex: 0 1 67px;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 3px;
+}
+
+.photo-app .workflow-asset-color-label-controls button {
+  width: 11px;
+  min-width: 11px;
+  height: 11px;
+  min-height: 11px;
+  padding: 0;
+  border: 1px solid color-mix(in srgb, var(--text-high) 42%, transparent);
+  border-radius: 50%;
+  box-shadow:
+    inset 0 1px 1px rgba(255, 255, 255, 0.22),
+    inset 0 -1px 1px rgba(0, 0, 0, 0.16);
+}
+
+.photo-app .workflow-asset-color-label-controls button:hover,
+.photo-app .workflow-asset-color-label-controls button:focus-visible,
+.photo-app .workflow-asset-color-label-controls button.is-active {
+  outline: 2px solid color-mix(in srgb, var(--text-high) 82%, transparent);
+  outline-offset: 1px;
+}
+
+.photo-app .workflow-asset-color-label-controls button:focus-visible {
+  outline-color: var(--focus);
+}
+
+.photo-app.theme-light .workflow-asset-mark-controls {
+  border-color: var(--line-visible);
+  background: color-mix(in srgb, #ffffff 92%, var(--panel-raised));
+  box-shadow:
+    0 2px 5px rgba(31, 43, 49, 0.1),
+    0 7px 14px rgba(31, 43, 49, 0.06);
+}
+
+@media (max-width: 420px) {
+  .photo-app .workflow-asset-mark-controls {
+    right: 4px;
+    bottom: 4px;
+    left: 4px;
+    justify-content: flex-start;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .photo-app .workflow-asset,
+  .photo-app .workflow-asset-check,
+  .photo-app .workflow-asset-mark-controls {
+    transition: none;
+  }
+}
+
+/* First-run entry is a quiet workbench cue rather than a centered marketing
+   card. The accent rule and small capability rail give the empty canvas a
+   useful starting point without adding another nested surface. */
+.photo-app .welcome-state {
+  display: grid;
+  grid-template-columns: 3px minmax(0, 1fr) 150px;
+  align-items: stretch;
+  width: min(760px, calc(100% - 56px));
+  margin: 12vh auto auto;
+  padding: 0;
+  overflow: hidden;
+  border: 1px solid var(--line-subtle);
+  border-radius: var(--control-radius);
+  background: color-mix(in srgb, var(--panel) 72%, transparent);
+  box-shadow: none;
+}
+
+.photo-app .welcome-state-rule {
+  min-height: 178px;
+  background: var(--accent);
+}
+
+.photo-app .welcome-state-copy {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  align-items: flex-start;
+  justify-content: center;
+  padding: 30px 32px;
+}
+
+.photo-app .welcome-state-copy > small {
+  color: var(--accent-strong);
+  font-size: 9px;
+  font-weight: 650;
+  letter-spacing: 0.08em;
+}
+
+.photo-app .welcome-state-copy h1 {
+  margin: 7px 0 8px;
+  color: var(--text-high);
+  font-size: clamp(19px, 2vw, 25px);
+  font-weight: 620;
+  letter-spacing: -0.02em;
+}
+
+.photo-app .welcome-state-copy p {
+  max-width: 420px;
+  margin: 0 0 18px;
+  color: var(--text-secondary);
+  font-size: 11px;
+  line-height: 1.65;
+}
+
+.photo-app .welcome-state-actions {
+  display: flex;
+  align-items: center;
+  gap: 13px;
+  flex-wrap: wrap;
+}
+
+.photo-app .welcome-state-actions > span {
+  display: inline-block;
+  margin: 0;
+  color: var(--text-muted);
+  font-size: 9px;
+}
+
+.photo-app .welcome-state-notes {
+  display: grid;
+  align-content: center;
+  gap: 14px;
+  padding: 22px 18px;
+  border-left: 1px solid var(--line-subtle);
+  background: color-mix(in srgb, var(--panel-inset) 42%, transparent);
+}
+
+.photo-app .welcome-state-notes > div {
+  display: grid;
+  grid-template-columns: 20px minmax(0, 1fr);
+  align-items: center;
+  gap: 7px;
+  color: var(--text-secondary);
+  font-size: 9px;
+}
+
+.photo-app .welcome-state-notes svg {
+  color: var(--accent-strong);
+}
+
+.photo-app .welcome-state-note-mark {
+  display: inline-grid;
+  width: 18px;
+  height: 18px;
+  place-items: center;
+  color: var(--accent-strong);
+  border: 1px solid var(--line-visible);
+  border-radius: 50%;
+  font-size: 12px;
+}
+
+.photo-app .import-option + .import-option {
+  margin-top: 8px;
+}
+
+.photo-app .import-option.is-disabled {
+  opacity: 0.48;
+  cursor: not-allowed;
+}
+
+.photo-app .import-option:has(input:focus-visible) {
+  border-color: var(--focus);
+  outline: 2px solid color-mix(in srgb, var(--focus) 32%, transparent);
+  outline-offset: 1px;
+}
+
+@media (max-width: 620px) {
+  .photo-app .welcome-state {
+    grid-template-columns: 3px minmax(0, 1fr);
+    width: min(560px, calc(100% - 32px));
+  }
+
+  .photo-app .welcome-state-notes {
+    grid-column: 2;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    padding: 14px 24px;
+    border-top: 1px solid var(--line-subtle);
+    border-left: 0;
+  }
+}
+
+/* Panel spacing hierarchy: the library/filter split keeps its dedicated
+   10px drag track, while every other rounded work surface shares one quieter
+   6–8px breathing room. This keeps the rail compact without letting the
+   inspector, gallery, and task surfaces touch their neighbors. */
+.photo-app {
+  --workspace-panel-gap: clamp(6px, 0.55vw, 8px);
+  --workspace-shell-padding: var(--workspace-panel-gap);
+  --workspace-column-gap: var(--workspace-panel-gap);
+}
+
+.photo-app .workspace-shell {
+  gap: var(--workspace-column-gap);
+  padding: var(--workspace-shell-padding);
+}
+
+.photo-app .center-column {
+  gap: var(--workspace-panel-gap);
+  padding: var(--workspace-panel-gap);
+}
+
+.photo-app .center-column > .scan-panel,
+.photo-app .center-column > .semantic-taskbar,
+.photo-app .center-column > .center-workspace:not(.organization-mode-shell),
+.photo-app .center-column > .workflow-embedded-shell {
+  margin: 0;
+}
+
+.photo-app .center-column > .workflow-height-resize-handle {
+  flex-basis: var(--workspace-panel-gap);
+  min-height: var(--workspace-panel-gap);
+}
+
+/* In single preview the selection affordance belongs to the result toolbar,
+   beside the analysis state. Keep it as one compact circular state control so
+   the canvas remains dedicated to the image. */
+.photo-app .content-toolbar-controls .single-selection-toolbar-toggle {
+  position: static !important;
+  inset: auto !important;
+  display: grid;
+  width: var(--control-height-compact);
+  min-width: var(--control-height-compact);
+  height: var(--control-height-compact);
+  min-height: var(--control-height-compact);
+  flex: 0 0 var(--control-height-compact);
+  padding: 0 !important;
+  place-items: center;
+  color: var(--text-muted);
+  border: 1px solid var(--line-visible) !important;
+  border-radius: 50% !important;
+  background: transparent !important;
+  box-shadow: none !important;
+  transform: none !important;
+  transition:
+    color 140ms cubic-bezier(0.25, 1, 0.5, 1),
+    border-color 140ms cubic-bezier(0.25, 1, 0.5, 1),
+    background-color 140ms cubic-bezier(0.25, 1, 0.5, 1);
+}
+
+.photo-app .content-toolbar-controls .single-selection-toolbar-toggle:hover {
+  color: var(--text-high);
+  border-color: var(--accent) !important;
+  background: var(--panel-inset) !important;
+}
+
+.photo-app .content-toolbar-controls .single-selection-toolbar-toggle.is-selected {
+  color: var(--text-high);
+  border-color: var(--accent) !important;
+  background: var(--accent) !important;
+}
+
+.photo-app .content-toolbar-controls .single-selection-toolbar-toggle .single-selection-mark {
+  display: grid;
+  width: 100%;
+  height: 100%;
+  min-width: 0;
+  place-items: center;
+  color: inherit;
+  border: 0 !important;
+  border-radius: 50% !important;
+  background: transparent !important;
+  box-shadow: none !important;
+}
+
+.photo-app .content-toolbar-controls .single-selection-toolbar-toggle .single-selection-mark svg {
+  width: 14px;
+  height: 14px;
 }

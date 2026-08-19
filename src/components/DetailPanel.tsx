@@ -24,6 +24,7 @@ import { ColorSwatches } from "./ColorSwatches";
 import { ImageHistogram } from "./ImageHistogram";
 import { PanelIcon, PlayIcon } from "./Icons";
 import { PreviewNavigator, type PreviewNavigatorProps } from "./PreviewNavigator";
+import { RatingStars } from "./RatingStars";
 import { Thumbnail } from "./Thumbnail";
 
 interface DetailPanelProps {
@@ -65,7 +66,6 @@ export function DetailPanel({
           <div className="details-empty">
             <PanelIcon width="25" height="25" />
             <strong>未选择图片</strong>
-            <span>选择网格中的图片以查看元数据和分析结果。</span>
           </div>
         ) : (
           <div className="details-scroll">
@@ -227,7 +227,7 @@ export function DetailPanel({
                 />
               </dl>
               <button
-                className="secondary-action full"
+                className="primary-action detail-reanalyze-action"
                 type="button"
                 onClick={() => onReanalyze(asset)}
                 disabled={
@@ -286,23 +286,16 @@ function ManualMarkEditor({
       <div className="manual-mark-editor">
         <div className="manual-mark-row">
           <span>星级</span>
-          <div className="manual-rating-controls" role="group" aria-label="星级">
-            {Array.from({ length: 5 }, (_, index) => {
-              const value = index + 1;
-              const isActive = value <= asset.rating;
-              return (
-                <button
-                  type="button"
-                  className={isActive ? "is-active" : ""}
-                  key={value}
-                  aria-label={`${value} 星`}
-                  aria-pressed={isActive}
-                  onClick={() => onUpdateRating?.(asset.id, asset.rating === value ? 0 : value)}
-                >
-                  {isActive ? "★" : "☆"}
-                </button>
-              );
-            })}
+          <div className="manual-rating-controls">
+            <RatingStars
+              className="rating-stars"
+              value={asset.rating}
+              ariaLabel="星级"
+              buttonLabel={(rating) => `${rating} 星`}
+              onChange={(rating) =>
+                onUpdateRating?.(asset.id, asset.rating === rating ? 0 : rating)
+              }
+            />
             <small>{asset.rating ? `${asset.rating} 星` : "未评级"}</small>
           </div>
         </div>

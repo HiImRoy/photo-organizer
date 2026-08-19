@@ -1,29 +1,31 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type CSSProperties, type KeyboardEvent } from "react";
 
 import type {
   AssetFilter,
+  BrowseNode,
   CollectionSummary,
   LibrarySummary,
   SemanticGroupSummary,
   SemanticLabelDescriptor,
-  SemanticRuntimeStatus,
-  SubjectRuntimeStatus,
 } from "../types";
 import { ColorRangeFilter } from "./ColorRangeFilter";
-import { ChevronIcon, LibraryIcon, ShieldIcon } from "./Icons";
+import { ChevronIcon, FolderIcon, HeartFolderIcon, LibraryIcon } from "./Icons";
+import { RangePair } from "./RangePair";
 
 interface SidebarProps {
   libraries: LibrarySummary[];
+  browseNodes: BrowseNode[];
   selectedLibraryId: number | null;
   groups: SemanticGroupSummary[];
   catalog: SemanticLabelDescriptor[];
   filter: AssetFilter;
-  semanticStatus: SemanticRuntimeStatus | null;
-  subjectStatus?: SubjectRuntimeStatus | null;
-  collections?: CollectionSummary[];
-  activeCollectionId?: number | null;
-  favoriteSourceActive?: boolean;
+  collections: CollectionSummary[];
+  favoriteSourceActive: boolean;
+  activeCollectionId: number | null;
+  libraryPanelRatio: number | null;
+  onLibraryPanelRatioChange: (ratio: number) => void;
   onImportLibrary: () => void;
+  onCreateCollection: (name: string, parentCollectionId: number | null) => void;
   onSelectLibrary: (id: number) => void;
   onRescanLibrary: (library: LibrarySummary) => void;
   onOpenLibrary: (library: LibrarySummary) => void;
@@ -32,9 +34,8 @@ interface SidebarProps {
   onChangeLibraryParent: (library: LibrarySummary, parentLibraryId: number | null) => void;
   assetDropTargetLibraryId: number | null;
   onFilterChange: (filter: AssetFilter) => void;
-  onSelectFavorites?: () => void;
-  onSelectCollection?: (collectionId: number) => void;
-  onOpenWorkflowTool?: (tool: "collections" | "search") => void;
+  onSelectFavorites: () => void;
+  onSelectCollection: (collectionId: number) => void;
 }
 
 const tones = [
@@ -52,16 +53,18 @@ const saturationLevels = [
 export function Sidebar(props: SidebarProps) {
   const {
     libraries,
+    browseNodes,
     selectedLibraryId,
     groups,
     catalog,
     filter,
-    semanticStatus,
-    subjectStatus,
-    collections = [],
-    activeCollectionId = null,
-    favoriteSourceActive = false,
+    collections,
+    favoriteSourceActive,
+    activeCollectionId,
+    libraryPanelRatio,
+    onLibraryPanelRatioChange,
     onImportLibrary,
+    onCreateCollection,
     onSelectLibrary,
     onRescanLibrary,
     onOpenLibrary,
@@ -72,10 +75,14 @@ export function Sidebar(props: SidebarProps) {
     onFilterChange,
     onSelectFavorites,
     onSelectCollection,
-    onOpenWorkflowTool,
   } = props;
   const [collapsedLibraryIds, setCollapsedLibraryIds] = useState<Set<number>>(new Set());
+  const [collapsedCollectionIds, setCollapsedCollectionIds] = useState<Set<number>>(new Set());
   const [openLibraryMenuId, setOpenLibraryMenuId] = useState<number | null>(null);
+  const [addMenuOpen, setAddMenuOpen] = useState(false);
+  const [createCollectionOpen, setCreateCollectionOpen] = useState(false);
+  const [newCollectionName, setNewCollectionName] = useState("");
+  const [newCollectionParentId, setNewCollectionParentId] = useState<number | null>(null);
   const [draggingLibraryId, setDraggingLibraryId] = useState<number | null>(null);
   const [dropTargetId, setDropTargetId] = useState<number | "root" | null>(null);
   const pointerDragRef = useRef<PointerDragState | null>(null);
@@ -83,6 +90,24 @@ export function Sidebar(props: SidebarProps) {
   const librariesRef = useRef(libraries);
   const onChangeLibraryParentRef = useRef(onChangeLibraryParent);
   const libraryTree = buildLibraryTree(libraries);
+  const sourceNodes = browseNodes.some((node) => node.kind === "source")
+    ? browseNodes
+        .filter((node): node is Extract<BrowseNode, { kind: "source" }> => node.kind === "source")
+        .map(browseSourceNodeToLibraryTreeNode)
+    : libraryTree;
+  const collectionNodes = browseNodes.filter(
+    (node): node is Extract<BrowseNode, { kind: "collection" }> => node.kind === "collection",
+  );
+  const manualCollections = collections.filter(
+    (collection) => collection.collectionKind === "manual",
+  );
+  const sidebarStyle =
+    libraryPanelRatio === null
+      ? undefined
+      : ({
+          "--sidebar-library-track": `${libraryPanelRatio}fr`,
+          "--sidebar-filter-track": `${1 - libraryPanelRatio}fr`,
+        } as CSSProperties);
 
   useEffect(() => {
     librariesRef.current = libraries;
@@ -213,7 +238,7 @@ export function Sidebar(props: SidebarProps) {
   }, [openLibraryMenuId]);
 
   return (
-    <aside className="left-panel" aria-label="图库与筛选">
+    <aside className="left-panel" aria-label="图库与筛选" style={sidebarStyle}>
       <section
         className="sidebar-module sidebar-library-module"
         aria-labelledby="sidebar-library-title"
@@ -221,23 +246,132 @@ export function Sidebar(props: SidebarProps) {
         <div className="panel-titlebar">
           <strong id="sidebar-library-title">图库</strong>
           <div className="panel-titlebar-actions">
-            <button
-              className="library-import-button"
-              type="button"
-              onClick={onImportLibrary}
-              aria-label="＋ 导入图库"
-            >
-              <LibraryIcon width="13" height="13" />
-              <span>＋ 导入图库</span>
-            </button>
+            <div className="sidebar-add-control">
+              <button
+                className="library-import-button"
+                type="button"
+                onClick={() => setAddMenuOpen((current) => !current)}
+                aria-label="添加图库或收藏夹"
+                aria-expanded={addMenuOpen}
+              >
+                <span>＋ 添加</span>
+                <ChevronIcon width="11" height="11" />
+              </button>
+              {addMenuOpen ? (
+                <div className="sidebar-add-menu" role="menu">
+                  <button
+                    type="button"
+                    role="menuitem"
+                    onClick={() => {
+                      setAddMenuOpen(false);
+                      onImportLibrary();
+                    }}
+                  >
+                    <LibraryIcon width="14" height="14" />
+                    <span>导入本地来源</span>
+                  </button>
+                  <button
+                    type="button"
+                    role="menuitem"
+                    onClick={() => {
+                      setAddMenuOpen(false);
+                      setCreateCollectionOpen(true);
+                    }}
+                  >
+                    <HeartFolderIcon width="14" height="14" />
+                    <span>新建收藏夹</span>
+                  </button>
+                </div>
+              ) : null}
+            </div>
           </div>
         </div>
 
+        {createCollectionOpen ? (
+          <form
+            className="sidebar-create-collection"
+            onSubmit={(event) => {
+              event.preventDefault();
+              const name = newCollectionName.trim();
+              if (!name) return;
+              onCreateCollection(name, newCollectionParentId);
+              setNewCollectionName("");
+              setNewCollectionParentId(null);
+              setCreateCollectionOpen(false);
+            }}
+          >
+            <div className="sidebar-create-collection-row">
+              <input
+                value={newCollectionName}
+                onChange={(event) => setNewCollectionName(event.target.value)}
+                placeholder="收藏夹名称"
+                maxLength={100}
+                aria-label="收藏夹名称"
+                autoFocus
+              />
+              <button type="submit" disabled={!newCollectionName.trim()}>
+                创建
+              </button>
+              <button
+                type="button"
+                className="sidebar-create-collection-cancel"
+                onClick={() => {
+                  setCreateCollectionOpen(false);
+                  setNewCollectionName("");
+                  setNewCollectionParentId(null);
+                }}
+              >
+                取消
+              </button>
+            </div>
+            <label className="sidebar-create-collection-parent">
+              <span>放入</span>
+              <select
+                value={newCollectionParentId ?? ""}
+                onChange={(event) =>
+                  setNewCollectionParentId(event.target.value ? Number(event.target.value) : null)
+                }
+              >
+                <option value="">顶层收藏夹</option>
+                {manualCollections.map((collection) => (
+                  <option key={collection.id} value={collection.id}>
+                    {collection.name}
+                  </option>
+                ))}
+              </select>
+            </label>
+          </form>
+        ) : null}
+
         <div className="sidebar-library-area">
           <div className="nav-list library-tree">
-            {libraryTree.map((node) => (
+            {collectionNodes.map((node) => (
+              <CollectionTreeNode
+                key={`collection:${node.collection.id}`}
+                node={node}
+                depth={0}
+                expanded={!collapsedCollectionIds.has(node.collection.id)}
+                collapsedCollectionIds={collapsedCollectionIds}
+                favoriteSourceActive={favoriteSourceActive}
+                activeCollectionId={activeCollectionId}
+                onToggle={(id) =>
+                  setCollapsedCollectionIds((current) => {
+                    const next = new Set(current);
+                    if (next.has(id)) next.delete(id);
+                    else next.add(id);
+                    return next;
+                  })
+                }
+                onSelectFavorites={onSelectFavorites}
+                onSelectCollection={onSelectCollection}
+              />
+            ))}
+            {collectionNodes.length > 0 && sourceNodes.length > 0 ? (
+              <div className="browse-node-divider">本地来源</div>
+            ) : null}
+            {sourceNodes.map((node) => (
               <LibraryTreeNode
-                key={node.library.id}
+                key={`source:${node.library.id}`}
                 node={node}
                 draggingLibraryId={draggingLibraryId}
                 dropTargetId={dropTargetId}
@@ -265,14 +399,16 @@ export function Sidebar(props: SidebarProps) {
                 onPointerDown={beginLibraryPointerDrag}
               />
             ))}
-            {libraryTree.length === 0 ? (
+            {sourceNodes.length === 0 && collectionNodes.length === 0 ? (
               <span className="empty-nav-state">尚未导入图库</span>
             ) : null}
             <div
               className={
-                draggingLibraryId === null || dropTargetId !== "root"
+                draggingLibraryId === null
                   ? "library-root-drop-target"
-                  : "library-root-drop-target is-active is-drag-over"
+                  : dropTargetId !== "root"
+                    ? "library-root-drop-target is-dragging"
+                    : "library-root-drop-target is-active is-drag-over"
               }
               data-library-root-drop="true"
             >
@@ -282,75 +418,82 @@ export function Sidebar(props: SidebarProps) {
         </div>
       </section>
 
-      <section
-        className="sidebar-module sidebar-source-module"
-        aria-labelledby="sidebar-source-title"
-      >
-        <div className="sidebar-area-heading">
-          <strong id="sidebar-source-title">来源筛选</strong>
-          <span>收藏与虚拟集合</span>
-        </div>
-        <p className="sidebar-source-note">只改变当前图库的显示，不移动或复制原文件。</p>
-        <div className="sidebar-source-list">
-          <button
-            type="button"
-            className={favoriteSourceActive ? "source-chip is-active" : "source-chip"}
-            onClick={onSelectFavorites}
-          >
-            <span>收藏</span>
-            <small>仅收藏照片</small>
-          </button>
-          {collections.map((collection) => (
-            <button
-              type="button"
-              key={collection.id}
-              className={
-                activeCollectionId === collection.id ? "source-chip is-active" : "source-chip"
-              }
-              onClick={() => onSelectCollection?.(collection.id)}
-            >
-              <span>{collection.name}</span>
-              <small>{collection.assetCount} 张 · 虚拟</small>
-            </button>
-          ))}
-          <button
-            type="button"
-            className="source-chip source-chip-action"
-            onClick={() => onOpenWorkflowTool?.("collections")}
-          >
-            <span>管理集合</span>
-            <small>新建 / 编辑</small>
-          </button>
-        </div>
-      </section>
+      <SidebarResizeHandle
+        libraryPanelRatio={libraryPanelRatio}
+        onChange={onLibraryPanelRatioChange}
+      />
 
       <section
         className="sidebar-module sidebar-filter-module"
         aria-labelledby="sidebar-filter-title"
       >
         <div className="sidebar-area-heading">
-          <strong id="sidebar-filter-title">分类与筛选</strong>
-          <span>按内容属性整理图片</span>
+          <strong id="sidebar-filter-title">筛选</strong>
         </div>
 
         <div className="sidebar-filter-area">
-          <SemanticFilterSection
-            title="拍摄题材"
-            categoryGroup="scene"
-            labels={catalog.filter((label) => label.categoryGroup === "scene")}
-            filter={filter}
-            groups={groups}
-            onFilterChange={onFilterChange}
-          />
+          <section
+            className="panel-section sidebar-tone-color-section"
+            aria-labelledby="sidebar-tone-color-title"
+          >
+            <div className="panel-section-heading">
+              <span id="sidebar-tone-color-title">影调与颜色</span>
+            </div>
 
-          <SemanticFilterSection
-            title="主体标签"
-            categoryGroup="subject"
-            labels={catalog.filter((label) => label.categoryGroup === "subject")}
-            filter={filter}
-            groups={groups}
-            onFilterChange={onFilterChange}
-          />
+            <div className="sidebar-filter-subsection">
+              <div className="sidebar-filter-subsection-heading">
+                <strong>颜色范围</strong>
+                {filter.colorHueCenter !== null && filter.colorHueWidth !== null ? (
+                  <span>已设定</span>
+                ) : null}
+              </div>
+              <ColorRangeFilter
+                center={filter.colorHueCenter}
+                width={filter.colorHueWidth}
+                strictness={filter.colorHueStrictness}
+                onChange={(colorHueCenter, colorHueWidth) =>
+                  onFilterChange({
+                    ...filter,
+                    colorCategories: [],
+                    colorHueCenter,
+                    colorHueWidth,
+                  })
+                }
+                onStrictnessChange={(colorHueStrictness) =>
+                  onFilterChange({ ...filter, colorHueStrictness })
+                }
+              />
+            </div>
+
+            <div className="sidebar-filter-subsection sidebar-tone-range-subsection">
+              <div className="sidebar-filter-subsection-heading">
+                <strong>影调范围</strong>
+                <span>亮度 / 饱和度</span>
+              </div>
+              <div className="range-filters">
+                <RangePair
+                  label="亮度"
+                  minHint="最暗"
+                  maxHint="最亮"
+                  min={filter.brightnessMin}
+                  max={filter.brightnessMax}
+                  onChange={(brightnessMin, brightnessMax) =>
+                    onFilterChange({ ...filter, brightnessMin, brightnessMax })
+                  }
+                />
+                <RangePair
+                  label="饱和度"
+                  minHint="近灰阶"
+                  maxHint="高彩"
+                  min={filter.saturationMin}
+                  max={filter.saturationMax}
+                  onChange={(saturationMin, saturationMax) =>
+                    onFilterChange({ ...filter, saturationMin, saturationMax })
+                  }
+                />
+              </div>
+            </div>
+          </section>
 
           <PanelSection title="影调">
             <div className="chip-grid three">
@@ -370,6 +513,24 @@ export function Sidebar(props: SidebarProps) {
               ))}
             </div>
           </PanelSection>
+
+          <SemanticFilterSection
+            title="拍摄题材"
+            categoryGroup="scene"
+            labels={catalog.filter((label) => label.categoryGroup === "scene")}
+            filter={filter}
+            groups={groups}
+            onFilterChange={onFilterChange}
+          />
+
+          <SemanticFilterSection
+            title="主体标签"
+            categoryGroup="subject"
+            labels={catalog.filter((label) => label.categoryGroup === "subject")}
+            filter={filter}
+            groups={groups}
+            onFilterChange={onFilterChange}
+          />
 
           <PanelSection title="饱和度级别">
             <div className="chip-grid three">
@@ -393,52 +554,6 @@ export function Sidebar(props: SidebarProps) {
             </div>
           </PanelSection>
 
-          <PanelSection title="颜色范围">
-            <ColorRangeFilter
-              center={filter.colorHueCenter}
-              width={filter.colorHueWidth}
-              strictness={filter.colorHueStrictness}
-              onChange={(colorHueCenter, colorHueWidth) =>
-                onFilterChange({
-                  ...filter,
-                  colorCategories: [],
-                  colorHueCenter,
-                  colorHueWidth,
-                })
-              }
-              onStrictnessChange={(colorHueStrictness) =>
-                onFilterChange({ ...filter, colorHueStrictness })
-              }
-            />
-          </PanelSection>
-
-          <PanelSection title="影调范围">
-            <div className="range-filters">
-              <RangePair
-                label="亮度"
-                description="按画面平均亮度筛选"
-                minHint="最暗"
-                maxHint="最亮"
-                min={filter.brightnessMin}
-                max={filter.brightnessMax}
-                onChange={(brightnessMin, brightnessMax) =>
-                  onFilterChange({ ...filter, brightnessMin, brightnessMax })
-                }
-              />
-              <RangePair
-                label="饱和度"
-                description="按画面平均色彩强度筛选"
-                minHint="近灰阶"
-                maxHint="高彩"
-                min={filter.saturationMin}
-                max={filter.saturationMax}
-                onChange={(saturationMin, saturationMax) =>
-                  onFilterChange({ ...filter, saturationMin, saturationMax })
-                }
-              />
-            </div>
-          </PanelSection>
-
           <PanelSection title="拍摄日期">
             <DateRangeFilter
               from={filter.capturedFrom}
@@ -448,36 +563,126 @@ export function Sidebar(props: SidebarProps) {
               }
             />
           </PanelSection>
-
-          <div className="left-panel-footer">
-            <ShieldIcon width="14" height="14" />
-            <span>
-              <strong>原图只读</strong> · 索引与模型数据保存在应用目录
-            </span>
-            <small className={semanticStatus?.status === "ready" ? "status-ready" : ""}>
-              {semanticStatus?.status === "ready"
-                ? semanticStatus.topicModel
-                  ? `题材候选 · ${semanticStatus.topicModel.name}`
-                  : "环境模型 · Places365"
-                : "语义模型未就绪"}
-            </small>
-            <small
-              className={
-                subjectStatus?.status === "ready" || subjectStatus?.status === "partial"
-                  ? "status-ready"
-                  : ""
-              }
-            >
-              {subjectStatus?.status === "ready"
-                ? "主体模型 · PicoDet + YuNet"
-                : subjectStatus?.status === "partial"
-                  ? "主体模型 · 人像辅助不可用"
-                  : "主体模型未就绪"}
-            </small>
-          </div>
         </div>
       </section>
     </aside>
+  );
+}
+
+const SIDEBAR_LIBRARY_MIN_HEIGHT = 150;
+const SIDEBAR_FILTER_MIN_HEIGHT = 180;
+const SIDEBAR_RESIZE_STEP = 16;
+
+function SidebarResizeHandle({
+  libraryPanelRatio,
+  onChange,
+}: {
+  libraryPanelRatio: number | null;
+  onChange: (ratio: number) => void;
+}) {
+  const dragRef = useRef<{
+    pointerId: number;
+    startY: number;
+    startRatio: number;
+    availableHeight: number;
+    minRatio: number;
+    maxRatio: number;
+  } | null>(null);
+
+  const readLayout = (handle: HTMLElement) => {
+    const panel = handle.closest<HTMLElement>(".left-panel");
+    const library = panel?.querySelector<HTMLElement>(":scope > .sidebar-library-module");
+    const filter = panel?.querySelector<HTMLElement>(":scope > .sidebar-filter-module");
+    if (!panel || !library || !filter) return null;
+
+    const libraryHeight = library.getBoundingClientRect().height;
+    const filterHeight = filter.getBoundingClientRect().height;
+    const availableHeight = libraryHeight + filterHeight;
+    if (!Number.isFinite(availableHeight) || availableHeight <= 0) return null;
+
+    const currentRatio = libraryHeight / availableHeight;
+    const minRatio = Math.min(0.5, SIDEBAR_LIBRARY_MIN_HEIGHT / availableHeight);
+    const maxRatio = Math.max(0.5, 1 - SIDEBAR_FILTER_MIN_HEIGHT / availableHeight);
+    return {
+      availableHeight,
+      currentRatio,
+      minRatio: Math.min(minRatio, maxRatio),
+      maxRatio: Math.max(minRatio, maxRatio),
+    };
+  };
+
+  const clampRatio = (ratio: number, minRatio: number, maxRatio: number) =>
+    Math.max(minRatio, Math.min(maxRatio, ratio));
+
+  useEffect(() => {
+    const handlePointerMove = (event: PointerEvent) => {
+      const drag = dragRef.current;
+      if (!drag || drag.pointerId !== (event.pointerId || 1)) return;
+      event.preventDefault();
+      const clientY = Number.isFinite(event.clientY) ? event.clientY : drag.startY;
+      const nextRatio =
+        drag.startRatio + (clientY - drag.startY) / Math.max(1, drag.availableHeight);
+      onChange(clampRatio(nextRatio, drag.minRatio, drag.maxRatio));
+    };
+    const finishPointerDrag = (event: PointerEvent) => {
+      if (dragRef.current?.pointerId === (event.pointerId || 1)) dragRef.current = null;
+    };
+
+    document.addEventListener("pointermove", handlePointerMove, { passive: false });
+    document.addEventListener("pointerup", finishPointerDrag);
+    document.addEventListener("pointercancel", finishPointerDrag);
+    return () => {
+      document.removeEventListener("pointermove", handlePointerMove);
+      document.removeEventListener("pointerup", finishPointerDrag);
+      document.removeEventListener("pointercancel", finishPointerDrag);
+    };
+  }, [onChange]);
+
+  const handleKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
+    if (event.key !== "ArrowUp" && event.key !== "ArrowDown") return;
+    event.preventDefault();
+    const layout = readLayout(event.currentTarget);
+    if (!layout) return;
+    const currentRatio = libraryPanelRatio ?? layout.currentRatio;
+    const nextRatio =
+      currentRatio +
+      (event.key === "ArrowDown" ? SIDEBAR_RESIZE_STEP : -SIDEBAR_RESIZE_STEP) /
+        layout.availableHeight;
+    onChange(clampRatio(nextRatio, layout.minRatio, layout.maxRatio));
+  };
+
+  const currentPercent = Math.round((libraryPanelRatio ?? 0.5) * 100);
+  return (
+    <div
+      className="sidebar-vertical-resize-handle"
+      role="separator"
+      aria-label="调整图库与筛选高度"
+      aria-orientation="horizontal"
+      aria-valuemin={15}
+      aria-valuemax={85}
+      aria-valuenow={currentPercent}
+      aria-valuetext={
+        libraryPanelRatio === null
+          ? "图库与筛选各占一半"
+          : `图库 ${currentPercent}%，筛选 ${100 - currentPercent}%`
+      }
+      tabIndex={0}
+      onKeyDown={handleKeyDown}
+      onPointerDown={(event) => {
+        event.preventDefault();
+        const layout = readLayout(event.currentTarget);
+        if (!layout) return;
+        dragRef.current = {
+          pointerId: event.pointerId || 1,
+          startY: Number.isFinite(event.clientY) ? event.clientY : 0,
+          startRatio: layout.currentRatio,
+          availableHeight: layout.availableHeight,
+          minRatio: layout.minRatio,
+          maxRatio: layout.maxRatio,
+        };
+        event.currentTarget.setPointerCapture?.(event.pointerId);
+      }}
+    />
   );
 }
 
@@ -510,6 +715,17 @@ function buildLibraryTree(libraries: LibrarySummary[]): LibraryTreeNodeData[] {
   return roots;
 }
 
+function browseSourceNodeToLibraryTreeNode(
+  node: Extract<BrowseNode, { kind: "source" }>,
+): LibraryTreeNodeData {
+  return {
+    library: node.library,
+    children: node.children
+      .filter((child): child is Extract<BrowseNode, { kind: "source" }> => child.kind === "source")
+      .map(browseSourceNodeToLibraryTreeNode),
+  };
+}
+
 interface PointerDragState {
   libraryId: number;
   pointerId: number;
@@ -531,6 +747,90 @@ function canDropLibrary(
     current = byId.get(current)?.parentLibraryId ?? null;
   }
   return byId.has(sourceLibraryId) && byId.has(targetLibraryId);
+}
+
+function CollectionTreeNode({
+  node,
+  depth,
+  expanded,
+  collapsedCollectionIds,
+  favoriteSourceActive,
+  activeCollectionId,
+  onToggle,
+  onSelectFavorites,
+  onSelectCollection,
+}: {
+  node: Extract<BrowseNode, { kind: "collection" }>;
+  depth: number;
+  expanded: boolean;
+  collapsedCollectionIds: Set<number>;
+  favoriteSourceActive: boolean;
+  activeCollectionId: number | null;
+  onToggle: (id: number) => void;
+  onSelectFavorites: () => void;
+  onSelectCollection: (collectionId: number) => void;
+}) {
+  const { collection } = node;
+  const isDefaultFavorites = collection.systemKey === "default_favorites";
+  const isActive = isDefaultFavorites ? favoriteSourceActive : activeCollectionId === collection.id;
+  const label = collection.name || "未命名收藏夹";
+  return (
+    <>
+      <div
+        className={`library-tree-row browse-collection-row${isActive ? " is-active" : ""}`}
+        style={{ paddingLeft: `${8 + depth * 14}px` }}
+        data-browse-collection-id={collection.id}
+      >
+        <button
+          type="button"
+          className={`library-tree-expander${expanded ? " is-expanded" : ""}`}
+          onClick={() => onToggle(collection.id)}
+          aria-label={expanded ? `折叠 ${label}` : `展开 ${label}`}
+          aria-expanded={node.children.length > 0 ? expanded : undefined}
+          disabled={!node.children.length}
+        >
+          <ChevronIcon width="11" height="11" />
+        </button>
+        <button
+          type="button"
+          className={isActive ? "nav-row is-active" : "nav-row"}
+          onClick={() =>
+            isDefaultFavorites ? onSelectFavorites() : onSelectCollection(collection.id)
+          }
+          title={isDefaultFavorites ? "默认收藏" : collection.name}
+        >
+          {isDefaultFavorites ? (
+            <HeartFolderIcon width="15" height="15" />
+          ) : (
+            <FolderIcon width="15" height="15" />
+          )}
+          <span>{label}</span>
+          <small>{collection.assetCount}</small>
+        </button>
+      </div>
+      {expanded
+        ? node.children
+            .filter(
+              (child): child is Extract<BrowseNode, { kind: "collection" }> =>
+                child.kind === "collection",
+            )
+            .map((child) => (
+              <CollectionTreeNode
+                key={`collection:${child.collection.id}`}
+                node={child}
+                depth={depth + 1}
+                expanded={!collapsedCollectionIds.has(child.collection.id)}
+                collapsedCollectionIds={collapsedCollectionIds}
+                favoriteSourceActive={favoriteSourceActive}
+                activeCollectionId={activeCollectionId}
+                onToggle={onToggle}
+                onSelectFavorites={onSelectFavorites}
+                onSelectCollection={onSelectCollection}
+              />
+            ))
+        : null}
+    </>
+  );
 }
 
 function LibraryTreeNode({
@@ -597,9 +897,14 @@ function LibraryTreeNode({
       >
         <button
           type="button"
-          className="library-tree-expander"
+          className={
+            node.children.length > 0
+              ? `library-tree-expander${expanded ? " is-expanded" : ""}`
+              : "library-tree-expander"
+          }
           onClick={() => onToggle(library.id)}
           aria-label={expanded ? `折叠 ${label}` : `展开 ${label}`}
+          aria-expanded={node.children.length > 0 ? expanded : undefined}
           disabled={!node.children.length}
         >
           <ChevronIcon width="11" height="11" />
@@ -809,86 +1114,6 @@ function toggleValue<T>(values: T[], value: T) {
   return values.includes(value) ? values.filter((item) => item !== value) : [...values, value];
 }
 
-function RangePair({
-  label,
-  description,
-  minHint,
-  maxHint,
-  min,
-  max,
-  onChange,
-}: {
-  label: string;
-  description: string;
-  minHint: string;
-  maxHint: string;
-  min: number | null;
-  max: number | null;
-  onChange: (min: number | null, max: number | null) => void;
-}) {
-  const minPercent = Math.round((min ?? 0) * 100);
-  const maxPercent = Math.round((max ?? 1) * 100);
-  const rangeText = formatPercentRange(min, max);
-
-  function updateMin(value: string) {
-    const next = Math.min(Number(value) / 100, maxPercent / 100);
-    onChange(next <= 0 ? null : next, max);
-  }
-
-  function updateMax(value: string) {
-    const next = Math.max(Number(value) / 100, minPercent / 100);
-    onChange(min, next >= 1 ? null : next);
-  }
-
-  return (
-    <div className="range-filter-card">
-      <div className="range-filter-heading">
-        <div>
-          <strong>{label}</strong>
-          <span>{description}</span>
-        </div>
-        <output aria-live="polite">{rangeText}</output>
-      </div>
-      <div className="range-slider" aria-label={`${label}筛选范围`}>
-        <span
-          className="range-slider-fill"
-          style={{ left: `${minPercent}%`, width: `${Math.max(0, maxPercent - minPercent)}%` }}
-        />
-        <input
-          className="range-slider-input range-slider-min"
-          aria-label={`${label}最低百分比`}
-          aria-valuetext={`${minPercent}%（${minHint}方向）`}
-          type="range"
-          min="0"
-          max="100"
-          step="5"
-          value={minPercent}
-          onChange={(event) => updateMin(event.target.value)}
-        />
-        <input
-          className="range-slider-input range-slider-max"
-          aria-label={`${label}最高百分比`}
-          aria-valuetext={`${maxPercent}%（${maxHint}方向）`}
-          type="range"
-          min="0"
-          max="100"
-          step="5"
-          value={maxPercent}
-          onChange={(event) => updateMax(event.target.value)}
-        />
-      </div>
-      <div className="range-slider-scale" aria-hidden="true">
-        <span>{minHint}</span>
-        <span>0% — 100%</span>
-        <span>{maxHint}</span>
-      </div>
-      <div className="range-filter-summary">
-        {min === null && max === null ? "未设置：显示全部图片" : `当前显示：${rangeText}范围内`}
-      </div>
-    </div>
-  );
-}
-
 function DateRangeFilter({
   from,
   to,
@@ -903,7 +1128,6 @@ function DateRangeFilter({
 
   return (
     <div className="date-range-filter">
-      <p>按照片记录的拍摄日期筛选，包含开始和结束当天。</p>
       <div className="date-range-fields">
         <label>
           <span>从</span>
@@ -927,28 +1151,16 @@ function DateRangeFilter({
           />
         </label>
       </div>
-      <div className="date-range-footer">
-        <span>
-          {fromDate || toDate
-            ? `${formatDateValue(fromDate, "最早")} — ${formatDateValue(toDate, "最近")}`
-            : "未设置日期范围"}
-        </span>
-        {fromDate || toDate ? (
+      {fromDate || toDate ? (
+        <div className="date-range-footer">
+          <span>{`${formatDateValue(fromDate, "最早")} — ${formatDateValue(toDate, "最近")}`}</span>
           <button type="button" onClick={() => onChange(null, null)}>
             清除
           </button>
-        ) : null}
-      </div>
+        </div>
+      ) : null}
     </div>
   );
-}
-
-function formatPercentRange(min: number | null, max: number | null) {
-  const format = (value: number) => `${Math.round(value * 100)}%`;
-  if (min !== null && max !== null) return `${format(min)} — ${format(max)}`;
-  if (min !== null) return `≥ ${format(min)}`;
-  if (max !== null) return `≤ ${format(max)}`;
-  return "全部";
 }
 
 function formatDateValue(value: string, fallback: string) {

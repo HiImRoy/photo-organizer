@@ -71,11 +71,19 @@
 
 ### `assets.is_favorite` / `collections` / `collection_assets`
 
-`is_favorite` 是独立于 `rating` 和 `color_label` 的布尔字段。`collections` 保存集合名称、说明和时间；`collection_assets` 保存多对多成员及加入时间。删除集合或成员关系只改变 SQLite，不改变资产路径、图库归属或源文件。
+0053 将 `collections` 扩展为虚拟收藏夹树：除了名称、说明和时间，还保存 `parent_collection_id`、`collection_kind`、`system_key` 和 `display_order`。`collection_assets` 保存多对多成员及加入时间；删除集合或成员关系只改变 SQLite，不改变资产路径、真实来源或源文件。
+
+`system_key = 'default_favorites'` 的系统叶节点是默认收藏。它的成员关系是爱心状态的真实来源；迁移阶段 `assets.is_favorite` 只作为兼容镜像，爱心和默认收藏的加入/移除必须在同一事务中同步。普通收藏夹不会自动点亮爱心，一张 Asset 可以属于多个普通收藏夹。
+
+`assets.library_id` 始终表示图片真实扫描来源。旧 `asset_library_assignments` 仅作为 0053 迁移和短期兼容数据保留，不得覆盖 Source 查询；旧 assignment 会转换为普通 Collection 关系。
 
 ### `saved_views`
 
 保存命名查询的 `library_id` 和版本化 `query_json`。schema 已预留，当前智能工作台 MVP 尚未暴露保存视图 UI。
+
+### `AssetQuery v2`
+
+查询层使用版本化的 `root + includeDescendants + filter + sort + page` 契约。`root` 可为 `all`、物理 `source`、虚拟 `collection` 或系统 `favorites`；Source 只沿 `parent_relation='source'` 递归，Collection 沿 `parent_collection_id` 递归并通过 `EXISTS` 去重，因此一张 Asset 同时属于父子收藏夹时不会重复出现在结果中。旧 `libraryId`、`favoriteOnly`、`collectionId` 只在兼容适配器中使用。
 
 ### `edit_export_plans`
 
@@ -98,4 +106,4 @@
 
 ## 迁移
 
-迁移文件随 Rust 二进制嵌入，在打开数据库时事务执行。包括 `0011_photo_workflow_mvp.sql` 在内的迁移只新增表、列和索引，不修改已发布的旧 migration。`schema_migrations(version, applied_at)` 保证重复初始化安全。测试覆盖空库、重复初始化、版本顺序、组合筛选、组织计划表、收藏/集合、重复分组和唯一约束。
+迁移文件随 Rust 二进制嵌入，在打开数据库时事务执行；旧 migration 文件只增不改。常规迁移新增表、列和索引，`0016_unified_source_collection.sql` 还会在同一事务中重建需要收敛的集合表，并由 Rust 迁移助手完成旧归属关系转换，因此失败会整体回滚。`schema_migrations(version, applied_at)` 保证重复初始化安全。测试覆盖空库、重复初始化、版本顺序、组合筛选、组织计划表、收藏/集合、重复分组和唯一约束。

@@ -88,6 +88,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             ipc::list_libraries,
             ipc::list_assets,
+            ipc::query_assets,
             ipc::get_classification_registry,
             ipc::get_asset_detail,
             ipc::update_classification_override,
@@ -130,6 +131,7 @@ pub fn run() {
             ipc::list_favorite_assets,
             ipc::set_asset_favorite,
             ipc::list_collections,
+            ipc::list_browse_nodes,
             ipc::create_collection,
             ipc::delete_collection,
             ipc::get_collection,

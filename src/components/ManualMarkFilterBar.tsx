@@ -1,5 +1,6 @@
 import type { AssetFilter } from "../types";
 import { MANUAL_COLOR_LABEL_OPTIONS } from "../types";
+import { RatingStars } from "./RatingStars";
 
 interface ManualMarkFilterBarProps {
   filter: AssetFilter;
@@ -12,32 +13,20 @@ export function ManualMarkFilterBar({ filter, onFilterChange }: ManualMarkFilter
 
   return (
     <div className="manual-mark-filter-bar" role="toolbar" aria-label="人工标记筛选">
-      <span className="manual-mark-filter-title">人工标记筛选</span>
       <div className="manual-mark-filter-controls">
-        <div className="manual-mark-filter-group" role="group" aria-label="按星级及以上筛选">
-          {Array.from({ length: 5 }, (_, index) => {
-            const rating = index + 1;
-            const active = selectedRating !== null && rating <= selectedRating;
-            return (
-              <button
-                type="button"
-                className={active ? "is-active" : ""}
-                key={rating}
-                aria-label={`${rating} 星及以上`}
-                aria-pressed={selectedRating === rating}
-                title={`${rating} 星及以上`}
-                onClick={() =>
-                  onFilterChange({
-                    ...filter,
-                    ratings: selectedRating === rating ? [] : [rating],
-                  })
-                }
-              >
-                {active ? "★" : "☆"}
-              </button>
-            );
-          })}
-        </div>
+        <RatingStars
+          className="manual-mark-filter-group"
+          value={selectedRating ?? 0}
+          ariaLabel="按星级及以上筛选"
+          buttonLabel={(rating) => `${rating} 星及以上`}
+          pressedMode="exact"
+          onChange={(rating) =>
+            onFilterChange({
+              ...filter,
+              ratings: selectedRating === rating ? [] : [rating],
+            })
+          }
+        />
         <span className="manual-mark-filter-divider" aria-hidden="true" />
         <div
           className="manual-mark-filter-group manual-mark-color-group"

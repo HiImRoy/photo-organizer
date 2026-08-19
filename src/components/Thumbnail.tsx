@@ -7,7 +7,7 @@ interface ThumbnailProps {
 }
 
 export function Thumbnail({ asset }: ThumbnailProps) {
-  const { source, failed } = useThumbnailSource(asset);
+  const { source, failed, loadRef } = useThumbnailSource(asset);
 
   if (!asset.thumbnailAvailable || failed) {
     return (
@@ -19,8 +19,17 @@ export function Thumbnail({ asset }: ThumbnailProps) {
   }
 
   if (!source) {
-    return <div className="thumbnail-skeleton" aria-label="正在加载缩略图" />;
+    return <div ref={loadRef} className="thumbnail-skeleton" aria-label="正在加载缩略图" />;
   }
 
-  return <img className="thumbnail-image" src={source} alt="" loading="lazy" draggable={false} />;
+  return (
+    <img
+      ref={loadRef}
+      className="thumbnail-image"
+      src={source}
+      alt=""
+      loading="lazy"
+      draggable={false}
+    />
+  );
 }

@@ -68,6 +68,21 @@ pub fn validate_rules(rules: &OrganizationRules) -> Vec<OrganizationIssue> {
                 &format!("目录维度 {} 重复。", level.kind.as_str()),
             ));
         }
+        if matches!(
+            &level.fallback,
+            OrganizationMissingFallback::ModificationTime
+        ) && !matches!(
+            &level.kind,
+            OrganizationLevelKind::Year | OrganizationLevelKind::Month | OrganizationLevelKind::Day
+        ) {
+            issues.push(rule_issue(
+                "invalid_level_fallback",
+                &format!(
+                    "目录维度 {} 不能使用文件修改时间回退；该回退仅适用于拍摄年份、月份或日期。",
+                    level.kind.as_str()
+                ),
+            ));
+        }
     }
     match parse_template(&rules.template) {
         Ok(tokens) => {
@@ -1144,6 +1159,7 @@ mod tests {
             semantic_analyzed_at: None,
             rating: 0,
             color_label: None,
+            is_favorite: false,
             semantic_labels: Vec::new(),
             classification: crate::classification::EffectiveClassification::default(),
         }
@@ -1161,6 +1177,22 @@ mod tests {
             selected_asset_ids: Vec::new(),
             rules,
         }
+    }
+
+    #[test]
+    fn modification_time_fallback_is_only_valid_for_date_dimensions() {
+        let rules = OrganizationRules {
+            levels: vec![OrganizationLevel {
+                kind: OrganizationLevelKind::PrimarySemantic,
+                fallback: OrganizationMissingFallback::ModificationTime,
+            }],
+            ..OrganizationRules::default()
+        };
+        let issues = validate_rules(&rules);
+        assert!(issues.iter().any(|issue| {
+            issue.code == "invalid_level_fallback"
+                && issue.detail.contains("仅适用于拍摄年份、月份或日期")
+        }));
     }
 
     #[test]

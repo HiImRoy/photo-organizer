@@ -2,6 +2,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::classification::EffectiveClassification;
 
+pub const ASSET_QUERY_VERSION: u8 = 2;
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct LibrarySummary {
@@ -64,6 +66,8 @@ pub struct AssetListItem {
     pub semantic_analyzed_at: Option<String>,
     pub rating: i64,
     pub color_label: Option<String>,
+    #[serde(skip)]
+    pub is_favorite: bool,
     pub semantic_labels: Vec<SemanticLabelResult>,
     pub classification: EffectiveClassification,
 }
@@ -182,6 +186,36 @@ pub struct AssetPage {
     pub page_size: u32,
 }
 
+/// The database root for a browse query. A Source is a physical scan root;
+/// Collections are virtual many-to-many memberships and never change an
+/// asset's `library_id`.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum AssetQueryRoot {
+    All,
+    Source { library_id: i64 },
+    Collection { collection_id: i64 },
+    Favorites,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct AssetQuery {
+    pub version: u8,
+    pub root: AssetQueryRoot,
+    #[serde(default = "default_include_descendants")]
+    pub include_descendants: bool,
+    pub filter: AssetFilter,
+    pub sort: AssetSortField,
+    pub direction: SortDirection,
+    pub page: u32,
+    pub page_size: u32,
+}
+
+fn default_include_descendants() -> bool {
+    true
+}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum SemanticMatchMode {
@@ -233,8 +267,10 @@ pub struct AssetFilter {
     pub captured_to: Option<String>,
     #[serde(default)]
     pub analysis_status: Option<String>,
+    /// V1 compatibility field. V2 callers should express this as root.
     #[serde(default)]
     pub favorite_only: bool,
+    /// V1 compatibility field. V2 callers should express this as root.
     #[serde(default)]
     pub collection_id: Option<i64>,
 }

@@ -27,6 +27,32 @@ or analysis.
    fingerprinting, EXIF/embedded-preview metadata, and a controlled decoder path
    that emits the requested thumbnail size; a full-resolution source pixel buffer
    must never enter the import, analysis, or model pipeline.
+10. Adjacent controls in the same action group must use one shared control
+    specification. They must have the same height, baseline, padding rhythm,
+    border thickness, corner radius, and spacing; primary/secondary variants
+    may differ in color or emphasis only. A square button next to a rounded
+    button, or buttons with visibly different heights or vertical alignment,
+    is a UI defect and must not be introduced.
+
+### UI control-group consistency invariant
+
+This is a project-wide visual contract, not a preference for a single button
+style. Every adjacent button group (dialog footers, toolbar actions, filter
+controls, pagination and card actions) must use a shared component class or
+shared tokenized variant for geometry. Before adding a new action, check the
+computed height, border radius, border, line-height, and flex alignment against
+its neighboring actions in both dark and light themes. Visual regression checks
+must include mixed primary/secondary groups and narrow desktop widths.
+The left navigation rail is a structural layout boundary, not a third card:
+its outer shell must remain transparent and borderless when the direct
+“图库” and “筛选” modules already provide their own single silhouettes.
+
+Visible buttons must use the shared rounded control geometry (`--control-radius`)
+and must not use square corners (`border-radius: 0`). This includes icon-only
+buttons, close buttons, toolbar actions, filter controls, pagination, card
+actions, workflow actions, and dialog footers. Circular selection/color
+indicators are the only intentional exception and must be explicitly styled as
+circular states rather than square buttons.
 
 ### Thumbnail-only processing invariant
 

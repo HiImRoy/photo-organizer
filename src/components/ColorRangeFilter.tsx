@@ -172,9 +172,7 @@ export function ColorRangeFilter({
         </svg>
       </div>
       <div className="color-range-filter-meta">
-        <span>
-          {hasSelection ? `中心 ${Math.round(normalizedCenter)}°` : "拖动环形区域选择色相"}
-        </span>
+        <span>{hasSelection ? `中心 ${Math.round(normalizedCenter)}°` : "未选择"}</span>
         <button
           type="button"
           className="color-range-reset"
@@ -184,7 +182,6 @@ export function ColorRangeFilter({
           清除
         </button>
       </div>
-      <small className="color-range-filter-hint">拖动高亮段移动范围，拖动两端调整宽度</small>
       <div className="color-range-strictness">
         <div className="color-range-strictness-heading">
           <span>颜色匹配严格程度</span>
@@ -206,11 +203,7 @@ export function ColorRangeFilter({
           <span>平衡</span>
           <span>严格</span>
         </div>
-        <small>
-          {hasSelection
-            ? `当前要求：选中色相至少占彩色区域 ${expectedShare}%`
-            : "选择色相后，严格程度决定颜色至少要占画面的比例"}
-        </small>
+        {hasSelection ? <small>至少占彩色区域 {expectedShare}%</small> : null}
       </div>
     </div>
   );

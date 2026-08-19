@@ -16,6 +16,10 @@ use uuid::Uuid;
 
 use crate::db::Repository;
 use crate::error::{AppError, AppResult};
+use crate::models::{
+    ASSET_QUERY_VERSION, AssetFilter, AssetListItem, AssetQuery, AssetQueryRoot, AssetSortField,
+    LibrarySummary, SortDirection,
+};
 use crate::semantic::{SemanticClassifier, SemanticError, default_topic_model_metadata};
 use crate::source_identity::{identity_key, is_same_or_descendant};
 
@@ -28,18 +32,14 @@ const ASSET_PROJECTION: &str = "
         WHERE t.asset_id=a.id AND t.status='ready'
     )";
 
-const LIBRARY_SCOPE_FILTER: &str = "COALESCE(
-    (SELECT assignment.library_id
-     FROM asset_library_assignments assignment
-     WHERE assignment.asset_id=a.id),
-    a.library_id
-) IN (
+const LIBRARY_SCOPE_FILTER: &str = "a.library_id IN (
     WITH RECURSIVE library_scope(library_id) AS (
         SELECT id FROM libraries WHERE id=?1
         UNION
         SELECT child.id
         FROM libraries child
         JOIN library_scope scope ON child.parent_library_id=scope.library_id
+            AND child.parent_relation='source'
     )
     SELECT library_id FROM library_scope
 )";
@@ -70,6 +70,23 @@ pub struct CollectionSummary {
     pub created_at: String,
     pub updated_at: String,
     pub asset_count: i64,
+    pub parent_collection_id: Option<i64>,
+    pub collection_kind: String,
+    pub system_key: Option<String>,
+    pub display_order: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum BrowseNode {
+    Source {
+        library: LibrarySummary,
+        children: Vec<BrowseNode>,
+    },
+    Collection {
+        collection: CollectionSummary,
+        children: Vec<BrowseNode>,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -214,65 +231,127 @@ struct EmbeddedAsset {
 }
 
 pub fn list_favorite_asset_ids(repository: &Repository, library_id: i64) -> AppResult<Vec<i64>> {
-    let connection = open(repository)?;
-    let mut statement = connection.prepare(&format!(
-        "SELECT a.id FROM assets a
-         WHERE {LIBRARY_SCOPE_FILTER}
-           AND a.file_status='present' AND a.is_favorite=1
-         ORDER BY a.id"
-    ))?;
-    Ok(statement
-        .query_map([library_id], |row| row.get(0))?
-        .collect::<Result<Vec<_>, _>>()?)
+    let items = repository.list_assets_for_query(&favorite_query(library_id))?;
+    let mut ids = items
+        .into_iter()
+        .filter(|asset| asset.file_status == "present")
+        .map(|asset| asset.id)
+        .collect::<Vec<_>>();
+    ids.sort_unstable();
+    Ok(ids)
 }
 
 pub fn list_favorite_assets(
     repository: &Repository,
     library_id: i64,
 ) -> AppResult<Vec<WorkflowAsset>> {
-    let connection = open(repository)?;
-    query_assets(
-        &connection,
-        &format!(
-            "SELECT {ASSET_PROJECTION} FROM assets a
-             WHERE {LIBRARY_SCOPE_FILTER}
-               AND a.file_status='present' AND a.is_favorite=1
-             ORDER BY COALESCE(a.capture_time, ''), a.id DESC"
-        ),
-        [library_id],
-    )
+    let items = repository.list_assets_for_query(&favorite_query(library_id))?;
+    Ok(items
+        .into_iter()
+        .filter(|asset| asset.file_status == "present")
+        .map(|asset| workflow_asset_from_list_item(&asset))
+        .collect())
+}
+
+fn favorite_query(library_id: i64) -> AssetQuery {
+    AssetQuery {
+        version: ASSET_QUERY_VERSION,
+        root: AssetQueryRoot::Source { library_id },
+        include_descendants: true,
+        filter: AssetFilter {
+            favorite_only: true,
+            ..AssetFilter::default()
+        },
+        sort: AssetSortField::CaptureTime,
+        direction: SortDirection::Desc,
+        page: 1,
+        page_size: 500,
+    }
 }
 
 pub fn set_favorite(repository: &Repository, asset_id: i64, favorite: bool) -> AppResult<bool> {
-    let connection = open(repository)?;
-    let changed = connection.execute(
+    let mut connection = open(repository)?;
+    let transaction = connection.transaction()?;
+    let asset_exists: bool = transaction.query_row(
+        "SELECT EXISTS(SELECT 1 FROM assets WHERE id=?1)",
+        [asset_id],
+        |row| row.get(0),
+    )?;
+    if !asset_exists {
+        return Err(AppError::NotFound(format!("asset {asset_id}")));
+    }
+    let default_collection_id: i64 = transaction
+        .query_row(
+            "SELECT id FROM collections WHERE system_key='default_favorites'",
+            [],
+            |row| row.get(0),
+        )
+        .optional()?
+        .ok_or_else(|| {
+            AppError::InvalidArgument("default favorites collection is missing".into())
+        })?;
+    if favorite {
+        transaction.execute(
+            "INSERT OR IGNORE INTO collection_assets(collection_id, asset_id, added_at)
+             VALUES(?1, ?2, ?3)",
+            params![default_collection_id, asset_id, now()],
+        )?;
+    } else {
+        transaction.execute(
+            "DELETE FROM collection_assets WHERE collection_id=?1 AND asset_id=?2",
+            params![default_collection_id, asset_id],
+        )?;
+    }
+    transaction.execute(
         "UPDATE assets SET is_favorite=?2 WHERE id=?1",
         params![asset_id, favorite],
     )?;
-    if changed == 0 {
-        return Err(AppError::NotFound(format!("asset {asset_id}")));
-    }
+    transaction.execute(
+        "UPDATE collections SET updated_at=?2 WHERE id=?1",
+        params![default_collection_id, now()],
+    )?;
+    transaction.commit()?;
     Ok(favorite)
 }
 
 pub fn list_collections(repository: &Repository) -> AppResult<Vec<CollectionSummary>> {
     let connection = open(repository)?;
     let mut statement = connection.prepare(
-        "SELECT c.id, c.name, c.description, c.created_at, c.updated_at, COUNT(ca.asset_id)
+        "SELECT c.id, c.name, c.description, c.created_at, c.updated_at, COUNT(ca.asset_id),
+                c.parent_collection_id, c.collection_kind, c.system_key, c.display_order
          FROM collections c
          LEFT JOIN collection_assets ca ON ca.collection_id=c.id
          GROUP BY c.id
-         ORDER BY c.name COLLATE NOCASE, c.id",
+         ORDER BY CASE WHEN c.system_key='default_favorites' THEN 0 ELSE 1 END,
+                  c.display_order, c.name COLLATE NOCASE, c.id",
     )?;
     Ok(statement
         .query_map([], map_collection)?
         .collect::<Result<Vec<_>, _>>()?)
 }
 
+pub fn list_browse_nodes(repository: &Repository) -> AppResult<Vec<BrowseNode>> {
+    let libraries = repository.list_libraries()?;
+    let collections = list_collections(repository)?;
+
+    let mut roots = build_collection_nodes(&collections, None);
+    roots.extend(build_source_nodes(&libraries, None));
+    Ok(roots)
+}
+
 pub fn create_collection(
     repository: &Repository,
     name: &str,
     description: &str,
+) -> AppResult<CollectionSummary> {
+    create_collection_under(repository, name, description, None)
+}
+
+pub fn create_collection_under(
+    repository: &Repository,
+    name: &str,
+    description: &str,
+    parent_collection_id: Option<i64>,
 ) -> AppResult<CollectionSummary> {
     let name = validate_collection_name(name)?;
     let description = description.trim();
@@ -282,17 +361,55 @@ pub fn create_collection(
         ));
     }
     let connection = open(repository)?;
+    if let Some(parent_collection_id) = parent_collection_id {
+        let parent_kind: Option<String> = connection
+            .query_row(
+                "SELECT collection_kind FROM collections WHERE id=?1",
+                [parent_collection_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        match parent_kind.as_deref() {
+            None => {
+                return Err(AppError::NotFound(format!(
+                    "collection {parent_collection_id}"
+                )));
+            }
+            Some("system_favorites") => {
+                return Err(AppError::InvalidArgument(
+                    "default favorites collection cannot have children".into(),
+                ));
+            }
+            Some(_) => {}
+        }
+    }
     let timestamp = now();
     connection.execute(
-        "INSERT INTO collections(name, description, created_at, updated_at)
-         VALUES(?1, ?2, ?3, ?3)",
-        params![name, description, timestamp],
+        "INSERT INTO collections(
+             name, description, created_at, updated_at, parent_collection_id,
+             display_order
+         ) VALUES(?1, ?2, ?3, ?3, ?4,
+                  COALESCE((SELECT MAX(display_order) + 1
+                            FROM collections WHERE parent_collection_id IS ?4), 0))",
+        params![name, description, timestamp, parent_collection_id],
     )?;
     collection_summary(&connection, connection.last_insert_rowid())
 }
 
 pub fn delete_collection(repository: &Repository, collection_id: i64) -> AppResult<bool> {
     let connection = open(repository)?;
+    let existing_system_key: Option<String> = connection
+        .query_row(
+            "SELECT system_key FROM collections WHERE id=?1",
+            [collection_id],
+            |row| row.get(0),
+        )
+        .optional()?;
+    if existing_system_key.as_deref() == Some("default_favorites") {
+        return Err(AppError::InvalidArgument(
+            "default favorites collection cannot be deleted".into(),
+        ));
+    }
     Ok(connection.execute("DELETE FROM collections WHERE id=?1", [collection_id])? > 0)
 }
 
@@ -311,12 +428,28 @@ pub fn add_assets_to_collection(
     if !exists {
         return Err(AppError::NotFound(format!("collection {collection_id}")));
     }
+    let is_default_favorites: bool = transaction.query_row(
+        "SELECT collection_kind='system_favorites'
+         FROM collections WHERE id=?1",
+        [collection_id],
+        |row| row.get(0),
+    )?;
     let timestamp = now();
-    for asset_id in asset_ids.iter().copied().collect::<BTreeSet<_>>() {
+    let unique_asset_ids = asset_ids.iter().copied().collect::<BTreeSet<_>>();
+    for asset_id in &unique_asset_ids {
         transaction.execute(
             "INSERT OR IGNORE INTO collection_assets(collection_id, asset_id, added_at)
              SELECT ?1, id, ?3 FROM assets WHERE id=?2",
             params![collection_id, asset_id, timestamp],
+        )?;
+    }
+    if is_default_favorites {
+        transaction.execute(
+            "UPDATE assets SET is_favorite=1
+             WHERE id IN (
+                 SELECT asset_id FROM collection_assets WHERE collection_id=?1
+             )",
+            [collection_id],
         )?;
     }
     transaction.execute(
@@ -335,11 +468,24 @@ pub fn remove_assets_from_collection(
 ) -> AppResult<CollectionSummary> {
     let mut connection = open(repository)?;
     let transaction = connection.transaction()?;
-    for asset_id in asset_ids.iter().copied().collect::<BTreeSet<_>>() {
+    let is_default_favorites: bool = transaction
+        .query_row(
+            "SELECT collection_kind='system_favorites'
+             FROM collections WHERE id=?1",
+            [collection_id],
+            |row| row.get(0),
+        )
+        .optional()?
+        .ok_or_else(|| AppError::NotFound(format!("collection {collection_id}")))?;
+    let unique_asset_ids = asset_ids.iter().copied().collect::<BTreeSet<_>>();
+    for asset_id in &unique_asset_ids {
         transaction.execute(
             "DELETE FROM collection_assets WHERE collection_id=?1 AND asset_id=?2",
             params![collection_id, asset_id],
         )?;
+        if is_default_favorites {
+            transaction.execute("UPDATE assets SET is_favorite=0 WHERE id=?1", [asset_id])?;
+        }
     }
     transaction.execute(
         "UPDATE collections SET updated_at=?2 WHERE id=?1",
@@ -353,16 +499,22 @@ pub fn remove_assets_from_collection(
 pub fn get_collection(repository: &Repository, collection_id: i64) -> AppResult<CollectionDetail> {
     let connection = open(repository)?;
     let summary = collection_summary(&connection, collection_id)?;
-    let assets = query_assets(
-        &connection,
-        &format!(
-            "SELECT {ASSET_PROJECTION} FROM assets a
-             JOIN collection_assets ca ON ca.asset_id=a.id
-             WHERE ca.collection_id=?1 AND a.file_status='present'
-             ORDER BY ca.added_at DESC, a.id DESC"
-        ),
-        [collection_id],
-    )?;
+    drop(connection);
+    let assets = repository
+        .list_assets_for_query(&AssetQuery {
+            version: ASSET_QUERY_VERSION,
+            root: AssetQueryRoot::Collection { collection_id },
+            include_descendants: false,
+            filter: AssetFilter::default(),
+            sort: AssetSortField::CaptureTime,
+            direction: SortDirection::Desc,
+            page: 1,
+            page_size: 500,
+        })?
+        .into_iter()
+        .filter(|asset| asset.file_status == "present")
+        .map(|asset| workflow_asset_from_list_item(&asset))
+        .collect();
     Ok(CollectionDetail { summary, assets })
 }
 
@@ -911,6 +1063,23 @@ fn map_asset(row: &Row<'_>) -> rusqlite::Result<WorkflowAsset> {
     })
 }
 
+fn workflow_asset_from_list_item(asset: &AssetListItem) -> WorkflowAsset {
+    WorkflowAsset {
+        id: asset.id,
+        library_id: asset.library_id,
+        file_name: asset.file_name.clone(),
+        extension: asset.extension.clone(),
+        file_size: asset.file_size,
+        width: asset.width,
+        height: asset.height,
+        capture_time: asset.capture_time.clone(),
+        rating: asset.rating,
+        color_label: asset.color_label.clone(),
+        is_favorite: asset.is_favorite,
+        thumbnail_available: asset.thumbnail_available,
+    }
+}
+
 fn query_assets<P: rusqlite::Params>(
     connection: &Connection,
     sql: &str,
@@ -930,13 +1099,18 @@ fn map_collection(row: &Row<'_>) -> rusqlite::Result<CollectionSummary> {
         created_at: row.get(3)?,
         updated_at: row.get(4)?,
         asset_count: row.get(5)?,
+        parent_collection_id: row.get(6)?,
+        collection_kind: row.get(7)?,
+        system_key: row.get(8)?,
+        display_order: row.get(9)?,
     })
 }
 
 fn collection_summary(connection: &Connection, collection_id: i64) -> AppResult<CollectionSummary> {
     connection
         .query_row(
-            "SELECT c.id, c.name, c.description, c.created_at, c.updated_at, COUNT(ca.asset_id)
+            "SELECT c.id, c.name, c.description, c.created_at, c.updated_at, COUNT(ca.asset_id),
+                    c.parent_collection_id, c.collection_kind, c.system_key, c.display_order
              FROM collections c
              LEFT JOIN collection_assets ca ON ca.collection_id=c.id
              WHERE c.id=?1
@@ -946,6 +1120,55 @@ fn collection_summary(connection: &Connection, collection_id: i64) -> AppResult<
         )
         .optional()?
         .ok_or_else(|| AppError::NotFound(format!("collection {collection_id}")))
+}
+
+fn build_source_nodes(
+    libraries: &[LibrarySummary],
+    parent_library_id: Option<i64>,
+) -> Vec<BrowseNode> {
+    let mut children = libraries
+        .iter()
+        .filter(|library| library.parent_library_id == parent_library_id)
+        .collect::<Vec<_>>();
+    children.sort_by(|left, right| {
+        left.display_order
+            .cmp(&right.display_order)
+            .then_with(|| left.name.to_lowercase().cmp(&right.name.to_lowercase()))
+            .then_with(|| left.id.cmp(&right.id))
+    });
+    children
+        .into_iter()
+        .map(|library| BrowseNode::Source {
+            library: library.clone(),
+            children: build_source_nodes(libraries, Some(library.id)),
+        })
+        .collect()
+}
+
+fn build_collection_nodes(
+    collections: &[CollectionSummary],
+    parent_collection_id: Option<i64>,
+) -> Vec<BrowseNode> {
+    let mut children = collections
+        .iter()
+        .filter(|collection| collection.parent_collection_id == parent_collection_id)
+        .collect::<Vec<_>>();
+    children.sort_by(|left, right| {
+        let left_system = left.system_key.as_deref() == Some("default_favorites");
+        let right_system = right.system_key.as_deref() == Some("default_favorites");
+        right_system
+            .cmp(&left_system)
+            .then_with(|| left.display_order.cmp(&right.display_order))
+            .then_with(|| left.name.to_lowercase().cmp(&right.name.to_lowercase()))
+            .then_with(|| left.id.cmp(&right.id))
+    });
+    children
+        .into_iter()
+        .map(|collection| BrowseNode::Collection {
+            collection: collection.clone(),
+            children: build_collection_nodes(collections, Some(collection.id)),
+        })
+        .collect()
 }
 
 fn validate_collection_name(name: &str) -> AppResult<&str> {
@@ -1366,6 +1589,33 @@ mod tests {
             list_favorite_asset_ids(&repository, library_id).expect("favorites"),
             vec![asset_id]
         );
+        let connection = open(&repository).expect("favorite database");
+        let default_collection_id: i64 = connection
+            .query_row(
+                "SELECT id FROM collections WHERE system_key='default_favorites'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("default collection");
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT COUNT(*) FROM collection_assets
+                     WHERE collection_id=?1 AND asset_id=?2",
+                    params![default_collection_id, asset_id],
+                    |row| row.get::<_, i64>(0),
+                )
+                .expect("default membership"),
+            1
+        );
+        drop(connection);
+        assert!(!set_favorite(&repository, asset_id, false).expect("unfavorite"));
+        assert!(
+            list_favorite_asset_ids(&repository, library_id)
+                .expect("empty favorites")
+                .is_empty()
+        );
+        assert!(set_favorite(&repository, asset_id, true).expect("favorite again"));
         let collection =
             create_collection(&repository, "精选", "本地虚拟集合").expect("collection");
         let collection = add_assets_to_collection(&repository, collection.id, &[asset_id])
@@ -1378,10 +1628,76 @@ mod tests {
                 .len(),
             1
         );
+        assert!(delete_collection(&repository, default_collection_id).is_err());
+        remove_assets_from_collection(&repository, collection.id, &[asset_id])
+            .expect("remove ordinary membership");
+        let connection = open(&repository).expect("post collection database");
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT is_favorite FROM assets WHERE id=?1",
+                    [asset_id],
+                    |row| { row.get::<_, i64>(0) }
+                )
+                .expect("favorite mirror remains"),
+            1
+        );
+        drop(connection);
         let groups = list_duplicate_groups(&repository, library_id, 20).expect("duplicates");
         assert_eq!(groups.len(), 1);
         assert_eq!(groups[0].assets.len(), 2);
         assert_eq!(groups[0].reclaimable_bytes, 100);
+    }
+
+    #[test]
+    fn browse_nodes_merge_default_favorites_collections_and_sources() {
+        let (_temporary, repository, _library_id, _asset_id) = fixture_repository();
+        let parent = create_collection(&repository, "旅行", "").expect("parent collection");
+        let child = create_collection_under(&repository, "海边", "", Some(parent.id))
+            .expect("child collection");
+
+        let nodes = list_browse_nodes(&repository).expect("browse nodes");
+        assert!(matches!(
+            nodes.first(),
+            Some(BrowseNode::Collection { collection, .. })
+                if collection.system_key.as_deref() == Some("default_favorites")
+        ));
+        let parent_node = nodes
+            .iter()
+            .find_map(|node| match node {
+                BrowseNode::Collection {
+                    collection,
+                    children,
+                } if collection.id == parent.id => Some((collection, children)),
+                _ => None,
+            })
+            .expect("parent browse node");
+        assert_eq!(parent_node.0.parent_collection_id, None);
+        assert!(matches!(
+            parent_node.1.first(),
+            Some(BrowseNode::Collection { collection, .. }) if collection.id == child.id
+        ));
+        assert!(nodes.iter().any(|node| matches!(
+            node,
+            BrowseNode::Source { library, .. } if library.name == "Fixture"
+        )));
+        assert!(
+            create_collection_under(
+                &repository,
+                "不应挂在默认收藏下",
+                "",
+                Some(
+                    nodes
+                        .first()
+                        .and_then(|node| match node {
+                            BrowseNode::Collection { collection, .. } => Some(collection.id),
+                            _ => None,
+                        })
+                        .expect("default favorites"),
+                ),
+            )
+            .is_err()
+        );
     }
 
     #[test]
@@ -1395,18 +1711,32 @@ mod tests {
                 |row| row.get(0),
             )
             .expect("fixture fingerprint");
+        let parent_source_path: String = connection
+            .query_row(
+                "SELECT source_path FROM libraries WHERE id=?1",
+                [parent_library_id],
+                |row| row.get(0),
+            )
+            .expect("parent source path");
+        let child_source_path = PathBuf::from(parent_source_path).join("workflow-child");
+        let child_source_path = child_source_path.to_string_lossy().into_owned();
+        let child_source_key = identity_key(Path::new(&child_source_path));
         connection
             .execute(
                 "INSERT INTO libraries(
-                    root_path, created_at, name, source_path, source_identity_key,
-                    parent_library_id, parent_relation
-                 ) VALUES('C:\\workflow-child', ?1, 'Child', 'C:\\workflow-child',
-                          'c:/workflow-child', ?2, 'manual')",
-                params![now(), parent_library_id],
+                     root_path, created_at, name, source_path, source_identity_key,
+                     parent_library_id, parent_relation
+                 ) VALUES(?2, ?1, 'Child', ?2, ?3, ?4, 'source')",
+                params![
+                    now(),
+                    child_source_path,
+                    child_source_key,
+                    parent_library_id
+                ],
             )
             .expect("child library");
         let child_library_id = connection.last_insert_rowid();
-        let child_asset_path = "C:\\workflow-child\\child.jpg";
+        let child_asset_path = format!("{child_source_path}\\child.jpg");
         connection
             .execute(
                 "INSERT INTO assets(
@@ -1418,7 +1748,7 @@ mod tests {
                           ?4, 'present', 'indexed', 'completed', ?5, ?5, 1)",
                 params![
                     child_library_id,
-                    identity_key(Path::new(child_asset_path)),
+                    identity_key(Path::new(&child_asset_path)),
                     child_asset_path,
                     fingerprint,
                     now()
@@ -1442,7 +1772,7 @@ mod tests {
         );
         assert_eq!(
             list_favorite_asset_ids(&repository, child_library_id).expect("child favorites"),
-            vec![asset_id, child_asset_id]
+            vec![child_asset_id]
         );
         let parent_groups =
             list_duplicate_groups(&repository, parent_library_id, 20).expect("parent duplicates");
@@ -1450,8 +1780,7 @@ mod tests {
         assert_eq!(parent_groups[0].assets.len(), 3);
         let child_groups =
             list_duplicate_groups(&repository, child_library_id, 20).expect("child duplicates");
-        assert_eq!(child_groups.len(), 1);
-        assert_eq!(child_groups[0].assets.len(), 2);
+        assert!(child_groups.is_empty());
     }
 
     #[test]

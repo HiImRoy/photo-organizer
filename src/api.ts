@@ -6,6 +6,7 @@ import type {
   AssetDetail,
   AssetPage,
   AssetQueryV1,
+  BrowseNode,
   CollectionDetail,
   CollectionSummary,
   ClassificationFieldDescriptor,
@@ -31,6 +32,7 @@ import type {
   SimilarityClusterResponse,
   WorkflowAsset,
 } from "./types";
+import { assetQueryFromV1 } from "./query";
 import type { VisualFixture } from "./test/visual-fixture";
 
 const desktopRuntime = isTauri();
@@ -172,13 +174,8 @@ export async function fetchAssets(query: AssetQueryV1): Promise<AssetPage> {
   if (!desktopRuntime) {
     return { items: [], total: 0, page: query.page, pageSize };
   }
-  return invoke<AssetPage>("list_assets", {
-    libraryId: query.libraryId,
-    sort: query.sort,
-    direction: query.direction,
-    page: query.page,
-    pageSize,
-    filter: query.filter,
+  return invoke<AssetPage>("query_assets", {
+    query: assetQueryFromV1({ ...query, pageSize }),
   });
 }
 
@@ -256,18 +253,30 @@ export async function batchUpdateClassification(
 
 export async function startLibraryScan(
   rootPath: string,
-  options: { includeSubfolders?: boolean } = {},
+  options: {
+    includeSubfolders?: boolean;
+    includeSubfolderImages?: boolean;
+    importWorkerCount?: number;
+  } = {},
 ): Promise<{ taskId: string }> {
   if (!desktopRuntime) throw new Error("文件夹导入仅在 PhotoOrganizer 桌面应用中可用。");
   return invoke<{ taskId: string }>("start_scan", {
     rootPath,
     includeSubfolders: options.includeSubfolders ?? false,
+    includeSubfolderImages: options.includeSubfolderImages ?? true,
+    importWorkerCount: options.importWorkerCount,
   });
 }
 
-export async function rescanLibrary(libraryId: number): Promise<{ taskId: string }> {
+export async function rescanLibrary(
+  libraryId: number,
+  options: { importWorkerCount?: number } = {},
+): Promise<{ taskId: string }> {
   if (!desktopRuntime) throw new Error("重新扫描仅在 PhotoOrganizer 桌面应用中可用。");
-  return invoke<{ taskId: string }>("rescan_library", { libraryId });
+  return invoke<{ taskId: string }>("rescan_library", {
+    libraryId,
+    importWorkerCount: options.importWorkerCount,
+  });
 }
 
 export async function cancelLibraryScan(
@@ -423,28 +432,40 @@ export async function fetchSemanticProgress(libraryId: number): Promise<Semantic
 export async function startSemanticAnalysis(
   libraryId: number,
   force = false,
+  options: { batchSize?: number } = {},
 ): Promise<{ jobId: string }> {
   if (!desktopRuntime) throw new Error("语义分析仅在桌面应用中可用。");
-  return invoke<{ jobId: string }>("start_semantic_analysis", { libraryId, force });
+  return invoke<{ jobId: string }>("start_semantic_analysis", {
+    libraryId,
+    force,
+    batchSize: options.batchSize,
+  });
 }
 
 export async function startSemanticAnalysisForAssets(
   libraryId: number,
   assetIds: number[],
+  options: { batchSize?: number } = {},
 ): Promise<{ jobId: string }> {
   if (!desktopRuntime) throw new Error("语义分析仅在 PhotoOrganizer 桌面应用中可用。");
   return invoke<{ jobId: string }>("start_semantic_analysis_selected", {
     libraryId,
     assetIds,
+    batchSize: options.batchSize,
   });
 }
 
 export async function reanalyzeAsset(
   libraryId: number,
   assetId: number,
+  options: { batchSize?: number } = {},
 ): Promise<{ jobId: string }> {
   if (!desktopRuntime) throw new Error("语义分析仅在桌面应用中可用。");
-  return invoke<{ jobId: string }>("reanalyze_asset", { libraryId, assetId });
+  return invoke<{ jobId: string }>("reanalyze_asset", {
+    libraryId,
+    assetId,
+    batchSize: options.batchSize,
+  });
 }
 
 export async function pauseSemanticAnalysis(jobId: string) {
@@ -522,9 +543,22 @@ export async function fetchCollections(): Promise<CollectionSummary[]> {
   return invoke<CollectionSummary[]>("list_collections");
 }
 
-export async function createCollection(name: string, description = ""): Promise<CollectionSummary> {
+export async function fetchBrowseNodes(): Promise<BrowseNode[]> {
+  if (!desktopRuntime) return [];
+  return invoke<BrowseNode[]>("list_browse_nodes");
+}
+
+export async function createCollection(
+  name: string,
+  description = "",
+  parentCollectionId: number | null = null,
+): Promise<CollectionSummary> {
   if (!desktopRuntime) throw new Error("集合仅在 PhotoOrganizer 桌面应用中可用。");
-  return invoke<CollectionSummary>("create_collection", { name, description });
+  return invoke<CollectionSummary>("create_collection", {
+    name,
+    description,
+    parentCollectionId,
+  });
 }
 
 export async function deleteCollection(collectionId: number): Promise<boolean> {

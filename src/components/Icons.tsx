@@ -39,6 +39,27 @@ export function LibraryIcon(props: IconProps) {
   );
 }
 
+export function HomeIcon(props: IconProps) {
+  return (
+    <IconBase {...props}>
+      <path d="m3.5 10.5 8.5-7 8.5 7" />
+      <path d="M5.5 9.5v10h13v-10" />
+      <path d="M9.5 19.5v-5h5v5" />
+    </IconBase>
+  );
+}
+
+export function BooksIcon(props: IconProps) {
+  return (
+    <IconBase {...props}>
+      <path d="M5.5 4h12.25A1.25 1.25 0 0 1 19 5.25V8H5.5a2 2 0 0 1 0-4Z" />
+      <path d="M4.5 9h12.25A1.25 1.25 0 0 1 18 10.25V13H4.5a2 2 0 0 1 0-4Z" />
+      <path d="M5.5 14h12.25A1.25 1.25 0 0 1 19 15.25V18H5.5a2 2 0 0 1 0-4Z" />
+      <path d="M8 18v2" />
+    </IconBase>
+  );
+}
+
 export function ImageIcon(props: IconProps) {
   return (
     <IconBase {...props}>
@@ -75,6 +96,17 @@ export function MoonIcon(props: IconProps) {
   );
 }
 
+export function SettingsIcon(props: IconProps) {
+  return (
+    <IconBase {...props}>
+      <g transform="translate(4 0)">
+        <path d="M9 3.5v1.2a4.8 4.8 0 0 1 1.25.52l1.04-.74 1.23 1.23-.74 1.04c.22.39.4.8.52 1.25h1.2v1.74h-1.2a4.8 4.8 0 0 1-.52 1.25l.74 1.04-1.23 1.23-1.04-.74a4.8 4.8 0 0 1-1.25.52v1.2H7.26v-1.2a4.8 4.8 0 0 1-1.25-.52l-1.04.74-1.23-1.23.74-1.04a4.8 4.8 0 0 1-.52-1.25h-1.2V8h1.2c.12-.45.3-.86.52-1.25l-.74-1.04 1.23-1.23 1.04.74a4.8 4.8 0 0 1 1.25-.52V3.5H9Z" />
+        <circle cx="8.13" cy="8.87" r="1.7" />
+      </g>
+    </IconBase>
+  );
+}
+
 export function CloseIcon(props: IconProps) {
   return (
     <IconBase {...props}>
@@ -104,6 +136,15 @@ export function ChevronIcon(props: IconProps) {
   return (
     <IconBase {...props}>
       <path d="m9 18 6-6-6-6" />
+    </IconBase>
+  );
+}
+
+export function ArrowUpIcon(props: IconProps) {
+  return (
+    <IconBase {...props}>
+      <path d="M12 19V5" />
+      <path d="m6.5 10.5 5.5-5.5 5.5 5.5" />
     </IconBase>
   );
 }
@@ -157,6 +198,15 @@ export function FolderIcon(props: IconProps) {
   return (
     <IconBase {...props}>
       <path d="M3 7.5h7l2-2h3.5L18 8.5h3v9.75A1.75 1.75 0 0 1 19.25 20H4.75A1.75 1.75 0 0 1 3 18.25z" />
+    </IconBase>
+  );
+}
+
+export function HeartFolderIcon(props: IconProps) {
+  return (
+    <IconBase {...props}>
+      <path d="M3 8h7l2-2h3.5L18 8.5h3v9.75A1.75 1.75 0 0 1 19.25 20H4.75A1.75 1.75 0 0 1 3 18.25z" />
+      <path d="m12 16.7-.8-.72C9.35 14.35 8.2 13.3 8.2 11.95A2.1 2.1 0 0 1 12 10.6a2.1 2.1 0 0 1 3.8 1.35c0 1.35-1.15 2.4-3 4.03z" />
     </IconBase>
   );
 }

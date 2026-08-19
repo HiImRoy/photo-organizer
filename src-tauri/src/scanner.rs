@@ -20,6 +20,25 @@ const MAX_IMPORT_IMAGE_WORKERS: usize = 2;
 const IMPORT_DISCOVERY_WINDOW: usize = 24;
 const IMPORT_DATABASE_BATCH: usize = 16;
 
+#[derive(Debug, Clone, Copy)]
+pub struct ScanOptions {
+    /// Whether images below the selected source root are eligible for import.
+    /// Legacy imports keep this enabled by default.
+    pub include_subfolder_images: bool,
+    /// None keeps the safe automatic worker choice; a value is clamped to the
+    /// supported 1–2 worker range before any image work starts.
+    pub import_worker_count: Option<usize>,
+}
+
+impl Default for ScanOptions {
+    fn default() -> Self {
+        Self {
+            include_subfolder_images: true,
+            import_worker_count: None,
+        }
+    }
+}
+
 struct PendingImageWork {
     path: PathBuf,
     snapshot: FileSnapshot,
@@ -75,9 +94,13 @@ const SCAN_PROGRESS_EVENT_INTERVAL: Duration = Duration::from_millis(120);
 const SCAN_PROGRESS_DB_INTERVAL: Duration = Duration::from_millis(300);
 const SCAN_PROGRESS_DB_BATCH: u64 = 32;
 
-fn import_image_worker_count() -> usize {
-    std::thread::available_parallelism()
-        .map(|parallelism| parallelism.get())
+fn import_image_worker_count(requested: Option<usize>) -> usize {
+    requested
+        .or_else(|| {
+            std::thread::available_parallelism()
+                .map(|parallelism| parallelism.get())
+                .ok()
+        })
         .unwrap_or(MIN_IMPORT_IMAGE_WORKERS)
         .clamp(MIN_IMPORT_IMAGE_WORKERS, MAX_IMPORT_IMAGE_WORKERS)
 }
@@ -170,6 +193,29 @@ pub fn scan_library<F>(
 where
     F: Fn(ScanProgress),
 {
+    scan_library_with_options(
+        repository,
+        thumbnail_dir,
+        root,
+        task_id,
+        cancelled,
+        ScanOptions::default(),
+        emit,
+    )
+}
+
+pub fn scan_library_with_options<F>(
+    repository: &Repository,
+    thumbnail_dir: &Path,
+    root: &Path,
+    task_id: &str,
+    cancelled: &AtomicBool,
+    options: ScanOptions,
+    emit: F,
+) -> AppResult<ScanSummary>
+where
+    F: Fn(ScanProgress),
+{
     let root_identity = existing_identity(root)?;
     let root = root_identity.source_path;
     let root_string = path_to_string(&root);
@@ -182,6 +228,7 @@ where
         &root_string,
         &root_identity.identity_key,
         &name,
+        options.include_subfolder_images,
         task_id,
     )?;
     scan_library_scope(
@@ -193,6 +240,7 @@ where
         library_id,
         generation,
         true,
+        options,
         emit,
     )
 }
@@ -248,6 +296,32 @@ pub fn scan_library_tree<F>(
 where
     F: Fn(ScanProgress),
 {
+    scan_library_tree_with_options(
+        repository,
+        thumbnail_dir,
+        root,
+        task_id,
+        cancelled,
+        targets,
+        ScanOptions::default(),
+        emit,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn scan_library_tree_with_options<F>(
+    repository: &Repository,
+    thumbnail_dir: &Path,
+    root: &Path,
+    task_id: &str,
+    cancelled: &AtomicBool,
+    targets: Vec<LibrarySourceRoot>,
+    options: ScanOptions,
+    emit: F,
+) -> AppResult<ScanSummary>
+where
+    F: Fn(ScanProgress),
+{
     let root_identity = existing_identity(root)?;
     let root = root_identity.source_path;
     let root_string = path_to_string(&root);
@@ -260,6 +334,7 @@ where
         &root_string,
         &root_identity.identity_key,
         &name,
+        options.include_subfolder_images,
         task_id,
     )?;
 
@@ -305,6 +380,7 @@ where
             library_id,
             generation,
             false,
+            options,
             |local| emit(aggregate_scope_progress(&base_progress, &local)),
         ) {
             Ok(summary) => summary,
@@ -349,6 +425,7 @@ fn scan_library_scope<F>(
     library_id: i64,
     generation: i64,
     complete_job: bool,
+    options: ScanOptions,
     emit: F,
 ) -> AppResult<ScanSummary>
 where
@@ -369,7 +446,13 @@ where
     let scan_result = std::thread::scope(|scope| -> AppResult<Option<ScanSummary>> {
         let (discovery_tx, discovery_rx) = mpsc::sync_channel(IMPORT_DISCOVERY_WINDOW);
         let mut discovery_handle = Some(scope.spawn(|| {
-            stream_discovered_images(root, &descendant_roots, cancelled, discovery_tx);
+            stream_discovered_images(
+                root,
+                &descendant_roots,
+                options.include_subfolder_images,
+                cancelled,
+                discovery_tx,
+            );
         }));
         let mut pending_work = Vec::with_capacity(IMPORT_DATABASE_BATCH);
         let mut completed_results = Vec::with_capacity(IMPORT_DATABASE_BATCH);
@@ -527,6 +610,7 @@ where
                                 &mut progress,
                                 &mut performance,
                                 &mut reporter,
+                                options,
                             )?;
                             continue;
                         }
@@ -550,6 +634,7 @@ where
                         &mut progress,
                         &mut performance,
                         &mut reporter,
+                        options,
                     )?;
                 }
                 DiscoveryItem::Skipped => {
@@ -603,6 +688,7 @@ where
             &mut progress,
             &mut performance,
             &mut reporter,
+            options,
         )?;
         flush_completed_results(
             repository,
@@ -672,6 +758,7 @@ where
 fn stream_discovered_images(
     root: &Path,
     descendant_roots: &[LibrarySourceRoot],
+    include_subfolder_images: bool,
     cancelled: &AtomicBool,
     sender: SyncSender<DiscoveryItem>,
 ) {
@@ -688,7 +775,9 @@ fn stream_discovered_images(
 
         let item = match entry {
             Ok(entry) if entry.file_type().is_file() => {
-                if is_supported_image(entry.path()) {
+                if is_supported_image(entry.path())
+                    && (include_subfolder_images || entry.depth() == 1)
+                {
                     DiscoveryItem::Image(entry.into_path())
                 } else {
                     DiscoveryItem::Skipped
@@ -718,6 +807,7 @@ fn flush_pending_image_work<F>(
     progress: &mut ScanProgress,
     performance: &mut ScanPerformance,
     reporter: &mut ScanProgressReporter<'_, F>,
+    options: ScanOptions,
 ) -> AppResult<()>
 where
     F: Fn(ScanProgress),
@@ -733,6 +823,7 @@ where
     completed_results.extend(process_image_work_batch(
         std::mem::take(pending_work),
         thumbnail_dir,
+        import_image_worker_count(options.import_worker_count),
     ));
     flush_completed_results(
         repository,
@@ -747,12 +838,13 @@ where
 fn process_image_work_batch(
     work: Vec<PendingImageWork>,
     thumbnail_dir: &Path,
+    requested_worker_count: usize,
 ) -> Vec<ImageWorkResult> {
     if work.is_empty() {
         return Vec::new();
     }
 
-    let worker_count = import_image_worker_count().min(work.len());
+    let worker_count = requested_worker_count.min(work.len());
     let mut work_chunks: Vec<Vec<PendingImageWork>> =
         (0..worker_count).map(|_| Vec::new()).collect();
     for (index, work) in work.into_iter().enumerate() {
@@ -1244,6 +1336,53 @@ mod tests {
     }
 
     #[test]
+    fn root_only_import_ignores_images_below_the_selected_folder() {
+        let (_temp, paths, repository, source) = setup();
+        save_pixel(&source.join("root.png"), Rgba([220, 80, 30, 255]), (8, 8));
+        save_pixel(
+            &source.join("旅行").join("nested.png"),
+            Rgba([30, 80, 220, 255]),
+            (8, 8),
+        );
+
+        let summary = scan_library_with_options(
+            &repository,
+            &paths.thumbnail_dir,
+            &source,
+            "root-only-import",
+            &AtomicBool::new(false),
+            ScanOptions {
+                include_subfolder_images: false,
+                import_worker_count: Some(1),
+            },
+            |_| {},
+        )
+        .expect("root-only scan");
+
+        assert_eq!(summary.status, "completed");
+        assert_eq!(summary.discovered, 1);
+        assert_eq!(summary.succeeded, 1);
+        let library = repository.list_libraries().expect("libraries").remove(0);
+        assert!(
+            !repository
+                .library_include_subfolder_images(library.id)
+                .expect("saved import scope")
+        );
+        let page = repository
+            .list_assets(
+                library.id,
+                AssetSortField::FileName,
+                SortDirection::Asc,
+                1,
+                20,
+                &crate::models::AssetFilter::default(),
+            )
+            .expect("root-only assets");
+        assert_eq!(page.total, 1);
+        assert_eq!(page.items[0].file_name, "root.png");
+    }
+
+    #[test]
     fn completed_scan_reports_stage_timing_snapshot() {
         let (_temp, paths, repository, source) = setup();
         for index in 0..3 {
@@ -1561,7 +1700,7 @@ mod tests {
         let discovered = discover_import_source_roots(&source).expect("discover roots");
         assert_eq!(discovered.len(), 2);
         let targets = repository
-            .ensure_library_source_roots(&discovered)
+            .ensure_library_source_roots(&discovered, true)
             .expect("register roots");
         let summary = scan_library_tree(
             &repository,
@@ -1617,7 +1756,7 @@ mod tests {
 
         let discovered = discover_import_source_roots(&source).expect("discover roots");
         let targets = repository
-            .ensure_library_source_roots(&discovered)
+            .ensure_library_source_roots(&discovered, true)
             .expect("register roots");
         scan_library_tree(
             &repository,

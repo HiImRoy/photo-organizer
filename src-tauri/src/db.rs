@@ -16,11 +16,11 @@ use crate::classification::{
 };
 use crate::error::{AppError, AppResult};
 use crate::models::{
-    AssetDetail, AssetFilter, AssetGridItem, AssetListItem, AssetPage, AssetSortField,
-    ColorPalette, ExistingAssetSnapshot, FileSnapshot, FolderSummary, LibrarySummary,
-    OrganizationIssue, OrganizationIssueSeverity, OrganizationPlan, OrganizationPlanRecord,
-    ProcessedImage, SemanticGroupSummary, SemanticLabelResult, SemanticMatchMode, SemanticProgress,
-    SortDirection,
+    ASSET_QUERY_VERSION, AssetDetail, AssetFilter, AssetGridItem, AssetListItem, AssetPage,
+    AssetQuery, AssetQueryRoot, AssetSortField, ColorPalette, ExistingAssetSnapshot, FileSnapshot,
+    FolderSummary, LibrarySummary, OrganizationIssue, OrganizationIssueSeverity, OrganizationPlan,
+    OrganizationPlanRecord, ProcessedImage, SemanticGroupSummary, SemanticLabelResult,
+    SemanticMatchMode, SemanticProgress, SortDirection,
 };
 use crate::semantic::{
     ANALYSIS_VERSION as SEMANTIC_ANALYSIS_VERSION, MODEL_NAME, MODEL_VERSION, ModelMetadata,
@@ -56,6 +56,10 @@ const SEMANTIC_TAXONOMY_MIGRATION: &str = include_str!("../migrations/0012_seman
 const PLACES365_EVIDENCE_MIGRATION: &str =
     include_str!("../migrations/0013_places365_evidence.sql");
 const SUBJECT_ANALYSIS_MIGRATION: &str = include_str!("../migrations/0014_subject_analysis.sql");
+const IMPORT_SUBFOLDER_SCOPE_MIGRATION: &str =
+    include_str!("../migrations/0015_import_subfolder_scope.sql");
+const UNIFIED_SOURCE_COLLECTION_MIGRATION: &str =
+    include_str!("../migrations/0016_unified_source_collection.sql");
 
 #[derive(Debug, Clone)]
 pub struct Repository {
@@ -151,10 +155,15 @@ impl Repository {
             (12_i64, SEMANTIC_TAXONOMY_MIGRATION),
             (13_i64, PLACES365_EVIDENCE_MIGRATION),
             (14_i64, SUBJECT_ANALYSIS_MIGRATION),
+            (15_i64, IMPORT_SUBFOLDER_SCOPE_MIGRATION),
+            (16_i64, UNIFIED_SOURCE_COLLECTION_MIGRATION),
         ] {
             if current < version {
                 let transaction = connection.transaction()?;
                 transaction.execute_batch(sql)?;
+                if version == 16 {
+                    migrate_unified_source_collection(&transaction)?;
+                }
                 transaction.execute(
                     "INSERT INTO schema_migrations(version, applied_at) VALUES(?1, ?2)",
                     params![version, now()],
@@ -343,7 +352,7 @@ impl Repository {
         let source_path = Path::new(root_path);
         let source_identity_key = identity_key(source_path);
         let name = library_name(source_path, root_path);
-        self.begin_scan_with_identity(root_path, &source_identity_key, &name, task_id)
+        self.begin_scan_with_identity(root_path, &source_identity_key, &name, true, task_id)
     }
 
     pub fn begin_scan_with_identity(
@@ -351,6 +360,7 @@ impl Repository {
         root_path: &str,
         source_identity_key: &str,
         name: &str,
+        include_subfolder_images: bool,
         task_id: &str,
     ) -> AppResult<(i64, i64)> {
         let mut connection = self.open()?;
@@ -365,9 +375,15 @@ impl Repository {
         transaction.execute(
             "UPDATE libraries
              SET root_path = ?2, source_path = ?2, name = ?3,
+                 include_subfolder_images = ?4,
                  status = 'scanning', last_error = NULL, scan_generation = scan_generation + 1
              WHERE source_identity_key = ?1",
-            params![source_identity_key, root_path, name],
+            params![
+                source_identity_key,
+                root_path,
+                name,
+                include_subfolder_images as i64
+            ],
         )?;
         rebuild_library_hierarchy(&transaction)?;
         let (library_id, generation): (i64, i64) = transaction.query_row(
@@ -402,6 +418,7 @@ impl Repository {
     pub fn ensure_library_source_roots(
         &self,
         roots: &[SourceIdentity],
+        include_subfolder_images: bool,
     ) -> AppResult<Vec<LibrarySourceRoot>> {
         if roots.is_empty() {
             return Err(AppError::InvalidArgument(
@@ -422,9 +439,15 @@ impl Repository {
             )?;
             transaction.execute(
                 "UPDATE libraries
-                 SET root_path=?2, source_path=?2, name=?3
+                 SET root_path=?2, source_path=?2, name=?3,
+                     include_subfolder_images=?4
                  WHERE source_identity_key=?1",
-                params![root.identity_key, source_path, name],
+                params![
+                    root.identity_key,
+                    source_path,
+                    name,
+                    include_subfolder_images as i64
+                ],
             )?;
         }
         rebuild_library_hierarchy(&transaction)?;
@@ -465,6 +488,17 @@ impl Repository {
                 "SELECT scan_generation FROM libraries WHERE id=?1",
                 [library_id],
                 |row| row.get(0),
+            )
+            .map_err(AppError::from)
+    }
+
+    pub fn library_include_subfolder_images(&self, library_id: i64) -> AppResult<bool> {
+        let connection = self.open()?;
+        connection
+            .query_row(
+                "SELECT include_subfolder_images FROM libraries WHERE id=?1",
+                [library_id],
+                |row| Ok(row.get::<_, i64>(0)? != 0),
             )
             .map_err(AppError::from)
     }
@@ -641,11 +675,13 @@ impl Repository {
         let connection = self.open()?;
         let mut statement = connection.prepare(
             "WITH RECURSIVE descendants(library_id) AS (
-                 SELECT id FROM libraries WHERE parent_library_id=?1
+                 SELECT id FROM libraries
+                  WHERE parent_library_id=?1 AND parent_relation='source'
                  UNION
                  SELECT child.id
                  FROM libraries child
-                 JOIN descendants parent ON child.parent_library_id=parent.library_id
+             JOIN descendants parent ON child.parent_library_id=parent.library_id
+                 AND child.parent_relation='source'
              )
              SELECT libraries.id, libraries.source_path, libraries.source_identity_key
              FROM libraries
@@ -1185,6 +1221,7 @@ impl Repository {
                  SELECT scope.root_id, child.id
                  FROM library_scope scope
                  JOIN libraries child ON child.parent_library_id = scope.library_id
+                     AND child.parent_relation='source'
              )
              SELECT l.id, l.root_path, l.name, l.source_path, l.source_identity_key,
                     l.parent_library_id, l.display_order, l.created_at, l.last_scan_at, l.status,
@@ -1198,12 +1235,7 @@ impl Repository {
              FROM libraries l
              LEFT JOIN library_scope scope ON scope.root_id = l.id
              LEFT JOIN assets a
-               ON COALESCE(
-                    (SELECT assignment.library_id
-                     FROM asset_library_assignments assignment
-                     WHERE assignment.asset_id=a.id),
-                    a.library_id
-                  ) = scope.library_id
+                ON a.library_id = scope.library_id
              GROUP BY l.id
              ORDER BY l.display_order ASC,
                       COALESCE(l.last_scan_at, l.created_at) DESC, l.id DESC",
@@ -1400,7 +1432,12 @@ impl Repository {
         page_size: u32,
         filter: &AssetFilter,
     ) -> AppResult<AssetPage> {
-        let full = self.list_assets_full(library_id, sort, direction, page, page_size, filter)?;
+        let query = legacy_asset_query(library_id, sort, direction, page, page_size, filter);
+        self.query_assets(&query)
+    }
+
+    pub fn query_assets(&self, query: &AssetQuery) -> AppResult<AssetPage> {
+        let full = self.query_assets_full(query)?;
         Ok(AssetPage {
             items: full.items.iter().map(AssetGridItem::from).collect(),
             total: full.total,
@@ -1409,19 +1446,109 @@ impl Repository {
         })
     }
 
-    fn list_assets_full(
+    /// Load a complete query result for workflow services that need to inspect
+    /// every matching asset. The same root, filter, count and pagination SQL
+    /// powers the grid command; this helper only walks its pages inside Rust.
+    pub fn list_assets_for_query(&self, query: &AssetQuery) -> AppResult<Vec<AssetListItem>> {
+        let mut page = 1;
+        let mut items = Vec::new();
+        loop {
+            let paged_query = AssetQuery {
+                page,
+                page_size: 500,
+                ..query.clone()
+            };
+            let result = self.query_assets_full(&paged_query)?;
+            let reached_end = result.items.len() < result.page_size as usize;
+            items.extend(result.items);
+            if reached_end || items.len() as i64 >= result.total {
+                break;
+            }
+            page += 1;
+        }
+        Ok(items)
+    }
+
+    fn ensure_organization_scope_is_single_source(
         &self,
         library_id: i64,
-        sort: AssetSortField,
-        direction: SortDirection,
-        page: u32,
-        page_size: u32,
         filter: &AssetFilter,
-    ) -> AppResult<FullAssetPage> {
+    ) -> AppResult<()> {
         let connection = self.open()?;
-        let page_size = page_size.clamp(1, 500);
+        if let Some(collection_id) = filter.collection_id {
+            let has_external_asset: bool = connection.query_row(
+                "WITH RECURSIVE library_scope(library_id) AS (
+                     SELECT id FROM libraries WHERE id=?2
+                     UNION
+                     SELECT child.id
+                     FROM libraries child
+                     JOIN library_scope scope
+                       ON child.parent_library_id=scope.library_id
+                      AND child.parent_relation='source'
+                 ), collection_scope(collection_id) AS (
+                     SELECT id FROM collections WHERE id=?1
+                     UNION
+                     SELECT child.id
+                     FROM collections child
+                     JOIN collection_scope parent
+                       ON child.parent_collection_id=parent.collection_id
+                 )
+                 SELECT EXISTS(
+                     SELECT 1
+                     FROM collection_assets membership
+                     JOIN collection_scope scope
+                       ON scope.collection_id=membership.collection_id
+                     JOIN assets asset ON asset.id=membership.asset_id
+                     WHERE asset.library_id NOT IN (SELECT library_id FROM library_scope)
+                 )",
+                params![collection_id, library_id],
+                |row| row.get(0),
+            )?;
+            if has_external_asset {
+                return Err(AppError::InvalidArgument(
+                    "cannot organize a collection spanning multiple Sources".into(),
+                ));
+            }
+        }
+        if filter.favorite_only {
+            let has_external_asset: bool = connection.query_row(
+                "WITH RECURSIVE library_scope(library_id) AS (
+                     SELECT id FROM libraries WHERE id=?1
+                     UNION
+                     SELECT child.id
+                     FROM libraries child
+                     JOIN library_scope scope
+                       ON child.parent_library_id=scope.library_id
+                      AND child.parent_relation='source'
+                 )
+                 SELECT EXISTS(
+                     SELECT 1
+                     FROM collection_assets membership
+                     JOIN collections favorite
+                       ON favorite.id=membership.collection_id
+                      AND favorite.system_key='default_favorites'
+                     JOIN assets asset ON asset.id=membership.asset_id
+                     WHERE asset.library_id NOT IN (SELECT library_id FROM library_scope)
+                 )",
+                [library_id],
+                |row| row.get(0),
+            )?;
+            if has_external_asset {
+                return Err(AppError::InvalidArgument(
+                    "cannot organize default favorites spanning multiple Sources".into(),
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    fn query_assets_full(&self, query: &AssetQuery) -> AppResult<FullAssetPage> {
+        validate_asset_query(query)?;
+        let connection = self.open()?;
+        let page_size = query.page_size.clamp(1, 500);
+        let page = query.page.max(1);
         let offset = i64::from(page.saturating_sub(1)) * i64::from(page_size);
-        let (where_sql, values) = asset_filter_sql(library_id, filter);
+        let (where_sql, values) = asset_filter_sql(query);
         let count_sql = format!(
             "SELECT COUNT(*)
              FROM assets a
@@ -1442,7 +1569,8 @@ impl Repository {
                     cf.saturation_mean, cf.chroma_mean, cf.saturation_label, cf.dominant_color_rgb,
                     cf.dominant_color_category, cf.neutral_ratio, cf.dominant_color_coverage,
                     a.semantic_status, a.semantic_error,
-                    a.semantic_analyzed_at, a.rating, a.color_label, cf.dominant_colors_json
+                    a.semantic_analyzed_at, a.rating, a.color_label, cf.dominant_colors_json,
+                    a.is_favorite
              FROM assets a
              LEFT JOIN thumbnails t ON t.asset_id=a.id AND t.spec=?
              LEFT JOIN tone_features tf ON tf.asset_id=a.id
@@ -1450,8 +1578,8 @@ impl Repository {
              WHERE {where_sql}
              ORDER BY {} {}, a.file_name COLLATE NOCASE ASC, a.id ASC
              LIMIT ? OFFSET ?",
-            sort.sql_expression(),
-            direction.sql(),
+            query.sort.sql_expression(),
+            query.direction.sql(),
         );
         let mut query_values = vec![Value::Text(crate::imaging::THUMBNAIL_SPEC.into())];
         query_values.extend(values);
@@ -1504,6 +1632,7 @@ impl Repository {
                 semantic_analyzed_at: row.get(36)?,
                 rating: row.get(37)?,
                 color_label: row.get(38)?,
+                is_favorite: row.get(40)?,
                 semantic_labels: Vec::new(),
                 classification: EffectiveClassification::default(),
             })
@@ -1544,17 +1673,19 @@ impl Repository {
         filter: &AssetFilter,
         selected_asset_ids: Option<&[i64]>,
     ) -> AppResult<Vec<AssetListItem>> {
+        self.ensure_organization_scope_is_single_source(library_id, filter)?;
         let mut page = 1;
         let mut items = Vec::new();
         loop {
-            let result = self.list_assets_full(
+            let query = legacy_asset_query(
                 library_id,
                 AssetSortField::FileName,
                 SortDirection::Asc,
                 page,
                 500,
                 filter,
-            )?;
+            );
+            let result = self.query_assets_full(&query)?;
             let reached_end = result.items.len() < result.page_size as usize;
             items.extend(result.items);
             if reached_end || items.len() as i64 >= result.total {
@@ -1729,14 +1860,10 @@ impl Repository {
                  SELECT child.id
                  FROM libraries child
                  JOIN library_scope scope ON child.parent_library_id = scope.library_id
+                     AND child.parent_relation='source'
              )
              SELECT a.relative_path FROM assets a
-             WHERE COALESCE(
-                     (SELECT assignment.library_id
-                      FROM asset_library_assignments assignment
-                      WHERE assignment.asset_id=a.id),
-                     a.library_id
-                   ) IN (SELECT library_id FROM library_scope)
+              WHERE a.library_id IN (SELECT library_id FROM library_scope)
                AND a.file_status='present'
              ORDER BY relative_path COLLATE NOCASE",
         )?;
@@ -1780,15 +1907,11 @@ impl Repository {
                  SELECT child.id
                  FROM libraries child
                  JOIN library_scope scope ON child.parent_library_id = scope.library_id
+                     AND child.parent_relation='source'
              )
              SELECT a.id
              FROM assets a
-             WHERE COALESCE(
-                     (SELECT assignment.library_id
-                      FROM asset_library_assignments assignment
-                      WHERE assignment.asset_id=a.id),
-                     a.library_id
-                   ) IN (SELECT library_id FROM library_scope)
+             WHERE a.library_id IN (SELECT library_id FROM library_scope)
                AND a.file_status='present'
              ORDER BY a.id ASC",
         )?;
@@ -2078,8 +2201,9 @@ impl Repository {
                      WITH RECURSIVE library_scope(library_id) AS (
                          SELECT id FROM libraries WHERE id=?1
                          UNION
-                         SELECT child.id FROM libraries child
-                         JOIN library_scope scope ON child.parent_library_id=scope.library_id
+                    SELECT child.id FROM libraries child
+                 JOIN library_scope scope ON child.parent_library_id=scope.library_id
+                     AND child.parent_relation='source'
                      )
                      SELECT library_id FROM library_scope
                  )
@@ -2102,18 +2226,14 @@ impl Repository {
              JOIN thumbnails t
                ON t.asset_id=a.id AND t.spec={thumbnail_spec} AND t.status='ready'
               AND t.source_modified_at=a.modified_at AND t.source_size=a.file_size
-             WHERE COALESCE(
-                     (SELECT assignment.library_id
-                      FROM asset_library_assignments assignment
-                      WHERE assignment.asset_id=a.id),
-                     a.library_id
-                   ) IN (
+              WHERE a.library_id IN (
                  WITH RECURSIVE library_scope(library_id) AS (
                      SELECT id FROM libraries WHERE id=?1
                      UNION
                      SELECT child.id FROM libraries child
-                     JOIN library_scope scope ON child.parent_library_id=scope.library_id
-                 )
+                      JOIN library_scope scope ON child.parent_library_id=scope.library_id
+                          AND child.parent_relation='source'
+                  )
                  SELECT library_id FROM library_scope
              )
                AND a.file_status='present' AND a.analysis_status='completed'",
@@ -2980,7 +3100,8 @@ fn load_asset_by_id(connection: &Connection, asset_id: i64) -> AppResult<AssetLi
                     cf.saturation_mean, cf.chroma_mean, cf.saturation_label, cf.dominant_color_rgb,
                     cf.dominant_color_category, cf.neutral_ratio, cf.dominant_color_coverage,
                     a.semantic_status, a.semantic_error,
-                    a.semantic_analyzed_at, a.rating, a.color_label, cf.dominant_colors_json
+                    a.semantic_analyzed_at, a.rating, a.color_label, cf.dominant_colors_json,
+                    a.is_favorite
              FROM assets a
              LEFT JOIN thumbnails t ON t.asset_id=a.id AND t.spec=?1
              LEFT JOIN tone_features tf ON tf.asset_id=a.id
@@ -3033,6 +3154,7 @@ fn load_asset_by_id(connection: &Connection, asset_id: i64) -> AppResult<AssetLi
                     semantic_analyzed_at: row.get(36)?,
                     rating: row.get(37)?,
                     color_label: row.get(38)?,
+                    is_favorite: row.get(40)?,
                     semantic_labels: Vec::new(),
                     classification: EffectiveClassification::default(),
                 })
@@ -3042,32 +3164,142 @@ fn load_asset_by_id(connection: &Connection, asset_id: i64) -> AppResult<AssetLi
         .ok_or_else(|| AppError::NotFound(format!("asset {asset_id}")))
 }
 
-fn asset_filter_sql(library_id: i64, filter: &AssetFilter) -> (String, Vec<Value>) {
+fn legacy_asset_query(
+    library_id: i64,
+    sort: AssetSortField,
+    direction: SortDirection,
+    page: u32,
+    page_size: u32,
+    filter: &AssetFilter,
+) -> AssetQuery {
+    let root = AssetQueryRoot::Source { library_id };
+    AssetQuery {
+        version: ASSET_QUERY_VERSION,
+        root,
+        include_descendants: true,
+        filter: filter.clone(),
+        sort,
+        direction,
+        page,
+        page_size,
+    }
+}
+
+fn validate_asset_query(query: &AssetQuery) -> AppResult<()> {
+    if query.version != ASSET_QUERY_VERSION {
+        return Err(AppError::InvalidArgument(format!(
+            "unsupported asset query version: {}",
+            query.version
+        )));
+    }
+    match query.root {
+        AssetQueryRoot::All => {}
+        AssetQueryRoot::Source { library_id }
+        | AssetQueryRoot::Collection {
+            collection_id: library_id,
+        } if library_id <= 0 => {
+            return Err(AppError::InvalidArgument(
+                "asset query root id must be positive".into(),
+            ));
+        }
+        AssetQueryRoot::Favorites => {}
+        AssetQueryRoot::Source { .. } | AssetQueryRoot::Collection { .. } => {}
+    }
+    Ok(())
+}
+
+fn asset_query_scope_sql(query: &AssetQuery) -> (String, Vec<Value>) {
+    match query.root {
+        AssetQueryRoot::All => ("1=1".into(), Vec::new()),
+        AssetQueryRoot::Source { library_id } => {
+            if query.include_descendants {
+                (
+                    "a.library_id IN (
+                        WITH RECURSIVE library_scope(library_id) AS (
+                            SELECT id FROM libraries WHERE id=?
+                            UNION
+                            SELECT child.id
+                            FROM libraries child
+                            JOIN library_scope scope
+                              ON child.parent_library_id=scope.library_id
+                             AND child.parent_relation='source'
+                        )
+                        SELECT library_id FROM library_scope
+                    )"
+                    .into(),
+                    vec![Value::Integer(library_id)],
+                )
+            } else {
+                ("a.library_id=?".into(), vec![Value::Integer(library_id)])
+            }
+        }
+        AssetQueryRoot::Collection { collection_id } => {
+            if query.include_descendants {
+                (
+                    "EXISTS(
+                        WITH RECURSIVE collection_scope(collection_id) AS (
+                            SELECT id FROM collections WHERE id=?
+                            UNION
+                            SELECT child.id
+                            FROM collections child
+                            JOIN collection_scope parent
+                              ON child.parent_collection_id=parent.collection_id
+                        )
+                        SELECT 1
+                        FROM collection_assets membership
+                        JOIN collection_scope scope
+                          ON scope.collection_id=membership.collection_id
+                        WHERE membership.asset_id=a.id
+                    )"
+                    .into(),
+                    vec![Value::Integer(collection_id)],
+                )
+            } else {
+                (
+                    "EXISTS(
+                        SELECT 1 FROM collection_assets membership
+                        WHERE membership.collection_id=?
+                          AND membership.asset_id=a.id
+                    )"
+                    .into(),
+                    vec![Value::Integer(collection_id)],
+                )
+            }
+        }
+        AssetQueryRoot::Favorites => (
+            "EXISTS(
+                SELECT 1
+                FROM collection_assets favorite_membership
+                JOIN collections favorite_collection
+                  ON favorite_collection.id=favorite_membership.collection_id
+                WHERE favorite_collection.system_key='default_favorites'
+                  AND favorite_membership.asset_id=a.id
+            )"
+            .into(),
+            Vec::new(),
+        ),
+    }
+}
+
+fn asset_filter_sql(query: &AssetQuery) -> (String, Vec<Value>) {
     let active_model_name = active_semantic_model_sql("name", SIGLIP2_MODEL_NAME);
     let active_model_version = active_semantic_model_sql("version", SIGLIP2_MODEL_VERSION);
     let active_analysis_version =
         active_semantic_model_sql("analysis_version", SIGLIP2_ANALYSIS_VERSION);
-    let mut clauses = vec![
-        "COALESCE(
-            (SELECT assignment.library_id
-             FROM asset_library_assignments assignment
-             WHERE assignment.asset_id=a.id),
-            a.library_id
-        ) IN (
-            WITH RECURSIVE library_scope(library_id) AS (
-                SELECT id FROM libraries WHERE id=?
-                UNION
-                SELECT child.id
-                FROM libraries child
-                JOIN library_scope scope ON child.parent_library_id = scope.library_id
-            )
-            SELECT library_id FROM library_scope
-        )"
-        .to_string(),
-    ];
-    let mut values = vec![Value::Integer(library_id)];
+    let (scope_sql, mut values) = asset_query_scope_sql(query);
+    let mut clauses = vec![scope_sql];
+    let filter = &query.filter;
     if filter.favorite_only {
-        clauses.push("a.is_favorite=1".into());
+        clauses.push(
+            "EXISTS(
+                SELECT 1 FROM collection_assets favorite_membership
+                JOIN collections favorite_collection
+                  ON favorite_collection.id=favorite_membership.collection_id
+                WHERE favorite_collection.system_key='default_favorites'
+                  AND favorite_membership.asset_id=a.id
+            )"
+            .into(),
+        );
     }
     if let Some(collection_id) = filter.collection_id {
         clauses.push(
@@ -4438,6 +4670,214 @@ fn path_depth(value: &str) -> usize {
         .count()
 }
 
+fn migrate_unified_source_collection(transaction: &Transaction<'_>) -> AppResult<()> {
+    normalize_source_hierarchy_for_migration(transaction)?;
+
+    let default_collection_id = ensure_default_collection(transaction)?;
+    let timestamp = now();
+    transaction.execute(
+        "INSERT OR IGNORE INTO collection_assets(collection_id, asset_id, added_at)
+         SELECT ?1, id, ?2 FROM assets WHERE is_favorite=1",
+        params![default_collection_id, timestamp],
+    )?;
+    transaction.execute(
+        "UPDATE assets
+         SET is_favorite=CASE WHEN EXISTS(
+             SELECT 1 FROM collection_assets ca
+             WHERE ca.collection_id=?1 AND ca.asset_id=assets.id
+         ) THEN 1 ELSE 0 END",
+        [default_collection_id],
+    )?;
+
+    migrate_legacy_asset_library_assignments(transaction)?;
+    Ok(())
+}
+
+fn normalize_source_hierarchy_for_migration(transaction: &Transaction<'_>) -> AppResult<()> {
+    let rows = {
+        let mut statement = transaction.prepare(
+            "SELECT id, root_path, source_path
+             FROM libraries ORDER BY id",
+        )?;
+        statement
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            })?
+            .collect::<Result<Vec<_>, _>>()?
+    };
+
+    let mut libraries = Vec::with_capacity(rows.len());
+    for (library_id, root_path, source_path) in rows {
+        let source_path = if source_path.trim().is_empty() {
+            root_path
+        } else {
+            source_path
+        };
+        let source_identity_key = if source_path.trim().is_empty() {
+            String::new()
+        } else {
+            identity_key(Path::new(&source_path))
+        };
+        transaction.execute(
+            "UPDATE libraries
+             SET source_path=?2, source_identity_key=?3,
+                 parent_library_id=NULL, parent_relation='source'
+             WHERE id=?1",
+            params![library_id, source_path, source_identity_key],
+        )?;
+        if !source_identity_key.is_empty() {
+            libraries.push((library_id, source_identity_key));
+        }
+    }
+
+    for (library_id, source_identity_key) in &libraries {
+        let parent_library_id = libraries
+            .iter()
+            .filter(|(candidate_id, candidate_key)| {
+                candidate_id != library_id
+                    && is_same_or_descendant(candidate_key, source_identity_key)
+            })
+            .max_by_key(|(candidate_id, candidate_key)| (path_depth(candidate_key), -*candidate_id))
+            .map(|(candidate_id, _)| *candidate_id);
+        transaction.execute(
+            "UPDATE libraries SET parent_library_id=?2, parent_relation='source'
+             WHERE id=?1",
+            params![library_id, parent_library_id],
+        )?;
+    }
+    Ok(())
+}
+
+fn root_collection_name_exists(transaction: &Transaction<'_>, name: &str) -> AppResult<bool> {
+    Ok(transaction.query_row(
+        "SELECT EXISTS(
+             SELECT 1 FROM collections
+             WHERE parent_collection_id IS NULL AND name=?1 COLLATE NOCASE
+         )",
+        [name],
+        |row| row.get(0),
+    )?)
+}
+
+fn available_root_collection_name(
+    transaction: &Transaction<'_>,
+    base_name: &str,
+    conflict_suffix: &str,
+) -> AppResult<String> {
+    let base_name = if base_name.trim().is_empty() {
+        "收藏夹"
+    } else {
+        base_name.trim()
+    };
+    for attempt in 0..10_000_i64 {
+        let candidate = match attempt {
+            0 => base_name.to_owned(),
+            1 => format!("{base_name}{conflict_suffix}"),
+            value => format!("{base_name}{conflict_suffix} {value}"),
+        };
+        if !root_collection_name_exists(transaction, &candidate)? {
+            return Ok(candidate);
+        }
+    }
+    Err(AppError::InvalidArgument(format!(
+        "unable to allocate a unique collection name for {base_name}"
+    )))
+}
+
+fn ensure_default_collection(transaction: &Transaction<'_>) -> AppResult<i64> {
+    if let Some(collection_id) = transaction
+        .query_row(
+            "SELECT id FROM collections WHERE system_key='default_favorites'",
+            [],
+            |row| row.get(0),
+        )
+        .optional()?
+    {
+        return Ok(collection_id);
+    }
+
+    let name = available_root_collection_name(transaction, "默认收藏", "（系统）")?;
+    let timestamp = now();
+    transaction.execute(
+        "INSERT INTO collections(
+             name, description, created_at, updated_at,
+             parent_collection_id, collection_kind, system_key, display_order
+         ) VALUES(?1, '', ?2, ?2, NULL, 'system_favorites',
+                  'default_favorites', -1)",
+        params![name, timestamp],
+    )?;
+    Ok(transaction.last_insert_rowid())
+}
+
+fn migrate_legacy_asset_library_assignments(transaction: &Transaction<'_>) -> AppResult<()> {
+    let assignments = {
+        let mut statement = transaction.prepare(
+            "SELECT assignment.asset_id, assignment.library_id, assignment.assigned_at,
+                    library.name, library.source_path, library.root_path
+             FROM asset_library_assignments assignment
+             LEFT JOIN libraries library ON library.id=assignment.library_id
+             ORDER BY assignment.library_id, assignment.asset_id",
+        )?;
+        statement
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, Option<String>>(3)?,
+                    row.get::<_, Option<String>>(4)?,
+                    row.get::<_, Option<String>>(5)?,
+                ))
+            })?
+            .collect::<Result<Vec<_>, _>>()?
+    };
+
+    let mut collection_by_library = HashMap::<i64, i64>::new();
+    for (asset_id, library_id, assigned_at, library_name, source_path, root_path) in assignments {
+        let Some(library_name) = library_name
+            .or(source_path)
+            .or(root_path)
+            .filter(|value| !value.trim().is_empty())
+        else {
+            return Err(AppError::InvalidArgument(format!(
+                "legacy asset assignment {asset_id} points to missing library {library_id}"
+            )));
+        };
+        let collection_id = if let Some(collection_id) = collection_by_library.get(&library_id) {
+            *collection_id
+        } else {
+            let name = available_root_collection_name(transaction, &library_name, "（迁移）")?;
+            let timestamp = now();
+            transaction.execute(
+                "INSERT INTO collections(
+                     name, description, created_at, updated_at,
+                     parent_collection_id, collection_kind, system_key, display_order
+                 ) VALUES(?1, '由旧图库归属迁移', ?2, ?2, NULL, 'manual', NULL,
+                          COALESCE((SELECT MAX(display_order)+1 FROM collections), 0))",
+                params![name, timestamp],
+            )?;
+            let collection_id = transaction.last_insert_rowid();
+            collection_by_library.insert(library_id, collection_id);
+            collection_id
+        };
+        let added_at = if assigned_at.trim().is_empty() {
+            now()
+        } else {
+            assigned_at
+        };
+        transaction.execute(
+            "INSERT OR IGNORE INTO collection_assets(collection_id, asset_id, added_at)
+             VALUES(?1, ?2, ?3)",
+            params![collection_id, asset_id, added_at],
+        )?;
+    }
+    Ok(())
+}
+
 fn relative_path_for_owner(owner_source_path: &Path, absolute_path: &Path) -> String {
     if let Ok(relative) = absolute_path.strip_prefix(owner_source_path) {
         return relative.to_string_lossy().into_owned();
@@ -4531,7 +4971,7 @@ mod tests {
         let repository = Repository::new(temp.path().join("database.sqlite3"));
         repository.initialize().expect("first initialization");
         repository.initialize().expect("second initialization");
-        assert_eq!(repository.migration_version().expect("version"), 14);
+        assert_eq!(repository.migration_version().expect("version"), 16);
         let connection = repository.open().expect("connection");
         for table in [
             "organization_plans",
@@ -4563,6 +5003,260 @@ mod tests {
                 .expect("column lookup");
             assert_eq!(exists, 1, "missing asset column {column}");
         }
+    }
+
+    fn initialize_legacy_schema_at_version_15(repository: &Repository) {
+        let mut connection = repository.open().expect("legacy database");
+        connection
+            .execute_batch(
+                "CREATE TABLE schema_migrations(
+                     version INTEGER PRIMARY KEY,
+                     applied_at TEXT NOT NULL
+                 )",
+            )
+            .expect("schema migrations");
+        let migrations = [
+            (1_i64, INITIAL_MIGRATION),
+            (2_i64, SEMANTIC_MIGRATION),
+            (3_i64, ORGANIZATION_MIGRATION),
+            (4_i64, LIBRARY_UX_MIGRATION),
+            (5_i64, LIBRARY_SOURCE_MIGRATION),
+            (6_i64, ASSET_IDENTITY_MIGRATION),
+            (7_i64, MANUAL_LIBRARY_HIERARCHY_MIGRATION),
+            (8_i64, ASSET_LIBRARY_ASSIGNMENT_MIGRATION),
+            (9_i64, MANUAL_CLASSIFICATION_MIGRATION),
+            (10_i64, MANUAL_ASSET_MARKS_MIGRATION),
+            (11_i64, PHOTO_WORKFLOW_MVP_MIGRATION),
+            (12_i64, SEMANTIC_TAXONOMY_MIGRATION),
+            (13_i64, PLACES365_EVIDENCE_MIGRATION),
+            (14_i64, SUBJECT_ANALYSIS_MIGRATION),
+            (15_i64, IMPORT_SUBFOLDER_SCOPE_MIGRATION),
+        ];
+        for (version, sql) in migrations {
+            let transaction = connection
+                .transaction()
+                .expect("legacy migration transaction");
+            transaction
+                .execute_batch(sql)
+                .expect("legacy migration SQL");
+            transaction
+                .execute(
+                    "INSERT INTO schema_migrations(version, applied_at)
+                     VALUES(?1, ?2)",
+                    params![version, now()],
+                )
+                .expect("legacy migration marker");
+            transaction.commit().expect("legacy migration commit");
+        }
+    }
+
+    #[test]
+    fn unified_source_collection_migration_preserves_ownership_and_memberships() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let repository = Repository::new(temp.path().join("legacy.sqlite3"));
+        initialize_legacy_schema_at_version_15(&repository);
+
+        let connection = repository.open().expect("legacy fixture connection");
+        connection
+            .execute(
+                "INSERT INTO libraries(
+                     root_path, created_at, name, source_path, source_identity_key,
+                     parent_library_id, parent_relation
+                 ) VALUES('C:\\Photos', ?1, 'Photos', 'C:\\Photos', 'legacy-parent', NULL, 'source')",
+                [now()],
+            )
+            .expect("parent source");
+        let parent_library_id = connection.last_insert_rowid();
+        connection
+            .execute(
+                "INSERT INTO libraries(
+                     root_path, created_at, name, source_path, source_identity_key,
+                     parent_library_id, parent_relation
+                 ) VALUES('C:\\Photos\\Travel', ?1, 'Travel', 'C:\\Photos\\Travel',
+                          'legacy-child', ?2, 'manual')",
+                params![now(), parent_library_id],
+            )
+            .expect("manual child source");
+        let child_library_id = connection.last_insert_rowid();
+        connection
+            .execute(
+                "INSERT INTO libraries(
+                     root_path, created_at, name, source_path, source_identity_key,
+                     parent_library_id, parent_relation
+                 ) VALUES('D:\\Old Target', ?1, '精选', 'D:\\Old Target',
+                          'legacy-target', NULL, 'source')",
+                [now()],
+            )
+            .expect("assignment target source");
+        let target_library_id = connection.last_insert_rowid();
+
+        connection
+            .execute(
+                "INSERT INTO collections(name, description, created_at, updated_at)
+                 VALUES('精选', 'legacy collection', ?1, ?1)",
+                [now()],
+            )
+            .expect("legacy collection");
+        let legacy_collection_id = connection.last_insert_rowid();
+
+        for (asset_id, library_id, file_name, favorite) in [
+            (1_i64, parent_library_id, "parent.jpg", 1_i64),
+            (2_i64, child_library_id, "child.jpg", 0_i64),
+        ] {
+            let absolute_path = if asset_id == 1 {
+                "C:\\Photos\\parent.jpg"
+            } else {
+                "C:\\Photos\\Travel\\child.jpg"
+            };
+            connection
+                .execute(
+                    "INSERT INTO assets(
+                         id, library_id, absolute_path, relative_path, file_name, extension,
+                         file_size, modified_at, fingerprint, file_status, scan_status,
+                         analysis_status, first_seen_at, last_seen_at, last_seen_scan,
+                         asset_identity_key, is_favorite
+                     ) VALUES(?1, ?2, ?3, ?4, ?5, 'jpg', 10, 1, ?6, 'present',
+                              'indexed', 'completed', ?7, ?7, 1, ?8, ?9)",
+                    params![
+                        asset_id,
+                        library_id,
+                        absolute_path,
+                        file_name,
+                        file_name,
+                        format!("legacy-{asset_id}"),
+                        now(),
+                        format!("legacy-identity-{asset_id}"),
+                        favorite,
+                    ],
+                )
+                .expect("legacy asset");
+        }
+        connection
+            .execute(
+                "INSERT INTO collection_assets(collection_id, asset_id, added_at)
+                 VALUES(?1, 1, ?2)",
+                params![legacy_collection_id, now()],
+            )
+            .expect("legacy collection member");
+        connection
+            .execute(
+                "INSERT INTO asset_library_assignments(asset_id, library_id, assigned_at)
+                 VALUES(1, ?1, ?2)",
+                params![target_library_id, now()],
+            )
+            .expect("legacy assignment");
+        drop(connection);
+
+        repository.initialize().expect("apply unified migration");
+
+        let connection = repository.open().expect("migrated connection");
+        let default_collection: (i64, String, String) = connection
+            .query_row(
+                "SELECT id, collection_kind, system_key
+                 FROM collections WHERE system_key='default_favorites'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .expect("default collection");
+        assert_eq!(default_collection.1, "system_favorites");
+        assert_eq!(default_collection.2, "default_favorites");
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT COUNT(*) FROM collection_assets
+                     WHERE collection_id=?1 AND asset_id=1",
+                    [default_collection.0],
+                    |row| row.get::<_, i64>(0),
+                )
+                .expect("default member"),
+            1
+        );
+        assert_eq!(
+            connection
+                .query_row("SELECT is_favorite FROM assets WHERE id=1", [], |row| {
+                    row.get::<_, i64>(0)
+                })
+                .expect("favorite mirror"),
+            1
+        );
+        let migrated_collection: (i64, String) = connection
+            .query_row(
+                "SELECT id, name FROM collections
+                 WHERE description='由旧图库归属迁移'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("assignment collection");
+        assert_eq!(migrated_collection.1, "精选（迁移）");
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT COUNT(*) FROM collection_assets
+                     WHERE collection_id=?1 AND asset_id=1",
+                    [migrated_collection.0],
+                    |row| row.get::<_, i64>(0),
+                )
+                .expect("assignment member"),
+            1
+        );
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT COUNT(*) FROM asset_library_assignments
+                     WHERE asset_id=1 AND library_id=?1",
+                    [target_library_id],
+                    |row| row.get::<_, i64>(0),
+                )
+                .expect("legacy assignment retained"),
+            1
+        );
+        let child_parent: (Option<i64>, String) = connection
+            .query_row(
+                "SELECT parent_library_id, parent_relation
+                 FROM libraries WHERE id=?1",
+                [child_library_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("source hierarchy");
+        assert_eq!(child_parent, (Some(parent_library_id), "source".into()));
+        drop(connection);
+
+        let target_assets = repository
+            .list_assets(
+                target_library_id,
+                AssetSortField::FileName,
+                SortDirection::Asc,
+                1,
+                20,
+                &AssetFilter::default(),
+            )
+            .expect("target source query");
+        assert_eq!(target_assets.total, 0);
+        let source_assets = repository
+            .list_assets(
+                parent_library_id,
+                AssetSortField::FileName,
+                SortDirection::Asc,
+                1,
+                20,
+                &AssetFilter::default(),
+            )
+            .expect("source query");
+        assert_eq!(source_assets.total, 2);
+
+        repository.initialize().expect("repeat unified migration");
+        let connection = repository.open().expect("reopened migrated connection");
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT COUNT(*) FROM collections
+                     WHERE system_key='default_favorites'",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .expect("one default collection"),
+            1
+        );
     }
 
     #[test]
@@ -5276,9 +5970,7 @@ mod tests {
         repository.initialize().expect("initialize");
         let (library_id, asset_id) = seed_classifiable_asset(&repository, "sources");
         let connection = repository.open().expect("open database");
-        connection
-            .execute("UPDATE assets SET is_favorite=1 WHERE id=?1", [asset_id])
-            .expect("mark favorite");
+        crate::workflow::set_favorite(&repository, asset_id, true).expect("mark favorite");
 
         let favorite_page = repository
             .list_assets(
@@ -5325,6 +6017,150 @@ mod tests {
             )
             .expect("collection source");
         assert_eq!(collection_page.total, 1);
+    }
+
+    #[test]
+    fn asset_query_roots_share_paging_and_collection_descendants() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let repository = Repository::new(temp.path().join("database.sqlite3"));
+        repository.initialize().expect("initialize");
+        let (first_library_id, first_asset_id) =
+            seed_classifiable_asset(&repository, "query-root-first");
+        let (second_library_id, second_asset_id) =
+            seed_classifiable_asset(&repository, "query-root-second");
+        crate::workflow::set_favorite(&repository, first_asset_id, true).expect("favorite");
+
+        let connection = repository.open().expect("open database");
+        connection
+            .execute(
+                "INSERT INTO collections(name, description, created_at, updated_at)
+                 VALUES('Query parent', '', ?1, ?1)",
+                [now()],
+            )
+            .expect("create parent collection");
+        let parent_collection_id = connection.last_insert_rowid();
+        connection
+            .execute(
+                "INSERT INTO collections(
+                     name, description, created_at, updated_at, parent_collection_id
+                 ) VALUES('Query child', '', ?1, ?1, ?2)",
+                params![now(), parent_collection_id],
+            )
+            .expect("create child collection");
+        let child_collection_id = connection.last_insert_rowid();
+        connection
+            .execute(
+                "INSERT INTO collection_assets(collection_id, asset_id, added_at)
+                 VALUES(?1, ?2, ?3), (?4, ?5, ?3)",
+                params![
+                    parent_collection_id,
+                    second_asset_id,
+                    now(),
+                    child_collection_id,
+                    first_asset_id
+                ],
+            )
+            .expect("add collection members");
+        connection
+            .execute(
+                "INSERT INTO collection_assets(collection_id, asset_id, added_at)
+                 VALUES(?1, ?2, ?3)",
+                params![parent_collection_id, first_asset_id, now()],
+            )
+            .expect("add overlapping parent member");
+        drop(connection);
+
+        let query = |root| {
+            repository
+                .query_assets(&AssetQuery {
+                    version: ASSET_QUERY_VERSION,
+                    root,
+                    include_descendants: true,
+                    filter: AssetFilter::default(),
+                    sort: AssetSortField::FileName,
+                    direction: SortDirection::Asc,
+                    page: 1,
+                    page_size: 100,
+                })
+                .expect("query assets")
+        };
+
+        assert_eq!(query(AssetQueryRoot::All).total, 2);
+        assert_eq!(
+            query(AssetQueryRoot::Source {
+                library_id: first_library_id
+            })
+            .total,
+            1
+        );
+        assert_eq!(query(AssetQueryRoot::Favorites).total, 1);
+        let legacy_favorite_page = repository
+            .list_assets(
+                second_library_id,
+                AssetSortField::FileName,
+                SortDirection::Asc,
+                1,
+                100,
+                &AssetFilter {
+                    favorite_only: true,
+                    ..AssetFilter::default()
+                },
+            )
+            .expect("legacy source favorite query");
+        assert_eq!(legacy_favorite_page.total, 0);
+        assert_eq!(
+            query(AssetQueryRoot::Collection {
+                collection_id: parent_collection_id
+            })
+            .total,
+            2
+        );
+
+        let direct_collection = repository
+            .query_assets(&AssetQuery {
+                version: ASSET_QUERY_VERSION,
+                root: AssetQueryRoot::Collection {
+                    collection_id: parent_collection_id,
+                },
+                include_descendants: false,
+                filter: AssetFilter::default(),
+                sort: AssetSortField::FileName,
+                direction: SortDirection::Asc,
+                page: 1,
+                page_size: 100,
+            })
+            .expect("direct collection query");
+        assert_eq!(direct_collection.total, 2);
+        assert!(
+            direct_collection
+                .items
+                .iter()
+                .any(|asset| asset.id == second_asset_id)
+        );
+        assert!(
+            repository
+                .list_assets_for_organization(
+                    first_library_id,
+                    &AssetFilter {
+                        collection_id: Some(parent_collection_id),
+                        ..AssetFilter::default()
+                    },
+                    None,
+                )
+                .is_err()
+        );
+        assert!(
+            repository
+                .list_assets_for_organization(
+                    second_library_id,
+                    &AssetFilter {
+                        favorite_only: true,
+                        ..AssetFilter::default()
+                    },
+                    None,
+                )
+                .is_err()
+        );
     }
 
     #[test]
@@ -5815,8 +6651,7 @@ mod tests {
                 &AssetFilter::default(),
             )
             .expect("target assets");
-        assert_eq!(target_assets.total, 1);
-        assert_eq!(target_assets.items[0].library_id, source_library);
+        assert_eq!(target_assets.total, 0);
         assert_eq!(
             repository.asset_source(asset_id).expect("source after"),
             before_source

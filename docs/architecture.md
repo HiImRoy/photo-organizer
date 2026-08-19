@@ -7,7 +7,7 @@ PhotoOrganizer 使用 Tauri 2 承载 React/TypeScript UI，扫描、图像处理
 ```text
 React 专业工作区
   ├─ 顶部工具栏：视图、搜索、排序、导入、语义任务
-  ├─ 左侧：图库、来源（收藏/集合）、目录、多维筛选
+  ├─ 左侧：图库、影调与颜色、目录、多维筛选、来源（收藏/集合）
   ├─ 中央：网格 / 单图画布 / 胶片栏 / 上下文审阅工具区
   └─ 右侧：文件、EXIF、影调色彩、语义结果
           │ Tauri IPC + scan-progress / semantic-progress
@@ -43,17 +43,18 @@ User-selected source directory: read-only during scan and analysis
 - `ipc.rs`：唯一暴露给 UI 的命令；模型状态只报告实际启用的 provider。
 - 高清预览通过 `get_preview_data_url(asset_id, tier)` 受控读取：screen tier 以 EXIF 方向提取并缓存不超过约 2560px 的 JPEG，original tier 只为当前查看器临时读取原图；两者都不写入源目录。预览是查看行为，不得被复用为导入/分析的原图解码器。
 - `remove_library(library_id)` 先取消该图库的活动任务，再用 SQLite 外键事务清理索引、分析、任务和计划，并只清理没有其他资产引用的应用 cache；前端移除父图库前会明确询问是否逐级移除嵌套子图库；它不调用源目录删除、移动或重命名。
-- `migrations/`：只增不改、随二进制嵌入的 SQLite schema。
+- `migrations/`：旧文件只增不改、随二进制嵌入的 SQLite schema；需要收敛旧数据时允许在新 migration 事务内重建目标表并调用 Rust 迁移助手。
 
 ## 主界面工作流数据流
 
-1. 收藏直接更新 `assets.is_favorite`；集合通过 `collections` / `collection_assets` 保存多对多虚拟成员，不改变 `library_id`、路径或文件。
-2. 收藏来源通过 `AssetFilter.favoriteOnly` 查询 `assets.is_favorite`；集合来源通过 `AssetFilter.collectionId` 查询 `collection_assets`。二者与题材、影调、色相范围/严格程度和数值筛选共享计数、分页和结果契约。色相严格程度将选中色相在缩略图色相直方图中的最低占比从约 8% 调整到约 75%，不会触发原图解码。
-3. 精确重复查询复用扫描生成的完整 BLAKE3，不重新读取源图；结果只用于审阅或生成虚拟“重复待处理”集合。
-4. 文本查询调用当前已装载题材模型的文本输出，默认是 SigLIP 2；题材候选保留为可审计证据，当前可观察场景主类由 Places365 映射证据决定，主体模型可在任务层补充人像、动物、车辆、食品和植物等题材；图片搜索和聚类只读取与当前模型、分析版本和源 fingerprint 一致的 `semantic_embeddings`。
-5. 相似聚类用向量主维度建立有界候选窗口，再做精确余弦与 complete-link 拆分；当前 5000 个 embedding 上限会明确报告截断。
-6. 编辑预览与导出都调用同一个 Rust `EditRecipe`。导出先持久化 `edit_export_plans`，确认时重验源 fingerprint 和目标边界（目标父目录先 canonicalize，避免 junction/symlink 绕过），并在写文件前记录 `file_operation_jobs/file_operations`；回滚同样先预览并重验生成副本哈希，只删除未变化的应用生成副本。
-7. 旧的人脸表和身份 clear-all 边界仍然独立保留；新的主体工作流只写 `subject_analysis_runs` / `subject_labels`，不写检测框、身份向量或聚类。
+1. 本地来源由 `libraries` 和 `assets.library_id` 表示；虚拟收藏由 `collections` / `collection_assets` 表示。收藏、拖拽和虚拟移动不改变 `library_id`、路径或文件。
+2. 默认收藏使用 `system_key='default_favorites'`，其成员关系是真实爱心状态，`assets.is_favorite` 暂作为兼容镜像。普通 Collection 支持多对多关系和后续树形层级；旧 `asset_library_assignments` 只保留作迁移兼容，不再覆盖 Source 查询。
+3. 0053 的 AssetQuery v2 以 `root + includeDescendants + filter + sort + page` 统一承载 Source、All、默认收藏和普通 Collection；旧 `favoriteOnly`、`collectionId` 和 `libraryId` 通过 V1 兼容适配器转换。AssetFilter、计数、分页、色相范围/严格程度和数值筛选共享同一查询契约，不触发原图解码。
+4. 精确重复查询复用扫描生成的完整 BLAKE3，不重新读取源图；结果只用于审阅或生成虚拟“重复待处理”集合。
+5. 文本查询调用当前已装载题材模型的文本输出，默认是 SigLIP 2；题材候选保留为可审计证据，当前可观察场景主类由 Places365 映射证据决定，主体模型可在任务层补充人像、动物、车辆、食品和植物等题材；图片搜索和聚类只读取与当前模型、分析版本和源 fingerprint 一致的 `semantic_embeddings`。
+6. 相似聚类用向量主维度建立有界候选窗口，再做精确余弦与 complete-link 拆分；当前 5000 个 embedding 上限会明确报告截断。
+7. 编辑预览与导出都调用同一个 Rust `EditRecipe`。导出先持久化 `edit_export_plans`，确认时重验源 fingerprint 和目标边界（目标父目录先 canonicalize，避免 junction/symlink 绕过），并在写文件前记录 `file_operation_jobs/file_operations`；回滚同样先预览并重验生成副本哈希，只删除未变化的应用生成副本。
+8. 旧的人脸表和身份 clear-all 边界仍然独立保留；新的主体工作流只写 `subject_analysis_runs` / `subject_labels`，不写检测框、身份向量或聚类。
 
 ## 扫描与语义数据流
 

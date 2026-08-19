@@ -33,15 +33,25 @@ import {
   type EditRecipe,
   type EditRollbackPlan,
   type LocalSearchResponse,
+  MANUAL_COLOR_LABEL_OPTIONS,
   type AssetScopeDescription,
   type AssetScopeInputV1,
+  type ManualColorLabel,
   type SimilarAsset,
   type SimilarityClusterResponse,
   type WorkflowAsset,
 } from "../types";
+import { ArrowUpIcon, CheckIcon, CloseIcon, SearchIcon } from "./Icons";
+import { RatingStars } from "./RatingStars";
 
 export type WorkflowTool =
   "favorites" | "collections" | "search" | "duplicates" | "similar" | "compare" | "edit";
+
+export type WorkflowSelectionModifiers = {
+  ctrlKey?: boolean;
+  metaKey?: boolean;
+  shiftKey?: boolean;
+};
 
 interface WorkflowWorkspaceProps {
   libraryId: number;
@@ -50,22 +60,30 @@ interface WorkflowWorkspaceProps {
   scope: AssetScopeInputV1;
   scopeDescription: AssetScopeDescription;
   onSelectAsset: (assetId: number) => void;
+  onToggleSelection: (assetId: number, modifiers?: WorkflowSelectionModifiers) => void;
+  onUpdateRating: (assetId: number, rating: number) => void | Promise<void>;
+  onUpdateColorLabel: (
+    assetId: number,
+    colorLabel: ManualColorLabel | null,
+  ) => void | Promise<void>;
+  onOpenAsset: (assetId: number) => void | Promise<void>;
   onBack: () => void;
   onFavoriteChange: (assetId: number, favorite: boolean) => void;
   onCollectionSourceChange?: (collectionId: number) => void;
   onCollectionsChange?: () => void;
   initialTool?: WorkflowTool;
   embedded?: boolean;
+  floatingSearch?: boolean;
 }
 
-const tabs: ReadonlyArray<{ id: WorkflowTool; label: string; note: string }> = [
-  { id: "favorites", label: "收藏", note: "独立于星级" },
-  { id: "collections", label: "集合", note: "虚拟分组" },
-  { id: "search", label: "AI 搜索", note: "完全本地" },
-  { id: "duplicates", label: "重复清理", note: "只生成审阅集" },
-  { id: "similar", label: "相似聚类", note: "当前题材模型向量" },
-  { id: "compare", label: "比较", note: "最多四张" },
-  { id: "edit", label: "图像编辑", note: "非破坏性" },
+const tabs: ReadonlyArray<{ id: WorkflowTool; label: string }> = [
+  { id: "favorites", label: "收藏" },
+  { id: "collections", label: "集合" },
+  { id: "search", label: "AI 搜索" },
+  { id: "duplicates", label: "重复清理" },
+  { id: "similar", label: "相似聚类" },
+  { id: "compare", label: "比较" },
+  { id: "edit", label: "图像编辑" },
 ];
 
 export function WorkflowWorkspace({
@@ -75,12 +93,17 @@ export function WorkflowWorkspace({
   scope,
   scopeDescription,
   onSelectAsset,
+  onToggleSelection,
+  onUpdateRating,
+  onUpdateColorLabel,
+  onOpenAsset,
   onBack,
   onFavoriteChange,
   onCollectionSourceChange,
   onCollectionsChange,
   initialTool = "search",
   embedded = false,
+  floatingSearch = false,
 }: WorkflowWorkspaceProps) {
   const [tab, setTab] = useState<WorkflowTool>(initialTool);
   const [favorites, setFavorites] = useState<WorkflowAsset[]>([]);
@@ -94,6 +117,7 @@ export function WorkflowWorkspace({
   const [message, setMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const activeTab = tabs.find((item) => item.id === tab) ?? tabs[0];
+  const isFloatingSearch = embedded && floatingSearch && tab === "search";
 
   useEffect(() => {
     let cancelled = false;
@@ -144,17 +168,49 @@ export function WorkflowWorkspace({
     [embedded, onCollectionSourceChange, run],
   );
 
+  const applySearchAssetMarkUpdate = useCallback(
+    (assetId: number, update: Partial<Pick<WorkflowAsset, "rating" | "colorLabel">>) => {
+      const targetIds = selectedAssetIds.includes(assetId) ? selectedAssetIds : [assetId];
+      setSearchResult((current) => {
+        if (!current) return current;
+        return {
+          ...current,
+          items: current.items.map((item) =>
+            targetIds.includes(item.id) ? { ...item, ...update } : item,
+          ),
+        };
+      });
+    },
+    [selectedAssetIds],
+  );
+
+  const updateSearchAssetRating = useCallback(
+    (assetId: number, rating: number) => {
+      applySearchAssetMarkUpdate(assetId, { rating });
+      void onUpdateRating(assetId, rating);
+    },
+    [applySearchAssetMarkUpdate, onUpdateRating],
+  );
+
+  const updateSearchAssetColorLabel = useCallback(
+    (assetId: number, colorLabel: ManualColorLabel | null) => {
+      applySearchAssetMarkUpdate(assetId, { colorLabel });
+      void onUpdateColorLabel(assetId, colorLabel);
+    },
+    [applySearchAssetMarkUpdate, onUpdateColorLabel],
+  );
+
   return (
     <section
-      className={`workflow-workspace${embedded ? " workflow-workspace-embedded" : ""}`}
+      className={`workflow-workspace${embedded ? " workflow-workspace-embedded" : ""}${
+        isFloatingSearch ? " workflow-workspace-floating-search" : ""
+      }`}
       aria-label="查找与审阅"
     >
       {!embedded ? (
         <aside className="workflow-nav">
           <div className="workflow-nav-heading">
-            <small>QUERY / REVIEW CONTEXT</small>
             <h2>查找与审阅</h2>
-            <p>原图只读，收藏与集合只写入本地数据库。</p>
           </div>
           <div className="workflow-scope-summary">
             <strong>{scopeDescription.label}</strong>
@@ -177,15 +233,9 @@ export function WorkflowWorkspace({
                 }}
               >
                 <span>{item.label}</span>
-                <small>{item.note}</small>
               </button>
             ))}
           </nav>
-          <div className="workflow-selection-note">
-            <strong>{selectedAssetIds.length}</strong>
-            <span>张已选择</span>
-            <small>比较、集合和编辑会复用当前范围中的显式选择。</small>
-          </div>
           <button type="button" className="workflow-back-button" onClick={onBack}>
             返回图库
           </button>
@@ -193,26 +243,28 @@ export function WorkflowWorkspace({
       ) : null}
 
       <div className="workflow-content">
-        <header className="workflow-header">
-          <div>
-            <small>{embedded ? `当前范围 · ${scopeDescription.label}` : activeTab.note}</small>
-            <h1>{activeTab.label}</h1>
-            {embedded ? (
-              <span className="workflow-context-scope">
-                {scopeDescription.count.toLocaleString()} 张 ·
-                {scope.kind === "selection" ? "显式选择范围" : "当前查询范围"}
-              </span>
-            ) : null}
-          </div>
-          <div className="workflow-header-actions">
-            <span className="workflow-safety-pill">LOCAL · SOURCE READ-ONLY</span>
-            {embedded ? (
-              <button type="button" className="workflow-back-button" onClick={onBack}>
-                返回图库
-              </button>
-            ) : null}
-          </div>
-        </header>
+        {!isFloatingSearch ? (
+          <header className="workflow-header">
+            <div>
+              {embedded ? <small>当前范围 · {scopeDescription.label}</small> : null}
+              <h1>{activeTab.label}</h1>
+              {embedded ? (
+                <span className="workflow-context-scope">
+                  {scopeDescription.count.toLocaleString()} 张 ·
+                  {scope.kind === "selection" ? "显式选择范围" : "当前查询范围"}
+                </span>
+              ) : null}
+            </div>
+            <div className="workflow-header-actions">
+              <span className="workflow-safety-pill">本地 · 原图只读</span>
+              {embedded ? (
+                <button type="button" className="workflow-back-button" onClick={onBack}>
+                  返回图库
+                </button>
+              ) : null}
+            </div>
+          </header>
+        ) : null}
         {error ? <div className="workflow-banner is-error">{error}</div> : null}
         {message ? <div className="workflow-banner">{message}</div> : null}
         {busy ? <div className="workflow-progress">正在本机处理…</div> : null}
@@ -282,6 +334,21 @@ export function WorkflowWorkspace({
           <SearchView
             result={searchResult}
             onSelect={onSelectAsset}
+            activeAssetId={activeAsset?.id ?? null}
+            selectedAssetIds={selectedAssetIds}
+            onToggleSelection={onToggleSelection}
+            onUpdateRating={updateSearchAssetRating}
+            onUpdateColorLabel={updateSearchAssetColorLabel}
+            onOpenAsset={onOpenAsset}
+            floating={isFloatingSearch}
+            onDismiss={isFloatingSearch ? onBack : undefined}
+            scopeSummary={
+              isFloatingSearch
+                ? `${scopeDescription.count.toLocaleString()} 张 · ${
+                    scope.kind === "selection" ? "显式选择范围" : "当前查询范围"
+                  }`
+                : undefined
+            }
             onSearch={(query) =>
               run(async () => {
                 const result = await searchLocalImages(libraryId, query);
@@ -376,11 +443,7 @@ function FavoritesView({
 }) {
   return (
     <div className="workflow-section">
-      <SectionIntro
-        title="值得回看的图片"
-        body="收藏是独立布尔标记，不会改变 0–5 星评分。点击图片可回到详情上下文。"
-        metric={`${assets.length} 张`}
-      />
+      <SectionIntro title="值得回看的图片" metric={`${assets.length} 张`} />
       {assets.length ? (
         <AssetMosaic
           assets={assets}
@@ -496,42 +559,117 @@ function SearchView({
   result,
   onSearch,
   onSelect,
+  activeAssetId,
+  selectedAssetIds,
+  onToggleSelection,
+  onUpdateRating,
+  onUpdateColorLabel,
+  onOpenAsset,
+  floating = false,
+  onDismiss,
+  scopeSummary,
 }: {
   result: LocalSearchResponse | null;
   onSearch: (query: string) => Promise<void>;
   onSelect: (assetId: number) => void;
+  activeAssetId: number | null;
+  selectedAssetIds: number[];
+  onToggleSelection: (assetId: number, modifiers?: WorkflowSelectionModifiers) => void;
+  onUpdateRating: (assetId: number, rating: number) => void | Promise<void>;
+  onUpdateColorLabel: (
+    assetId: number,
+    colorLabel: ManualColorLabel | null,
+  ) => void | Promise<void>;
+  onOpenAsset: (assetId: number) => void | Promise<void>;
+  floating?: boolean;
+  onDismiss?: () => void;
+  scopeSummary?: string;
 }) {
   const [query, setQuery] = useState("");
   return (
-    <div className="workflow-section">
-      <SectionIntro
-        title="用自然语言找图"
-        body="查询和图片向量均在本机当前题材模型中计算，默认使用 SigLIP 2 Base。支持常见中文主题词映射，不发送到网络。"
-        metric={result ? `${result.items.length} 个结果` : "LOCAL AI"}
-      />
+    <div
+      className={
+        floating ? "workflow-section workflow-search-floating-section" : "workflow-section"
+      }
+    >
+      {floating ? (
+        <div className="ai-search-floating-heading">
+          <div>
+            <SearchIcon width="16" height="16" />
+            <strong>AI 搜索</strong>
+            <span>本地语义检索</span>
+            {scopeSummary ? <small>{scopeSummary}</small> : null}
+          </div>
+          {onDismiss ? (
+            <button
+              type="button"
+              className="ai-search-dismiss"
+              aria-label="关闭 AI 搜索"
+              onClick={onDismiss}
+            >
+              <CloseIcon width="14" height="14" />
+            </button>
+          ) : null}
+        </div>
+      ) : (
+        <SectionIntro
+          title="用自然语言找图"
+          metric={result ? `${result.items.length} 个结果` : "本地"}
+        />
+      )}
       <form
-        className="ai-search-form"
+        className={floating ? "ai-search-form ai-search-form-floating" : "ai-search-form"}
         onSubmit={(event) => {
           event.preventDefault();
           if (query.trim()) void onSearch(query.trim());
         }}
       >
-        <input
+        <textarea
+          rows={2}
           value={query}
+          autoFocus={floating}
           onChange={(event) => setQuery(event.target.value)}
-          placeholder="例如：夜晚的建筑、花、portrait in warm light"
+          onKeyDown={(event) => {
+            if (event.key === "Enter" && (event.ctrlKey || event.metaKey)) {
+              event.preventDefault();
+              event.currentTarget.form?.requestSubmit();
+            }
+          }}
+          placeholder="描述你想找的画面，例如：夜晚的建筑、花、暖色人像"
           aria-label="本地 AI 搜索"
         />
-        <button type="submit">本地搜索</button>
+        <div className="ai-search-composer-footer">
+          <span className="ai-search-composer-note">本地语义检索 · 仅使用已完成分析的图片</span>
+          <button
+            type="submit"
+            className="ai-search-submit"
+            aria-label="本地搜索"
+            title="本地搜索"
+            disabled={!query.trim()}
+          >
+            <ArrowUpIcon width="15" height="15" />
+            <span className="sr-only">搜索</span>
+          </button>
+        </div>
       </form>
       {result ? (
         <>
           <p className="workflow-meta">
             模型查询：{result.normalizedQuery} · 已分析 {result.embeddedAssetCount} 张
           </p>
-          <AssetMosaic assets={result.items} onSelect={onSelect} showSimilarity />
+          <AssetMosaic
+            assets={result.items}
+            onSelect={onSelect}
+            activeAssetId={activeAssetId}
+            selectedAssetIds={selectedAssetIds}
+            onToggleSelection={onToggleSelection}
+            onUpdateRating={onUpdateRating}
+            onUpdateColorLabel={onUpdateColorLabel}
+            onOpen={onOpenAsset}
+            showSimilarity
+          />
         </>
-      ) : (
+      ) : floating ? null : (
         <EmptyWorkflow
           title="输入画面描述"
           body="没有语义向量的图片不会参与搜索，可先在图库运行语义分析。"
@@ -555,11 +693,7 @@ function DuplicatesView({
   const savings = groups.reduce((total, group) => total + group.reclaimableBytes, 0);
   return (
     <div className="workflow-section">
-      <SectionIntro
-        title="精确重复审阅"
-        body="使用扫描阶段的全文件 BLAKE3 指纹。每组第一张按收藏、星级优先作为建议保留项。"
-        metric={`${groups.length} 组 · ${formatBytes(savings)}`}
-      />
+      <SectionIntro title="精确重复审阅" metric={`${groups.length} 组 · ${formatBytes(savings)}`} />
       <div className="workflow-actions">
         <button type="button" onClick={() => void onRefresh()}>
           重新检查
@@ -610,7 +744,6 @@ function SimilarityView({
     <div className="workflow-section">
       <SectionIntro
         title="视觉相似图片"
-        body="复用当前题材模型的图像向量；单图搜索使用精确余弦，相似组先按向量主维度召回再精排。"
         metric={clusters ? `${clusters.clusters.length} 组` : `${similarAssets.length} 张`}
       />
       <div className="workflow-actions similarity-actions">
@@ -681,11 +814,7 @@ function CompareView({ assetIds }: { assetIds: number[] }) {
   }, [assetIds]);
   return (
     <div className="workflow-section compare-section">
-      <SectionIntro
-        title="双图 / 四图比较"
-        body="从图库多选 2–4 张图片。画布共享适应/填充模式，便于构图与细节审阅。"
-        metric={`${assetIds.length} / 4`}
-      />
+      <SectionIntro title="双图 / 四图比较" metric={`${assetIds.length} / 4`} />
       <div className="workflow-actions">
         <button
           type="button"
@@ -963,6 +1092,12 @@ function AssetMosaic({
   onAction,
   showSimilarity = false,
   keeperFirst = false,
+  activeAssetId = null,
+  selectedAssetIds = [],
+  onToggleSelection,
+  onUpdateRating,
+  onUpdateColorLabel,
+  onOpen,
 }: {
   assets: WorkflowAsset[] | SimilarAsset[];
   onSelect: (assetId: number) => void;
@@ -970,42 +1105,171 @@ function AssetMosaic({
   onAction?: (assetId: number) => void;
   showSimilarity?: boolean;
   keeperFirst?: boolean;
+  activeAssetId?: number | null;
+  selectedAssetIds?: number[];
+  onToggleSelection?: (assetId: number, modifiers?: WorkflowSelectionModifiers) => void;
+  onUpdateRating?: (assetId: number, rating: number) => void | Promise<void>;
+  onUpdateColorLabel?: (
+    assetId: number,
+    colorLabel: ManualColorLabel | null,
+  ) => void | Promise<void>;
+  onOpen?: (assetId: number) => void | Promise<void>;
 }) {
   return (
     <div className="workflow-mosaic">
       {assets.map((asset, index) => (
-        <article className="workflow-asset" key={asset.id}>
-          <button
-            type="button"
-            className="workflow-asset-preview"
-            onClick={() => onSelect(asset.id)}
-          >
-            <WorkflowThumbnail assetId={asset.id} fileName={asset.fileName} />
-            {keeperFirst && index === 0 ? <span className="keeper-badge">建议保留</span> : null}
-            {showSimilarity && "similarity" in asset ? (
-              <span className="similarity-badge">{Math.round(asset.similarity * 100)}%</span>
-            ) : null}
-          </button>
-          <div className="workflow-asset-meta">
-            <strong title={asset.fileName}>{asset.fileName}</strong>
-            <span>
-              {asset.width && asset.height
-                ? `${asset.width} × ${asset.height}`
-                : formatBytes(asset.fileSize)}
-            </span>
-          </div>
-          {actionLabel && onAction ? (
-            <button
-              type="button"
-              className="workflow-asset-action"
-              onClick={() => onAction(asset.id)}
-            >
-              {actionLabel}
-            </button>
-          ) : null}
-        </article>
+        <WorkflowAssetCard
+          key={asset.id}
+          asset={asset}
+          active={activeAssetId === asset.id}
+          selected={selectedAssetIds.includes(asset.id)}
+          onSelect={onSelect}
+          onToggleSelection={onToggleSelection}
+          onUpdateRating={onUpdateRating}
+          onUpdateColorLabel={onUpdateColorLabel}
+          onOpen={onOpen}
+          actionLabel={actionLabel}
+          onAction={onAction}
+          keeperFirst={keeperFirst && index === 0}
+          showSimilarity={showSimilarity}
+        />
       ))}
     </div>
+  );
+}
+
+function WorkflowAssetCard({
+  asset,
+  active,
+  selected,
+  onSelect,
+  onToggleSelection,
+  onUpdateRating,
+  onUpdateColorLabel,
+  onOpen,
+  actionLabel,
+  onAction,
+  keeperFirst,
+  showSimilarity,
+}: {
+  asset: WorkflowAsset | SimilarAsset;
+  active: boolean;
+  selected: boolean;
+  onSelect: (assetId: number) => void;
+  onToggleSelection?: (assetId: number, modifiers?: WorkflowSelectionModifiers) => void;
+  onUpdateRating?: (assetId: number, rating: number) => void | Promise<void>;
+  onUpdateColorLabel?: (
+    assetId: number,
+    colorLabel: ManualColorLabel | null,
+  ) => void | Promise<void>;
+  onOpen?: (assetId: number) => void | Promise<void>;
+  actionLabel?: string;
+  onAction?: (assetId: number) => void;
+  keeperFirst: boolean;
+  showSimilarity: boolean;
+}) {
+  const markable = Boolean(onUpdateRating && onUpdateColorLabel);
+  const shellClassName = [
+    "workflow-asset",
+    active ? "is-active" : "",
+    selected ? "is-selected" : "",
+    asset.rating > 0 ? "has-rating" : "",
+    asset.colorLabel ? "has-color-label" : "",
+  ]
+    .filter(Boolean)
+    .join(" ");
+  const similarityLabel =
+    showSimilarity && "similarity" in asset ? ` ${Math.round(asset.similarity * 100)}%` : "";
+
+  return (
+    <article className={shellClassName} data-asset-id={asset.id}>
+      {onToggleSelection ? (
+        <button
+          type="button"
+          className={`workflow-asset-check${selected ? " is-selected" : ""}`}
+          onClick={(event) => {
+            event.stopPropagation();
+            onToggleSelection(asset.id, {
+              ctrlKey: event.ctrlKey,
+              metaKey: event.metaKey,
+              shiftKey: event.shiftKey,
+            });
+          }}
+          aria-label={selected ? `取消选择 ${asset.fileName}` : `选择 ${asset.fileName}`}
+          aria-pressed={selected}
+        >
+          {selected ? <CheckIcon width="13" height="13" /> : null}
+        </button>
+      ) : null}
+      <button
+        type="button"
+        className="workflow-asset-preview"
+        onClick={() => onSelect(asset.id)}
+        onDoubleClick={(event) => {
+          if (!onOpen) return;
+          event.preventDefault();
+          event.stopPropagation();
+          void onOpen(asset.id);
+        }}
+        aria-current={active ? "true" : undefined}
+        aria-pressed={active}
+        aria-label={`${asset.fileName}${similarityLabel}${active ? "，当前图片" : ""}`}
+        title={onOpen ? `${asset.fileName}（双击回到图库）` : asset.fileName}
+      >
+        <WorkflowThumbnail assetId={asset.id} fileName={asset.fileName} />
+        {keeperFirst ? <span className="keeper-badge">建议保留</span> : null}
+        {showSimilarity && "similarity" in asset ? (
+          <span className="similarity-badge">{Math.round(asset.similarity * 100)}%</span>
+        ) : null}
+      </button>
+      <div className="workflow-asset-meta">
+        <strong title={asset.fileName}>{asset.fileName}</strong>
+        <span>
+          {asset.width && asset.height
+            ? `${asset.width} × ${asset.height}`
+            : formatBytes(asset.fileSize)}
+        </span>
+      </div>
+      {markable ? (
+        <div
+          className="workflow-asset-mark-controls"
+          aria-label={`人工标记 ${asset.fileName}`}
+          onPointerDown={(event) => event.stopPropagation()}
+          onClick={(event) => event.stopPropagation()}
+        >
+          <RatingStars
+            className="workflow-asset-rating-controls"
+            value={asset.rating}
+            ariaLabel="星级"
+            buttonLabel={(rating) => `${rating} 星`}
+            onChange={(rating) =>
+              void onUpdateRating?.(asset.id, asset.rating === rating ? 0 : rating)
+            }
+          />
+          <div className="workflow-asset-color-label-controls" role="group" aria-label="色标">
+            {MANUAL_COLOR_LABEL_OPTIONS.map((option) => {
+              const isActive = asset.colorLabel === option.id;
+              return (
+                <button
+                  type="button"
+                  key={option.id}
+                  className={isActive ? "is-active" : ""}
+                  style={{ backgroundColor: option.color }}
+                  aria-label={option.label}
+                  aria-pressed={isActive}
+                  onClick={() => void onUpdateColorLabel?.(asset.id, isActive ? null : option.id)}
+                />
+              );
+            })}
+          </div>
+        </div>
+      ) : null}
+      {actionLabel && onAction ? (
+        <button type="button" className="workflow-asset-action" onClick={() => onAction(asset.id)}>
+          {actionLabel}
+        </button>
+      ) : null}
+    </article>
   );
 }
 
@@ -1031,12 +1295,12 @@ function WorkflowThumbnail({ assetId, fileName }: { assetId: number; fileName: s
   );
 }
 
-function SectionIntro({ title, body, metric }: { title: string; body: string; metric: string }) {
+function SectionIntro({ title, body, metric }: { title: string; body?: string; metric: string }) {
   return (
     <header className="workflow-section-intro">
       <div>
         <h2>{title}</h2>
-        <p>{body}</p>
+        {body ? <p>{body}</p> : null}
       </div>
       <strong>{metric}</strong>
     </header>

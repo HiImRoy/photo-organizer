@@ -12,29 +12,30 @@ use crate::classification::registry_descriptors;
 use crate::db::{LibrarySourceRoot, Repository};
 use crate::error::{AppError, AppResult};
 use crate::models::{
-    AssetDetail, AssetFilter, AssetPage, AssetSortField, CancelScanResponse, FolderSummary,
-    LibrarySummary, OrganizationIssue, OrganizationPlan, OrganizationPlanRecord,
+    AssetDetail, AssetFilter, AssetPage, AssetQuery, AssetSortField, CancelScanResponse,
+    FolderSummary, LibrarySummary, OrganizationIssue, OrganizationPlan, OrganizationPlanRecord,
     OrganizationPlanRequest, ScanProgress, SemanticGroupSummary, SemanticProgress,
     SemanticTaskResponse, SortDirection, StartScanResponse, StartSemanticResponse,
 };
 use crate::organization;
 use crate::paths::AppPaths;
 use crate::scanner::{
-    discover_import_source_roots, scan_library, scan_library_tree, validate_scan_root_with_app_data,
+    ScanOptions, discover_import_source_roots, scan_library_tree_with_options,
+    scan_library_with_options, validate_scan_root_with_app_data,
 };
 use crate::semantic::{
     Places365Classifier, SIGLIP2_ANALYSIS_VERSION, SIGLIP2_MODEL_NAME, SIGLIP2_MODEL_VERSION,
     SemanticClassifier, SemanticLabelDescriptor, SemanticRuntimeStatus, TopicModelKind,
     semantic_catalog,
 };
-use crate::semantic_tasks::spawn_semantic_job;
+use crate::semantic_tasks::{SEMANTIC_BATCH_SIZE, spawn_semantic_job};
 use crate::subject::{SubjectClassifier, SubjectModel, SubjectRuntimeStatus};
 use crate::tasks::{SemanticTaskRegistry, SourceScanGuard, SourceScanRegistry, TaskRegistry};
 use crate::workflow;
 use crate::workflow::{
-    CollectionDetail, CollectionSummary, DuplicateGroup, EditExportPlan, EditExportResult,
-    EditRecipe, EditRollbackPlan, FaceFeatureStatus, LocalSearchResponse, SimilarAsset,
-    SimilarityClusterResponse, WorkflowAsset,
+    BrowseNode, CollectionDetail, CollectionSummary, DuplicateGroup, EditExportPlan,
+    EditExportResult, EditRecipe, EditRollbackPlan, FaceFeatureStatus, LocalSearchResponse,
+    SimilarAsset, SimilarityClusterResponse, WorkflowAsset,
 };
 
 pub struct AppState {
@@ -208,6 +209,11 @@ pub fn list_assets(
 }
 
 #[tauri::command]
+pub fn query_assets(query: AssetQuery, state: State<'_, AppState>) -> Result<AssetPage, String> {
+    state.repository.query_assets(&query).map_err(ipc_error)
+}
+
+#[tauri::command]
 pub fn get_classification_registry() -> Vec<crate::classification::ClassificationFieldDescriptor> {
     registry_descriptors()
 }
@@ -323,6 +329,8 @@ pub fn assign_asset_to_library(
 pub fn start_scan(
     root_path: String,
     include_subfolders: Option<bool>,
+    include_subfolder_images: Option<bool>,
+    import_worker_count: Option<usize>,
     app: tauri::AppHandle,
     state: State<'_, AppState>,
 ) -> Result<StartScanResponse, String> {
@@ -333,13 +341,14 @@ pub fn start_scan(
         .source_scans
         .try_acquire(&source_identity.identity_key)
         .ok_or_else(|| "该图库或其嵌套图库正在扫描，请稍后重试".to_owned())?;
-    let structured_roots = if include_subfolders.unwrap_or(false) {
+    let include_subfolder_images = include_subfolder_images.unwrap_or(true);
+    let structured_roots = if include_subfolders.unwrap_or(false) && include_subfolder_images {
         let discovered =
             discover_import_source_roots(&source_identity.source_path).map_err(ipc_error)?;
         Some(
             state
                 .repository
-                .ensure_library_source_roots(&discovered)
+                .ensure_library_source_roots(&discovered, include_subfolder_images)
                 .map_err(ipc_error)?,
         )
     } else {
@@ -366,6 +375,10 @@ pub fn start_scan(
         scan_guard,
         library_id_hint,
         structured_roots,
+        scan_options: ScanOptions {
+            include_subfolder_images,
+            import_worker_count,
+        },
     })
     .map_err(ipc_error)
     .inspect_err(|_| {
@@ -378,6 +391,7 @@ pub fn start_scan(
 #[tauri::command]
 pub fn rescan_library(
     library_id: i64,
+    import_worker_count: Option<usize>,
     app: tauri::AppHandle,
     state: State<'_, AppState>,
 ) -> Result<StartScanResponse, String> {
@@ -389,6 +403,10 @@ pub fn rescan_library(
     let source_identity =
         validate_scan_root_with_app_data(&source.source_path, &state.paths.data_dir)
             .map_err(ipc_error)?;
+    let include_subfolder_images = state
+        .repository
+        .library_include_subfolder_images(library_id)
+        .map_err(ipc_error)?;
     let scan_guard = state
         .source_scans
         .try_acquire(&source_identity.identity_key)
@@ -420,6 +438,10 @@ pub fn rescan_library(
         scan_guard,
         library_id_hint: Some(library_id),
         structured_roots: Some(structured_roots),
+        scan_options: ScanOptions {
+            include_subfolder_images,
+            import_worker_count,
+        },
     })
     .map_err(ipc_error)
     .inspect_err(|_| {
@@ -439,6 +461,7 @@ struct ScanTask {
     scan_guard: SourceScanGuard,
     library_id_hint: Option<i64>,
     structured_roots: Option<Vec<LibrarySourceRoot>>,
+    scan_options: ScanOptions,
 }
 
 fn spawn_scan_task(task: ScanTask) -> AppResult<()> {
@@ -453,6 +476,7 @@ fn spawn_scan_task(task: ScanTask) -> AppResult<()> {
         scan_guard,
         library_id_hint,
         structured_roots,
+        scan_options,
     } = task;
     let thread_task_id = task_id.clone();
     std::thread::Builder::new()
@@ -464,21 +488,23 @@ fn spawn_scan_task(task: ScanTask) -> AppResult<()> {
                 }
             };
             let result = match structured_roots {
-                Some(targets) => scan_library_tree(
+                Some(targets) => scan_library_tree_with_options(
                     &repository,
                     &paths.thumbnail_dir,
                     &root,
                     &thread_task_id,
                     &cancellation,
                     targets,
+                    scan_options,
                     emit,
                 ),
-                None => scan_library(
+                None => scan_library_with_options(
                     &repository,
                     &paths.thumbnail_dir,
                     &root,
                     &thread_task_id,
                     &cancellation,
+                    scan_options,
                     emit,
                 ),
             };
@@ -739,16 +765,25 @@ pub fn get_semantic_progress(
 pub fn start_semantic_analysis(
     library_id: i64,
     force: Option<bool>,
+    batch_size: Option<usize>,
     app: tauri::AppHandle,
     state: State<'_, AppState>,
 ) -> Result<StartSemanticResponse, String> {
-    start_semantic_job(library_id, force.unwrap_or(false), None, app, &state)
+    start_semantic_job(
+        library_id,
+        force.unwrap_or(false),
+        None,
+        batch_size,
+        app,
+        &state,
+    )
 }
 
 #[tauri::command]
 pub fn start_semantic_analysis_selected(
     library_id: i64,
     asset_ids: Vec<i64>,
+    batch_size: Option<usize>,
     app: tauri::AppHandle,
     state: State<'_, AppState>,
 ) -> Result<StartSemanticResponse, String> {
@@ -773,7 +808,14 @@ pub fn start_semantic_analysis_selected(
             subject_model.as_ref(),
         )
         .map_err(ipc_error)?;
-    spawn_with_app(&state, app, job_id.clone(), library_id, candidates)?;
+    spawn_with_app(
+        &state,
+        app,
+        job_id.clone(),
+        library_id,
+        candidates,
+        batch_size.unwrap_or(SEMANTIC_BATCH_SIZE),
+    )?;
     Ok(StartSemanticResponse { job_id })
 }
 
@@ -781,10 +823,11 @@ pub fn start_semantic_analysis_selected(
 pub fn reanalyze_asset(
     library_id: i64,
     asset_id: i64,
+    batch_size: Option<usize>,
     app: tauri::AppHandle,
     state: State<'_, AppState>,
 ) -> Result<StartSemanticResponse, String> {
-    start_semantic_job(library_id, true, Some(asset_id), app, &state)
+    start_semantic_job(library_id, true, Some(asset_id), batch_size, app, &state)
 }
 
 #[tauri::command]
@@ -841,7 +884,14 @@ pub fn resume_semantic_analysis(
         .repository
         .pending_semantic_candidates(&job_id)
         .map_err(ipc_error)?;
-    spawn_with_app(&state, app, job_id.clone(), progress.library_id, candidates)?;
+    spawn_with_app(
+        &state,
+        app,
+        job_id.clone(),
+        progress.library_id,
+        candidates,
+        SEMANTIC_BATCH_SIZE,
+    )?;
     Ok(SemanticTaskResponse {
         job_id,
         accepted: true,
@@ -986,15 +1036,22 @@ pub fn list_collections(state: State<'_, AppState>) -> Result<Vec<CollectionSumm
 }
 
 #[tauri::command]
+pub fn list_browse_nodes(state: State<'_, AppState>) -> Result<Vec<BrowseNode>, String> {
+    workflow::list_browse_nodes(&state.repository).map_err(ipc_error)
+}
+
+#[tauri::command]
 pub fn create_collection(
     name: String,
     description: Option<String>,
+    parent_collection_id: Option<i64>,
     state: State<'_, AppState>,
 ) -> Result<CollectionSummary, String> {
-    workflow::create_collection(
+    workflow::create_collection_under(
         &state.repository,
         &name,
         description.as_deref().unwrap_or_default(),
+        parent_collection_id,
     )
     .map_err(ipc_error)
 }
@@ -1202,6 +1259,7 @@ pub fn resume_pending_semantic_jobs(app: tauri::AppHandle, state: &AppState) {
                             job_id.clone(),
                             library_id,
                             candidates,
+                            SEMANTIC_BATCH_SIZE,
                         ) {
                             log::error!("could not resume semantic job {job_id}: {error}");
                         }
@@ -1220,6 +1278,7 @@ fn start_semantic_job(
     library_id: i64,
     force: bool,
     only_asset_id: Option<i64>,
+    batch_size: Option<usize>,
     app: tauri::AppHandle,
     state: &AppState,
 ) -> Result<StartSemanticResponse, String> {
@@ -1242,7 +1301,14 @@ fn start_semantic_job(
             subject_model.as_ref(),
         )
         .map_err(ipc_error)?;
-    spawn_with_app(state, app, job_id.clone(), library_id, candidates)?;
+    spawn_with_app(
+        state,
+        app,
+        job_id.clone(),
+        library_id,
+        candidates,
+        batch_size.unwrap_or(SEMANTIC_BATCH_SIZE),
+    )?;
     Ok(StartSemanticResponse { job_id })
 }
 
@@ -1252,6 +1318,7 @@ fn spawn_with_app(
     job_id: String,
     library_id: i64,
     candidates: Vec<crate::db::SemanticAssetCandidate>,
+    batch_size: usize,
 ) -> Result<(), String> {
     let classifier = state.semantic.read().clone();
     let subject_classifier = {
@@ -1267,6 +1334,7 @@ fn spawn_with_app(
         library_id,
         candidates,
         state.paths.thumbnail_dir.clone(),
+        batch_size,
         move |progress| {
             if let Err(error) = app.emit("semantic-progress", progress) {
                 log::warn!("could not emit semantic progress: {error}");

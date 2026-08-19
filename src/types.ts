@@ -195,10 +195,37 @@ export interface AssetQueryV1 {
   filter: AssetFilter;
   sort: SortField;
   direction: SortDirection;
-  groupBySemantic: boolean;
   page: number;
   pageSize: number;
 }
+
+export type AssetQueryRoot =
+  | { kind: "all" }
+  | { kind: "source"; libraryId: number }
+  | { kind: "collection"; collectionId: number }
+  | { kind: "favorites" };
+
+/** Unified browse contract. V1 remains as a compatibility boundary for old UI state. */
+export interface AssetQuery {
+  version: 2;
+  root: AssetQueryRoot;
+  includeDescendants: boolean;
+  filter: AssetFilter;
+  sort: SortField;
+  direction: SortDirection;
+  page: number;
+  pageSize: number;
+}
+
+/** Presentation-only grouping for the current browse surface. */
+export type AssetGroupBy =
+  | "none"
+  | "primary_category"
+  | "auxiliary_tag"
+  | "tone"
+  | "saturation_level"
+  | "dominant_color"
+  | "rating";
 
 export type AssetScopeInputV1 =
   | { kind: "query"; query: AssetQueryV1 }
@@ -232,9 +259,9 @@ export interface AssetFilter {
   capturedFrom: string | null;
   capturedTo: string | null;
   analysisStatus: "not_analyzed" | "failed" | "completed" | null;
-  /** Restrict the browse surface to the user's local favorites. */
+  /** V1 compatibility field; AssetQuery v2 expresses this as root=favorites. */
   favoriteOnly: boolean;
-  /** Restrict the browse surface to one virtual collection. */
+  /** V1 compatibility field; AssetQuery v2 expresses this as root=collection. */
   collectionId: number | null;
 }
 
@@ -479,7 +506,23 @@ export interface CollectionSummary {
   createdAt: string;
   updatedAt: string;
   assetCount: number;
+  parentCollectionId: number | null;
+  collectionKind: "manual" | "system_favorites";
+  systemKey: string | null;
+  displayOrder: number;
 }
+
+export type BrowseNode =
+  | {
+      kind: "source";
+      library: LibrarySummary;
+      children: BrowseNode[];
+    }
+  | {
+      kind: "collection";
+      collection: CollectionSummary;
+      children: BrowseNode[];
+    };
 
 export interface CollectionDetail extends CollectionSummary {
   assets: WorkflowAsset[];

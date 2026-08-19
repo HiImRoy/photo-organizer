@@ -17,7 +17,6 @@ export function AnalysisStatusFilterBar({
     <section className="analysis-status-filter-bar" aria-label="分析状态筛选">
       <div className="analysis-status-filter-heading">
         <strong>分析状态</strong>
-        <span>未完成的语义分析</span>
       </div>
       <div className="analysis-status-filter-controls" role="group" aria-label="分析状态选项">
         <button

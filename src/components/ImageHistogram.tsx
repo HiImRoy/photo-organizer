@@ -93,7 +93,7 @@ function calculateHistogram(source: string): Promise<HistogramData | null> {
 }
 
 export function ImageHistogram({ asset }: { asset: AssetListItem }) {
-  const { source, failed } = useThumbnailSource(asset);
+  const { source, failed, loadRef } = useThumbnailSource(asset);
   const gradientId = `histogram-gradient-${useId().replaceAll(":", "")}`;
   const [histogramState, setHistogramState] = useState<{
     source: string;
@@ -136,7 +136,7 @@ export function ImageHistogram({ asset }: { asset: AssetListItem }) {
         : "正在生成";
 
   return (
-    <div className="image-histogram" data-source="thumbnail">
+    <div ref={loadRef} className="image-histogram" data-source="thumbnail">
       <div className="histogram-toolbar">
         <span>通道</span>
         <div className="histogram-channel-controls" role="group" aria-label="直方图通道">
@@ -168,8 +168,8 @@ export function ImageHistogram({ asset }: { asset: AssetListItem }) {
           <svg viewBox={`0 0 ${HISTOGRAM_WIDTH} ${HISTOGRAM_HEIGHT}`} preserveAspectRatio="none">
             <defs>
               <linearGradient id={gradientId} x1="0" y1="0" x2="0" y2="1">
-                <stop offset="0%" stopColor="rgba(214, 224, 232, 0.62)" />
-                <stop offset="100%" stopColor="rgba(214, 224, 232, 0.1)" />
+                <stop offset="0%" stopColor="var(--histogram-luma-top)" />
+                <stop offset="100%" stopColor="var(--histogram-luma-bottom)" />
               </linearGradient>
             </defs>
             <g className="histogram-grid-lines">
@@ -177,7 +177,9 @@ export function ImageHistogram({ asset }: { asset: AssetListItem }) {
               <line x1="128" y1="0" x2="128" y2={HISTOGRAM_HEIGHT} />
               <line x1="192" y1="0" x2="192" y2={HISTOGRAM_HEIGHT} />
             </g>
-            {isChannelVisible("luma") ? <path d={paths.luma} fill={`url(#${gradientId})`} /> : null}
+            {isChannelVisible("luma") ? (
+              <path className="histogram-luma" d={paths.luma} fill={`url(#${gradientId})`} />
+            ) : null}
             {isChannelVisible("red") ? <path d={paths.red} className="histogram-red" /> : null}
             {isChannelVisible("green") ? (
               <path d={paths.green} className="histogram-green" />

@@ -1,4 +1,4 @@
-import { render, screen } from "@testing-library/react";
+import { render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 
@@ -36,7 +36,6 @@ const testQuery = {
   filter: emptyAssetFilter,
   sort: "file_name" as const,
   direction: "asc" as const,
-  groupBySemantic: false,
   page: 1,
   pageSize: 120,
 };
@@ -103,6 +102,42 @@ const plan: OrganizationPlan = {
 };
 
 describe("OrganizationWorkspace", () => {
+  it("explains directory dimensions and limits modification-time fallback to date levels", async () => {
+    const user = userEvent.setup();
+    render(
+      <OrganizationWorkspace
+        library={library}
+        selectedAssetIds={[22]}
+        filteredCount={1}
+        scopeInput={{ kind: "selection", query: testQuery, assetIds: [22] }}
+        scopeDescription={{
+          kind: "selection",
+          label: "已选择 1 张",
+          count: 1,
+          isExplicitSelection: true,
+        }}
+        onClose={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByText(/左侧决定按什么分组/)).toBeInTheDocument();
+    const firstDimension = screen.getByRole("combobox", { name: "第 1 层目录维度" });
+    const firstFallback = screen.getByRole("combobox", { name: "拍摄年份缺失时" });
+    expect(within(firstDimension).getByRole("option", { name: "拍摄年份" })).toBeInTheDocument();
+    expect(
+      within(firstFallback).getByRole("option", { name: "用文件修改时间" }),
+    ).toBeInTheDocument();
+
+    await user.selectOptions(firstDimension, "primary_semantic");
+
+    const semanticFallback = screen.getAllByRole("combobox", { name: "拍摄题材缺失时" })[0];
+    expect(semanticFallback).toHaveValue("unknown");
+    expect(
+      within(semanticFallback).queryByRole("option", { name: "用文件修改时间" }),
+    ).not.toBeInTheDocument();
+    expect(screen.getAllByText(/按图片的主要题材分目录/).length).toBeGreaterThan(0);
+  });
+
   it("inherits an explicit selection and generates a read-only mapping", async () => {
     const user = userEvent.setup();
     api.previewOrganizationPlan.mockResolvedValue(plan);
@@ -124,6 +159,8 @@ describe("OrganizationWorkspace", () => {
     );
 
     expect(screen.getByText("只读整理预览")).toBeInTheDocument();
+    expect(screen.getByText("先生成一份整理预览")).toBeInTheDocument();
+    expect(screen.getByLabelText("整理流程")).toBeInTheDocument();
     await user.type(screen.getByLabelText("目标根目录"), "D:\\整理预览");
     await user.click(screen.getByRole("button", { name: "生成整理预览" }));
 

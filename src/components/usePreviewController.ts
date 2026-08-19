@@ -177,7 +177,7 @@ export function usePreviewController(
     const requestAsset = assetRef.current;
     if (!requestAsset) return undefined;
 
-    void requestThumbnail(requestAsset.id)
+    void requestThumbnail(requestAsset.id, 0)
       .then((thumbnail) => {
         if (generation.current !== requestGeneration) return;
         setThumbnailSource(thumbnail);

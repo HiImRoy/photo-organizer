@@ -4,6 +4,7 @@ import { classificationValueLabel } from "../classificationLabels";
 import { formatPercent } from "../format";
 import { MANUAL_COLOR_LABEL_OPTIONS, type AssetListItem, type ManualColorLabel } from "../types";
 import { CheckIcon } from "./Icons";
+import { RatingStars } from "./RatingStars";
 import { Thumbnail } from "./Thumbnail";
 
 type SelectionModifiers = {
@@ -50,6 +51,7 @@ export function AssetCard({
   const shellClassName = [
     "asset-card-shell",
     active ? "is-active" : "",
+    selected ? "is-selected" : "",
     asset.rating > 0 ? "has-rating" : "",
     asset.rating > 0 ? `rating-${asset.rating}` : "",
     asset.colorLabel ? "has-color-label" : "",
@@ -57,9 +59,8 @@ export function AssetCard({
   ]
     .filter(Boolean)
     .join(" ");
-
   return (
-    <div className={shellClassName}>
+    <div className={shellClassName} data-asset-id={asset.id}>
       <button
         type="button"
         className={`asset-check${selected ? " is-selected" : ""}`}
@@ -183,24 +184,13 @@ export function AssetCard({
           onPointerDown={(event) => event.stopPropagation()}
           onClick={(event) => event.stopPropagation()}
         >
-          <div className="asset-rating-controls" role="group" aria-label="星级">
-            {Array.from({ length: 5 }, (_, index) => {
-              const value = index + 1;
-              const isActive = value <= asset.rating;
-              return (
-                <button
-                  type="button"
-                  className={isActive ? "is-active" : ""}
-                  key={value}
-                  aria-label={`${value} 星`}
-                  aria-pressed={isActive}
-                  onClick={() => onUpdateRating(asset.id, asset.rating === value ? 0 : value)}
-                >
-                  {isActive ? "★" : "☆"}
-                </button>
-              );
-            })}
-          </div>
+          <RatingStars
+            className="asset-rating-controls"
+            value={asset.rating}
+            ariaLabel="星级"
+            buttonLabel={(rating) => `${rating} 星`}
+            onChange={(rating) => onUpdateRating(asset.id, asset.rating === rating ? 0 : rating)}
+          />
           <div className="asset-color-label-controls" role="group" aria-label="色标">
             {MANUAL_COLOR_LABEL_OPTIONS.map((option) => {
               const isActive = asset.colorLabel === option.id;

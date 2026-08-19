@@ -13,7 +13,8 @@ use crate::tasks::{SemanticControlSignal, SemanticTaskRegistry};
 
 // Keep model inference small enough for CPU-only desktops. This is the
 // application analysis batch, independent from offline benchmark utilities.
-const SEMANTIC_BATCH_SIZE: usize = 4;
+pub(crate) const SEMANTIC_BATCH_SIZE: usize = 4;
+const MAX_SEMANTIC_BATCH_SIZE: usize = 8;
 
 #[allow(clippy::too_many_arguments)]
 pub fn spawn_semantic_job<F>(
@@ -25,6 +26,7 @@ pub fn spawn_semantic_job<F>(
     library_id: i64,
     candidates: Vec<SemanticAssetCandidate>,
     thumbnail_dir: PathBuf,
+    batch_size: usize,
     emit: F,
 ) -> AppResult<()>
 where
@@ -34,6 +36,11 @@ where
         AppError::InvalidArgument(format!("semantic job is already running: {job_id}"))
     })?;
     let thread_job_id = job_id.clone();
+    let batch_size = if batch_size == 0 {
+        SEMANTIC_BATCH_SIZE
+    } else {
+        batch_size.clamp(1, MAX_SEMANTIC_BATCH_SIZE)
+    };
     std::thread::Builder::new()
         .name(format!("semantic-{thread_job_id}"))
         .spawn(move || {
@@ -62,7 +69,7 @@ where
             let _ = repository.update_semantic_job_progress(&progress);
             emit(progress.clone());
 
-            for candidate_batch in candidates.chunks(SEMANTIC_BATCH_SIZE) {
+            for candidate_batch in candidates.chunks(batch_size) {
                 if control.wait_until_runnable() == SemanticControlSignal::Cancel {
                     progress.status = "cancelled".into();
                     progress.current_asset_id = None;
