@@ -193,9 +193,41 @@ pub struct AssetPage {
 #[serde(tag = "kind", rename_all = "camelCase")]
 pub enum AssetQueryRoot {
     All,
-    Source { library_id: i64 },
-    Collection { collection_id: i64 },
+    Source {
+        #[serde(rename = "libraryId", alias = "library_id")]
+        library_id: i64,
+    },
+    Collection {
+        #[serde(rename = "collectionId", alias = "collection_id")]
+        collection_id: i64,
+    },
     Favorites,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ASSET_QUERY_VERSION, AssetQuery, AssetQueryRoot};
+
+    #[test]
+    fn asset_query_root_accepts_camel_case_ipc_ids() {
+        let query: AssetQuery = serde_json::from_value(serde_json::json!({
+            "version": ASSET_QUERY_VERSION,
+            "root": { "kind": "source", "libraryId": 7 },
+            "includeDescendants": true,
+            "filter": {},
+            "sort": "file_name",
+            "direction": "desc",
+            "page": 1,
+            "pageSize": 120
+        }))
+        .expect("camelCase asset query should deserialize");
+
+        assert_eq!(query.root, AssetQueryRoot::Source { library_id: 7 });
+
+        let encoded = serde_json::to_value(query).expect("asset query should serialize");
+        assert_eq!(encoded["root"]["libraryId"], 7);
+        assert!(encoded["root"].get("library_id").is_none());
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
