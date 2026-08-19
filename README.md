@@ -1,54 +1,78 @@
 # PhotoOrganizer
 
-PhotoOrganizer 是一款 Windows 优先、本地优先的图片分类与整理桌面应用。它可以从系统目录选择器导入图库，递归索引 JPEG、PNG 和 WebP，在应用私有目录生成缩略图，计算亮度、对比度、饱和度和主色，并用随包分发的 SigLIP 2 Base INT8 模型在本机完成摄影题材候选分析。深色三栏工作区支持网格、单图胶片栏、完整检查器和 SQLite 层组合筛选。
+PhotoOrganizer 是一个 Windows 优先、local-first 的桌面照片管理工具。它帮助个人摄影师从本地文件夹导入照片、使用缩略图完成分析、通过筛选和收藏夹整理照片，并在真正执行文件操作前生成可检查的整理预览。
 
-> 当前状态：语义分类、专业图库和 Lap-inspired 智能工作台 MVP 已实现。收藏、集合、精确重复审阅、本地文本/以图搜索、相似聚类、2–4 图比较和非破坏性编辑另存均为本地实现。人脸身份聚类仍受模型许可门禁约束：没有合规模型时明确禁用，不产生伪结果。
+> English summary: PhotoOrganizer is a local-first Tauri desktop photo organizer for photographers. It indexes user-selected folders, performs thumbnail-only analysis, provides virtual collections and filters, and creates safe dry-run organization plans without silently changing source files.
 
-## 安全边界
+## 当前状态
 
-- 导入、缩略图提取、基础分析和模型推理只使用应用私有缩略图或有界缩略图输入；源文件仅用于元数据、指纹和受控的目标尺寸缩略图提取，不把完整原图像素交给分析链路。
-- 用户主动查看时，screen 预览使用有界尺寸缓存；显式 original 预览是查看器例外，不参与导入、分析或模型推理。
-- SQLite、日志和缩略图保存在应用数据目录，不写入图库。
-- 模型随应用分发；图片、embedding 和标签不会上传。
-- 当前版本不删除、移动、重命名、覆盖或写回原图元数据；编辑器只能在计划确认后创建不存在的新副本。
-- 自动化文件系统测试只使用 `test-data/` 或测试临时目录。
+项目处于 MVP / early-access 阶段，适合本地测试和代码审查，不建议直接用于唯一的生产照片归档。
+
+目前已实现：
+
+- 递归扫描 JPEG、PNG 和 WebP，并在应用数据目录缓存缩略图。
+- 基于 SQLite 保存本地图库索引、分析结果和用户标记。
+- 亮度、对比度、饱和度、影调、主色和强调色提取。
+- SigLIP 2 Base INT8 本地语义分析，以及摄影题材、主体标签和环境属性筛选。
+- 物理本地来源与虚拟收藏夹分离；一张图片可以加入多个收藏夹。
+- 网格、单图预览、信息检查器、直方图、分组、星级和颜色标记。
+- 本地 AI 搜索、相似图片/重复审阅和基础整理预览。
+- 整理操作默认复制，并在执行前检查目标路径、命名冲突和安全边界。
+
+仍在规划或受模型/许可限制的能力：
+
+- 人脸身份识别与身份聚类。
+- 完整 RAW 专业冲印、视频管理、云同步和账号系统。
+- 永久删除、覆盖原图和向原图写回元数据。
+
+## 设计边界
+
+PhotoOrganizer 的核心模型有两层：
+
+1. **本地来源（Source）**：绑定真实磁盘目录，只负责索引原始文件和读取必要的文件/元数据。
+2. **收藏夹（Collection）**：应用内的虚拟关系，不改变源目录结构；收藏夹支持父子层级，图片可以同时属于多个收藏夹。
+
+导入、缩略图生成、基础特征提取、语义分析和模型推理都必须使用应用生成的缩略图或有界缩略图衍生物。完整原图像素不会进入这些处理链路；只有用户主动查看原图时，查看器才允许走独立的原图预览路径。
+
+正常浏览和分析不会移动、重命名、删除或覆盖原始照片。整理功能先生成 dry-run 预览，复制是默认动作，真正执行需要用户明确确认。
+
+## 隐私
+
+- 图片、缩略图、embedding、标签和数据库默认只保存在本机。
+- 项目没有云端分析服务，也不要求账号。
+- 应用不会把照片上传到 PhotoOrganizer 服务。
+- 不要把个人照片、真实本地路径、应用数据库、模型密钥或日志直接提交到公开仓库。
+- 公开仓库中的模型和第三方依赖仍受各自许可证约束，详见 [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md)。
 
 ## 开发环境
 
 - Windows 10/11
 - Node.js 22.13+
-- Rust stable（MSVC toolchain）
-- Microsoft C++ Build Tools 与 WebView2（Tauri 开发/打包需要）
+- Rust stable，MSVC toolchain
+- Microsoft C++ Build Tools
+- WebView2
 
-这些仅是开发和构建要求；发布安装包的最终用户不需要安装 Node、Rust、Python、SQLite 或命令行工具。
+最终用户使用打包安装程序时不需要安装 Node、Rust、Python、SQLite 或命令行工具。
 
-## 开发命令
+## 快速启动
+
+安装依赖：
 
 ```powershell
 npm.cmd install
+```
+
+启动隔离的桌面开发环境：
+
+```powershell
 npm.cmd run start:desktop
 ```
 
-`start:desktop` 会自动补充常见的 Rust 安装路径，先构建前端再通过 Tauri 静态资源协议启动桌面窗口，不依赖本地 Vite 端口。默认使用 `%TEMP%\PhotoOrganizer-dev-data` 保存开发测试数据库、缩略图和日志，与正式应用数据隔离，并且会跨次启动保留；手动验收窗口使用独立的 `PhotoOrganizer Manual` 标题，并由 setup hook 为每次会话传入独立的临时 WebView2 profile，避免桌面测试误抓到已安装旧版本或共用正式应用缓存。手动入口默认使用 WebView2 的软件/进程内 GPU 和开发沙箱兜底，规避部分 Windows 开发环境的黑屏启动；该参数只用于手动开发入口，不会进入正式打包应用，设置 `WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS` 可覆盖默认值。保持启动它的终端窗口开启即可继续手动测试；关闭开发窗口或终端会停止开发进程。
+也可以双击项目根目录的 `启动 PhotoOrganizer.cmd`。开发环境默认使用 `%TEMP%\PhotoOrganizer-dev-data` 保存测试数据库、缩略图和日志，不会自动扫描个人照片目录。需要测试已有应用数据时，再显式设置 `PHOTO_ORGANIZER_DATA_DIR`。
 
-以后也可以直接双击项目根目录的 `启动 PhotoOrganizer.cmd`；它会自动切换到正确的项目目录并执行同一套启动流程。命令行中也可以使用标准入口 `npm.cmd start`。
+## 质量检查
 
-如需明确测试已有应用数据，可在 PowerShell 中指定数据目录后启动（不会复制或删除数据）：
-
-```powershell
-$env:PHOTO_ORGANIZER_DATA_DIR = "$env:APPDATA\com.photoorganizer.desktop"
-npm.cmd run start:desktop
-```
-
-不设置该变量时，推荐使用默认的隔离开发数据目录。
-
-正式 Windows 验证和打包使用下列脚本；它会先检查 MSVC、Windows SDK、`link.exe` 与 `cl.exe`：
-
-```powershell
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/build-windows.ps1
-```
-
-常用验证：
+提交前运行：
 
 ```powershell
 npm.cmd run format:check
@@ -56,43 +80,46 @@ npm.cmd run lint
 npm.cmd run typecheck
 npm.cmd test
 npm.cmd run test:rust
+npm.cmd run clippy
 npm.cmd run build
-npm.cmd run tauri build -- --target x86_64-pc-windows-msvc
 ```
 
-正式 Windows 构建使用 Rust MSVC target 和 Microsoft C++ Build Tools。仓库 CI 也以该受支持路径生成安装产物；本机若缺少 `link.exe`，请先补齐 C++ Build Tools，不要把 GNU 回退产物当作正式发布版本。
-
-真实语义 CPU 基准入口：
+Windows 打包和环境检查：
 
 ```powershell
-cargo run --manifest-path src-tauri/Cargo.toml --no-default-features --bin semantic-benchmark -- --images src-tauri/icons --model siglip2-base --backend cpu --batch-size 8
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/build-windows.ps1
 ```
 
-授权真实摄影集的质量评估入口（`evaluation-data/` 与输出均不会进入 Git）：
+测试只能使用 `test-data/` 或测试临时目录，不能使用个人照片目录。涉及文件整理的测试必须保持 dry-run，不得覆盖或删除已有文件。
 
-```powershell
-npm.cmd run evaluate:photos
+## 项目结构
+
+```text
+src/                 React + TypeScript 前端
+src-tauri/src/       Tauri Rust 后端、SQLite、扫描和分析任务
+src-tauri/migrations/数据库迁移
+src-tauri/resources/ 模型和运行时资源
+docs/                架构、决策、测试和阶段计划
+scripts/             开发、检查和 Windows 构建脚本
 ```
-
-## 数据位置
-
-生产运行时通过 Tauri 的应用数据目录保存 `photo-organizer.sqlite3`、`thumbnails/` 和日志。开发/测试不会扫描任何预设的个人目录，只有用户在系统对话框中明确选择后才开始扫描。
 
 ## 文档
 
-- [需求](docs/requirements.md)
 - [架构](docs/architecture.md)
 - [数据模型](docs/data-model.md)
-- [路线图](docs/roadmap.md)
+- [当前功能](docs/current-functionality.md)
 - [测试策略](docs/testing.md)
 - [界面设计规范](docs/ui-guidelines.md)
 - [发布与签名](docs/release.md)
 - [模型评估](docs/model-evaluation.md)
-- [真实摄影评估说明](docs/photo-evaluation.md)
-- [起步执行计划](docs/plans/0001-bootstrap.md)
-- [专业化界面重构计划](docs/plans/0002-professional-ui.md)
-- [语义分类与专业工作区计划](docs/plans/0003-semantic-classification-and-workspace.md)
-- [整理预览 Dry-run 计划](docs/plans/0004-organization-dry-run.md)
-- [图库体验与分类质量优化计划](docs/plans/0004-library-ux-and-classification-refinement.md)
+- [统一来源与收藏夹方案](docs/plans/0053-unified-library-and-favorite-folders.md)
+- [阶段实施路线图](docs/plans/0053-implementation-roadmap.md)
+- [第三方依赖与模型说明](THIRD_PARTY_NOTICES.md)
 
-项目决策记录在 `docs/decisions/`。当前版本与限制以执行计划和发布说明为准。
+## 贡献和代码审查
+
+欢迎通过 Issue 或 Pull Request 提交问题和改进建议。提交前请阅读 [`CONTRIBUTING.md`](CONTRIBUTING.md)。公开仓库默认只提供代码读取权限；不需要给代码审查工具或普通协作者授予写入权限。
+
+## 许可证
+
+PhotoOrganizer 自有代码采用 [MIT License](LICENSE)。第三方依赖、模型权重、ONNX Runtime、WebView2 和其他随包资源不自动继承本项目许可证，必须遵守各自的许可证和再分发条款。

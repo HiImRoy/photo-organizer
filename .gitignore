@@ -3,6 +3,8 @@ node_modules/
 dist/
 coverage/
 *.tsbuildinfo
+.pnpm-store/
+lap/
 
 # Rust / Tauri
 src-tauri/target/
@@ -51,6 +53,7 @@ release-artifacts/
 .DS_Store
 Thumbs.db
 *.swp
+*.lnk
 .cache/
 .tmp/
 tmp/
