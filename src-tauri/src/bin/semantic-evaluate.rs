@@ -59,6 +59,7 @@ struct Arguments {
 enum BackendArgument {
     Auto,
     Cpu,
+    Directml,
 }
 
 impl From<BackendArgument> for ExecutionBackend {
@@ -66,6 +67,7 @@ impl From<BackendArgument> for ExecutionBackend {
         match value {
             BackendArgument::Auto => Self::Auto,
             BackendArgument::Cpu => Self::Cpu,
+            BackendArgument::Directml => Self::DirectMl,
         }
     }
 }
@@ -250,17 +252,20 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             .join("runtime")
             .join("onnxruntime.dll")
     });
+    let requested_backend: ExecutionBackend = arguments.backend.into();
     let process_start = collect_process_stats();
     let overall_start = Instant::now();
     let load_start = Instant::now();
-    let classifier: Box<dyn SemanticClassifier> = Box::new(OpenVocabularyClipClassifier::load(
-        topic_model,
-        &model_dir,
-        &runtime,
-    )?);
+    let classifier: Box<dyn SemanticClassifier> =
+        Box::new(OpenVocabularyClipClassifier::load_with_backend(
+            topic_model,
+            &model_dir,
+            &runtime,
+            requested_backend,
+        )?);
     let model_load_ms = load_start.elapsed().as_secs_f64() * 1000.0;
     let metadata = classifier.metadata();
-    let backend: ExecutionBackend = arguments.backend.into();
+    let backend = requested_backend;
     let actual_backend = classifier.status().selected_backend.unwrap_or(backend);
 
     let inference_start = Instant::now();

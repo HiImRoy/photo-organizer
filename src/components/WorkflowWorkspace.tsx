@@ -78,7 +78,7 @@ interface WorkflowWorkspaceProps {
 
 const tabs: ReadonlyArray<{ id: WorkflowTool; label: string }> = [
   { id: "favorites", label: "收藏" },
-  { id: "collections", label: "集合" },
+  { id: "collections", label: "收藏夹" },
   { id: "search", label: "AI 搜索" },
   { id: "duplicates", label: "重复清理" },
   { id: "similar", label: "相似聚类" },
@@ -113,13 +113,15 @@ export function WorkflowWorkspace({
   const [searchResult, setSearchResult] = useState<LocalSearchResponse | null>(null);
   const [similarAssets, setSimilarAssets] = useState<SimilarAsset[]>([]);
   const [clusters, setClusters] = useState<SimilarityClusterResponse | null>(null);
-  const [busy, setBusy] = useState(true);
+  const [busy, setBusy] = useState(initialTool === "favorites" || initialTool === "collections");
   const [message, setMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const activeTab = tabs.find((item) => item.id === tab) ?? tabs[0];
   const isFloatingSearch = embedded && floatingSearch && tab === "search";
 
   useEffect(() => {
+    if (tab !== "favorites" && tab !== "collections") return undefined;
+
     let cancelled = false;
     void Promise.all([fetchFavoriteAssets(libraryId), fetchCollections()])
       .then(([favoriteItems, collectionItems]) => {
@@ -136,7 +138,7 @@ export function WorkflowWorkspace({
     return () => {
       cancelled = true;
     };
-  }, [libraryId]);
+  }, [libraryId, tab]);
 
   useEffect(() => {
     if (tab !== "duplicates" || duplicates.length > 0) return;
@@ -227,6 +229,7 @@ export function WorkflowWorkspace({
                 key={item.id}
                 className={tab === item.id ? "is-active" : ""}
                 onClick={() => {
+                  setBusy(item.id === "favorites" || item.id === "collections");
                   setTab(item.id);
                   setError(null);
                   setMessage(null);
@@ -298,7 +301,7 @@ export function WorkflowWorkspace({
                 setCollection(await fetchCollection(created.id));
                 if (!embedded) onCollectionSourceChange?.(created.id);
                 onCollectionsChange?.();
-                setMessage(`已创建虚拟集合“${created.name}”。`);
+                setMessage(`已创建收藏夹“${created.name}”。`);
               })
             }
             onDelete={(collectionId) =>
@@ -307,7 +310,7 @@ export function WorkflowWorkspace({
                 setCollection(null);
                 setCollections(await fetchCollections());
                 onCollectionsChange?.();
-                setMessage("集合已删除，原始图片未发生变化。");
+                setMessage("收藏夹已删除，原始图片未发生变化。");
               })
             }
             onAddSelected={(collectionId) =>
@@ -496,9 +499,9 @@ function CollectionsView({
           <input
             value={name}
             onChange={(event) => setName(event.target.value)}
-            placeholder="新集合名称"
+            placeholder="新收藏夹名称"
             maxLength={100}
-            aria-label="新集合名称"
+            aria-label="新收藏夹名称"
           />
           <button type="submit">新建</button>
         </form>
@@ -521,7 +524,7 @@ function CollectionsView({
           <>
             <SectionIntro
               title={collection.name}
-              body={collection.description || "虚拟集合不会移动、复制或改名原始图片。"}
+              body={collection.description || "收藏夹不会移动、复制或改名原始图片。"}
               metric={`${collection.assetCount} 张`}
             />
             <div className="workflow-actions">
@@ -537,18 +540,18 @@ function CollectionsView({
                 className="is-danger"
                 onClick={() => void onDelete(collection.id)}
               >
-                删除集合
+                删除收藏夹
               </button>
             </div>
             <AssetMosaic
               assets={collection.assets}
               onSelect={onSelect}
-              actionLabel="移出集合"
+              actionLabel="移出收藏夹"
               onAction={(assetId) => void onRemoveAsset(collection.id, assetId)}
             />
           </>
         ) : (
-          <EmptyWorkflow title="选择或新建一个集合" body="先在图库多选图片，再将它们加入集合。" />
+          <EmptyWorkflow title="选择或新建收藏夹" body="先在图库选择图片，再将它们加入收藏夹。" />
         )}
       </div>
     </div>
@@ -630,7 +633,11 @@ function SearchView({
           autoFocus={floating}
           onChange={(event) => setQuery(event.target.value)}
           onKeyDown={(event) => {
-            if (event.key === "Enter" && (event.ctrlKey || event.metaKey)) {
+            if (event.key === "Escape" && onDismiss) {
+              event.preventDefault();
+              event.stopPropagation();
+              onDismiss();
+            } else if (event.key === "Enter" && (event.ctrlKey || event.metaKey)) {
               event.preventDefault();
               event.currentTarget.form?.requestSubmit();
             }
@@ -699,7 +706,7 @@ function DuplicatesView({
           重新检查
         </button>
         <button type="button" disabled={!groups.length} onClick={() => void onCreateReview()}>
-          生成“重复待处理”集合
+          生成“重复待处理”收藏夹
         </button>
         <span>不会删除、移动或重命名任何原图。</span>
       </div>

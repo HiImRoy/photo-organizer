@@ -22,6 +22,7 @@ interface SidebarProps {
   collections: CollectionSummary[];
   favoriteSourceActive: boolean;
   activeCollectionId: number | null;
+  browseRootActive: boolean;
   libraryPanelRatio: number | null;
   onLibraryPanelRatioChange: (ratio: number) => void;
   onImportLibrary: () => void;
@@ -36,19 +37,10 @@ interface SidebarProps {
   onFilterChange: (filter: AssetFilter) => void;
   onSelectFavorites: () => void;
   onSelectCollection: (collectionId: number) => void;
+  onRenameCollection: (collection: CollectionSummary) => void;
+  onMoveCollection: (collection: CollectionSummary) => void;
+  onDeleteCollection: (collection: CollectionSummary, hasChildren: boolean) => void;
 }
-
-const tones = [
-  ["low_key", "低调"],
-  ["balanced", "均衡"],
-  ["high_key", "高调"],
-] as const;
-
-const saturationLevels = [
-  ["low", "低饱和"],
-  ["medium", "中饱和"],
-  ["high", "高饱和"],
-] as const;
 
 export function Sidebar(props: SidebarProps) {
   const {
@@ -61,6 +53,7 @@ export function Sidebar(props: SidebarProps) {
     collections,
     favoriteSourceActive,
     activeCollectionId,
+    browseRootActive,
     libraryPanelRatio,
     onLibraryPanelRatioChange,
     onImportLibrary,
@@ -75,10 +68,14 @@ export function Sidebar(props: SidebarProps) {
     onFilterChange,
     onSelectFavorites,
     onSelectCollection,
+    onRenameCollection,
+    onMoveCollection,
+    onDeleteCollection,
   } = props;
   const [collapsedLibraryIds, setCollapsedLibraryIds] = useState<Set<number>>(new Set());
   const [collapsedCollectionIds, setCollapsedCollectionIds] = useState<Set<number>>(new Set());
   const [openLibraryMenuId, setOpenLibraryMenuId] = useState<number | null>(null);
+  const [openCollectionMenuId, setOpenCollectionMenuId] = useState<number | null>(null);
   const [addMenuOpen, setAddMenuOpen] = useState(false);
   const [createCollectionOpen, setCreateCollectionOpen] = useState(false);
   const [newCollectionName, setNewCollectionName] = useState("");
@@ -116,11 +113,19 @@ export function Sidebar(props: SidebarProps) {
 
   useEffect(() => {
     const findDropTarget = (event: PointerEvent): number | "root" | null => {
+      const directElement = event.target instanceof Element ? event.target : null;
+      const directRow = directElement?.closest<HTMLElement>("[data-library-drop-id]");
+      if (directRow) {
+        const libraryId = Number(directRow.dataset.libraryDropId);
+        return Number.isInteger(libraryId) ? libraryId : null;
+      }
+      if (directElement?.closest("[data-library-root-drop]")) return "root";
+
       const pointElement =
         typeof document.elementFromPoint === "function"
           ? document.elementFromPoint(event.clientX, event.clientY)
           : null;
-      const element = pointElement ?? event.target;
+      const element = pointElement ?? directElement;
       if (!(element instanceof Element)) return null;
       const row = element.closest<HTMLElement>("[data-library-drop-id]");
       if (row) {
@@ -222,20 +227,26 @@ export function Sidebar(props: SidebarProps) {
   };
 
   useEffect(() => {
-    if (openLibraryMenuId === null) return undefined;
+    if (openLibraryMenuId === null && openCollectionMenuId === null) return undefined;
 
     const closeMenuOnOutsidePointer = (event: PointerEvent) => {
       const target = event.target;
       if (!(target instanceof Element)) return;
-      if (target.closest(".library-context-menu") || target.closest(".library-menu-trigger")) {
+      if (
+        target.closest(".library-context-menu") ||
+        target.closest(".library-menu-trigger") ||
+        target.closest(".collection-context-menu") ||
+        target.closest(".collection-menu-trigger")
+      ) {
         return;
       }
       setOpenLibraryMenuId(null);
+      setOpenCollectionMenuId(null);
     };
 
     document.addEventListener("pointerdown", closeMenuOnOutsidePointer);
     return () => document.removeEventListener("pointerdown", closeMenuOnOutsidePointer);
-  }, [openLibraryMenuId]);
+  }, [openCollectionMenuId, openLibraryMenuId]);
 
   return (
     <aside className="left-panel" aria-label="图库与筛选" style={sidebarStyle}>
@@ -362,8 +373,13 @@ export function Sidebar(props: SidebarProps) {
                     return next;
                   })
                 }
+                openCollectionMenuId={openCollectionMenuId}
+                onOpenMenu={setOpenCollectionMenuId}
                 onSelectFavorites={onSelectFavorites}
                 onSelectCollection={onSelectCollection}
+                onRenameCollection={onRenameCollection}
+                onMoveCollection={onMoveCollection}
+                onDeleteCollection={onDeleteCollection}
               />
             ))}
             {collectionNodes.length > 0 && sourceNodes.length > 0 ? (
@@ -432,137 +448,104 @@ export function Sidebar(props: SidebarProps) {
         </div>
 
         <div className="sidebar-filter-area">
-          <section
-            className="panel-section sidebar-tone-color-section"
-            aria-labelledby="sidebar-tone-color-title"
-          >
-            <div className="panel-section-heading">
-              <span id="sidebar-tone-color-title">影调与颜色</span>
+          {!browseRootActive ? (
+            <div className="sidebar-filter-empty" role="status">
+              选择图库后可筛选
             </div>
+          ) : (
+            <>
+              <section
+                className="panel-section sidebar-tone-color-section"
+                aria-labelledby="sidebar-tone-color-title"
+              >
+                <div className="panel-section-heading">
+                  <span id="sidebar-tone-color-title">影调与颜色</span>
+                </div>
 
-            <div className="sidebar-filter-subsection">
-              <div className="sidebar-filter-subsection-heading">
-                <strong>颜色范围</strong>
-                {filter.colorHueCenter !== null && filter.colorHueWidth !== null ? (
-                  <span>已设定</span>
-                ) : null}
-              </div>
-              <ColorRangeFilter
-                center={filter.colorHueCenter}
-                width={filter.colorHueWidth}
-                strictness={filter.colorHueStrictness}
-                onChange={(colorHueCenter, colorHueWidth) =>
-                  onFilterChange({
-                    ...filter,
-                    colorCategories: [],
-                    colorHueCenter,
-                    colorHueWidth,
-                  })
-                }
-                onStrictnessChange={(colorHueStrictness) =>
-                  onFilterChange({ ...filter, colorHueStrictness })
-                }
+                <div className="sidebar-filter-subsection">
+                  <div className="sidebar-filter-subsection-heading">
+                    <strong>颜色范围</strong>
+                    {filter.colorHueCenter !== null && filter.colorHueWidth !== null ? (
+                      <span>已设定</span>
+                    ) : null}
+                  </div>
+                  <ColorRangeFilter
+                    center={filter.colorHueCenter}
+                    width={filter.colorHueWidth}
+                    strictness={filter.colorHueStrictness}
+                    onChange={(colorHueCenter, colorHueWidth) =>
+                      onFilterChange({
+                        ...filter,
+                        colorCategories: [],
+                        colorHueCenter,
+                        colorHueWidth,
+                      })
+                    }
+                    onStrictnessChange={(colorHueStrictness) =>
+                      onFilterChange({ ...filter, colorHueStrictness })
+                    }
+                  />
+                </div>
+
+                <div className="sidebar-filter-subsection sidebar-tone-range-subsection">
+                  <div className="sidebar-filter-subsection-heading">
+                    <strong>影调范围</strong>
+                    <span>亮度 / 饱和度</span>
+                  </div>
+                  <div className="range-filters">
+                    <RangePair
+                      label="亮度"
+                      minHint="最暗"
+                      maxHint="最亮"
+                      min={filter.brightnessMin}
+                      max={filter.brightnessMax}
+                      onChange={(brightnessMin, brightnessMax) =>
+                        onFilterChange({ ...filter, brightnessMin, brightnessMax })
+                      }
+                    />
+                    <RangePair
+                      label="饱和度"
+                      minHint="近灰阶"
+                      maxHint="高彩"
+                      min={filter.saturationMin}
+                      max={filter.saturationMax}
+                      onChange={(saturationMin, saturationMax) =>
+                        onFilterChange({ ...filter, saturationMin, saturationMax })
+                      }
+                    />
+                  </div>
+                </div>
+              </section>
+
+              <SemanticFilterSection
+                title="拍摄题材"
+                categoryGroup="scene"
+                labels={catalog.filter((label) => label.categoryGroup === "scene")}
+                filter={filter}
+                groups={groups}
+                onFilterChange={onFilterChange}
               />
-            </div>
 
-            <div className="sidebar-filter-subsection sidebar-tone-range-subsection">
-              <div className="sidebar-filter-subsection-heading">
-                <strong>影调范围</strong>
-                <span>亮度 / 饱和度</span>
-              </div>
-              <div className="range-filters">
-                <RangePair
-                  label="亮度"
-                  minHint="最暗"
-                  maxHint="最亮"
-                  min={filter.brightnessMin}
-                  max={filter.brightnessMax}
-                  onChange={(brightnessMin, brightnessMax) =>
-                    onFilterChange({ ...filter, brightnessMin, brightnessMax })
+              <SemanticFilterSection
+                title="主体标签"
+                categoryGroup="subject"
+                labels={catalog.filter((label) => label.categoryGroup === "subject")}
+                filter={filter}
+                groups={groups}
+                onFilterChange={onFilterChange}
+              />
+
+              <PanelSection title="拍摄日期">
+                <DateRangeFilter
+                  from={filter.capturedFrom}
+                  to={filter.capturedTo}
+                  onChange={(capturedFrom, capturedTo) =>
+                    onFilterChange({ ...filter, capturedFrom, capturedTo })
                   }
                 />
-                <RangePair
-                  label="饱和度"
-                  minHint="近灰阶"
-                  maxHint="高彩"
-                  min={filter.saturationMin}
-                  max={filter.saturationMax}
-                  onChange={(saturationMin, saturationMax) =>
-                    onFilterChange({ ...filter, saturationMin, saturationMax })
-                  }
-                />
-              </div>
-            </div>
-          </section>
-
-          <PanelSection title="影调">
-            <div className="chip-grid three">
-              {tones.map(([id, label]) => (
-                <button
-                  type="button"
-                  className={
-                    filter.toneLabels.includes(id) ? "filter-chip is-active" : "filter-chip"
-                  }
-                  key={id}
-                  onClick={() =>
-                    onFilterChange({ ...filter, toneLabels: toggleValue(filter.toneLabels, id) })
-                  }
-                >
-                  {label}
-                </button>
-              ))}
-            </div>
-          </PanelSection>
-
-          <SemanticFilterSection
-            title="拍摄题材"
-            categoryGroup="scene"
-            labels={catalog.filter((label) => label.categoryGroup === "scene")}
-            filter={filter}
-            groups={groups}
-            onFilterChange={onFilterChange}
-          />
-
-          <SemanticFilterSection
-            title="主体标签"
-            categoryGroup="subject"
-            labels={catalog.filter((label) => label.categoryGroup === "subject")}
-            filter={filter}
-            groups={groups}
-            onFilterChange={onFilterChange}
-          />
-
-          <PanelSection title="饱和度级别">
-            <div className="chip-grid three">
-              {saturationLevels.map(([id, label]) => (
-                <button
-                  type="button"
-                  className={
-                    filter.saturationLevels.includes(id) ? "filter-chip is-active" : "filter-chip"
-                  }
-                  key={id}
-                  onClick={() =>
-                    onFilterChange({
-                      ...filter,
-                      saturationLevels: toggleValue(filter.saturationLevels, id),
-                    })
-                  }
-                >
-                  {label}
-                </button>
-              ))}
-            </div>
-          </PanelSection>
-
-          <PanelSection title="拍摄日期">
-            <DateRangeFilter
-              from={filter.capturedFrom}
-              to={filter.capturedTo}
-              onChange={(capturedFrom, capturedTo) =>
-                onFilterChange({ ...filter, capturedFrom, capturedTo })
-              }
-            />
-          </PanelSection>
+              </PanelSection>
+            </>
+          )}
         </div>
       </section>
     </aside>
@@ -757,8 +740,13 @@ function CollectionTreeNode({
   favoriteSourceActive,
   activeCollectionId,
   onToggle,
+  openCollectionMenuId,
+  onOpenMenu,
   onSelectFavorites,
   onSelectCollection,
+  onRenameCollection,
+  onMoveCollection,
+  onDeleteCollection,
 }: {
   node: Extract<BrowseNode, { kind: "collection" }>;
   depth: number;
@@ -767,12 +755,18 @@ function CollectionTreeNode({
   favoriteSourceActive: boolean;
   activeCollectionId: number | null;
   onToggle: (id: number) => void;
+  openCollectionMenuId: number | null;
+  onOpenMenu: (id: number | null) => void;
   onSelectFavorites: () => void;
   onSelectCollection: (collectionId: number) => void;
+  onRenameCollection: (collection: CollectionSummary) => void;
+  onMoveCollection: (collection: CollectionSummary) => void;
+  onDeleteCollection: (collection: CollectionSummary, hasChildren: boolean) => void;
 }) {
   const { collection } = node;
   const isDefaultFavorites = collection.systemKey === "default_favorites";
   const isActive = isDefaultFavorites ? favoriteSourceActive : activeCollectionId === collection.id;
+  const menuOpen = openCollectionMenuId === collection.id;
   const label = collection.name || "未命名收藏夹";
   return (
     <>
@@ -807,6 +801,54 @@ function CollectionTreeNode({
           <span>{label}</span>
           <small>{collection.assetCount}</small>
         </button>
+        {!isDefaultFavorites ? (
+          <>
+            <button
+              type="button"
+              className="collection-menu-trigger"
+              aria-label={label + "收藏夹菜单"}
+              aria-expanded={menuOpen}
+              onClick={(event) => {
+                event.stopPropagation();
+                onOpenMenu(menuOpen ? null : collection.id);
+              }}
+            >
+              …
+            </button>
+            {menuOpen ? (
+              <div className="collection-context-menu" role="menu">
+                <button
+                  type="button"
+                  onClick={() => {
+                    onOpenMenu(null);
+                    onRenameCollection(collection);
+                  }}
+                >
+                  重命名
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    onOpenMenu(null);
+                    onMoveCollection(collection);
+                  }}
+                >
+                  移动收藏夹
+                </button>
+                <button
+                  type="button"
+                  className="danger-action"
+                  onClick={() => {
+                    onOpenMenu(null);
+                    onDeleteCollection(collection, node.children.length > 0);
+                  }}
+                >
+                  删除收藏夹
+                </button>
+              </div>
+            ) : null}
+          </>
+        ) : null}
       </div>
       {expanded
         ? node.children
@@ -824,8 +866,13 @@ function CollectionTreeNode({
                 favoriteSourceActive={favoriteSourceActive}
                 activeCollectionId={activeCollectionId}
                 onToggle={onToggle}
+                openCollectionMenuId={openCollectionMenuId}
+                onOpenMenu={onOpenMenu}
                 onSelectFavorites={onSelectFavorites}
                 onSelectCollection={onSelectCollection}
+                onRenameCollection={onRenameCollection}
+                onMoveCollection={onMoveCollection}
+                onDeleteCollection={onDeleteCollection}
               />
             ))
         : null}

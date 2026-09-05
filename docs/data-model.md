@@ -35,7 +35,7 @@
 
 `asset_id`、稳定英文 `label`、中文 `display_name`、原始 `similarity`、使用的 `threshold`、`model_name`、`model_version`、`analysis_version`、`source_fingerprint`、`generated_at`、`is_manual`、`is_excluded`、`is_primary`。相似度不命名为 probability/accuracy。
 
-当前自动主标签来自摄影题材候选层：人像、风光自然、街拍纪实、建筑、静物产品、美食、动物、植物、运动、交通工具、文档截图、抽象艺术。每个题材由多条提示词得到候选分数，并经过独立阈值和候选间隔拒识；当前唯一候选模型 SigLIP 2 使用匹配 logits；拒识结果在有效分类层归入抽象艺术；Places365 只作为环境/场景证据，不直接成为新的摄影题材。
+当前自动主标签来自摄影题材候选层：人像、风光、街拍、建筑、静物特写、动物、植物、交通工具、抽象艺术。每个题材由多条提示词得到候选分数，并经过独立阈值和候选间隔拒识；当前唯一候选模型 SigLIP 2 使用匹配 logits；拒识结果在有效分类层归入抽象艺术；Places365 只作为环境/场景证据，不直接成为新的摄影题材。
 
 `semantic_evidence` 还会保存当前题材模型候选、主体融合证据和 Places365 叶子场景的原始排名。每条记录通过模型名称、版本、分析版本和来源 fingerprint 区分，运行状态必须显示实际使用的模型组合。
 
@@ -47,7 +47,7 @@
 
 保存主体模型聚合出的稳定英文 `label`、中文 `display_name`、检测分数 `similarity`、阈值、模型/分析/分类法版本、来源 fingerprint 和生成时间。主体标签与 `semantic_labels` 分表，查询时只在读取层合并；表中没有 `is_primary`，因此主体标签不能成为主类别。
 
-当前主体模型链为 PicoDet-S COCO 80 类检测器和 YuNet 人脸辅助检测器。应用只保存聚合后的 `单人`、`多人`、`动物`、`车辆`、`食品`、`植物`；单人和多人互斥，宠物归入动物，不保存检测框、关键点、脸部裁剪、embedding 或身份簇。
+当前主体模型链为 PicoDet-S COCO 80 类检测器和 YuNet 人脸辅助检测器。应用只保存聚合后的 `单人`、`多人`、`动物`、`植物`、`食物`；高置信风光题材另在 `semantic_labels` 中派生可筛选的 `风景` 主体标签。单人和多人互斥，宠物归入动物，不保存检测框、关键点、脸部裁剪、embedding 或身份簇。
 
 ### `semantic_models`
 

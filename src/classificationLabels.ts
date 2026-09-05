@@ -4,32 +4,31 @@ export type ClassificationValueKind = "primary" | "tag" | "tone" | "color" | "sa
 
 export const PRIMARY_CATEGORY_OPTIONS = [
   ["photo_portrait", "人像"],
-  ["photo_landscape", "风光自然"],
-  ["photo_street", "街拍纪实"],
+  ["photo_landscape", "风光"],
+  ["photo_street", "街拍"],
   ["photo_architecture", "建筑"],
-  ["photo_still_life", "静物产品"],
-  ["photo_food", "美食"],
+  ["photo_still_life", "静物特写"],
   ["photo_wildlife", "动物"],
   ["photo_macro", "植物"],
-  ["photo_activity", "运动"],
   ["photo_vehicle", "交通工具"],
-  ["photo_document", "文档截图"],
   ["photo_abstract", "抽象艺术"],
 ] as const;
 
 export const AUXILIARY_TAG_OPTIONS = [
-  ["indoor", "室内"],
-  ["outdoor", "室外"],
   ["single_person", "单人"],
   ["multiple_people", "多人"],
-  ["vehicle", "车辆"],
-  ["food", "食品"],
   ["animal", "动物"],
   ["plant", "植物"],
-  ["night", "夜景"],
-  ["flower", "花卉"],
-  ["abstract", "抽象"],
+  ["food", "食物"],
+  ["scenery", "风景"],
 ] as const;
+
+const ACTIVE_PRIMARY_CATEGORY_IDS: ReadonlySet<string> = new Set(
+  PRIMARY_CATEGORY_OPTIONS.map(([value]) => value),
+);
+const ACTIVE_AUXILIARY_TAG_IDS: ReadonlySet<string> = new Set(
+  AUXILIARY_TAG_OPTIONS.map(([value]) => value),
+);
 
 export const TONE_OPTIONS = [
   ["low_key", "低调"],
@@ -77,7 +76,7 @@ const FALLBACK_LABELS = new Map<string, string>([
   ["photo_commercial", "商业与静物"],
   ["photo_indoor", "室内与生活"],
   ["photo_travel", "旅行人文"],
-  ["photo_event", "运动"],
+  ["photo_event", "运动（历史标签）"],
   ["photo_transport", "交通工具"],
   ["photo_plant", "植物"],
   ["photo_documentary", "抽象艺术"],
@@ -91,6 +90,7 @@ const FALLBACK_LABELS = new Map<string, string>([
   ["other", "其他"],
   ["single_person", "单人"],
   ["multiple_people", "多人"],
+  ["scenery", "风景"],
   ["person", "单人"],
   ["portrait", "单人"],
   ["group", "多人"],
@@ -106,7 +106,10 @@ const LEGACY_LABEL_ALIASES = new Map<string, string>([
   ["unknown", "photo_abstract"],
   ["photo_documentary", "photo_abstract"],
   ["photo_urban", "photo_street"],
-  ["photo_event", "photo_activity"],
+  ["photo_event", "photo_abstract"],
+  ["photo_food", "photo_still_life"],
+  ["photo_commercial", "photo_still_life"],
+  ["photo_document", "photo_abstract"],
   ["photo_transport", "photo_vehicle"],
   ["photo_plant", "photo_macro"],
   ["person", "single_person"],
@@ -120,7 +123,22 @@ export function canonicalClassificationValue(
   kind: ClassificationValueKind,
 ): string | null | undefined {
   if (!value) return value;
-  if (kind === "primary" && value === "portrait") return "photo_portrait";
+  if (kind === "primary") {
+    const legacyPrimaryAliases: Record<string, string> = {
+      portrait: "photo_portrait",
+      person: "photo_portrait",
+      landscape: "photo_landscape",
+      street: "photo_street",
+      architecture: "photo_architecture",
+      product: "photo_still_life",
+      still_life: "photo_still_life",
+      animal: "photo_wildlife",
+      vehicle: "photo_vehicle",
+      plant: "photo_macro",
+      abstract: "photo_abstract",
+    };
+    return legacyPrimaryAliases[value] ?? LEGACY_LABEL_ALIASES.get(value) ?? value;
+  }
   return LEGACY_LABEL_ALIASES.get(value) ?? value;
 }
 
@@ -186,6 +204,7 @@ export function primaryCategoryOptions(
   const canonicalSelectedValue = canonicalClassificationValue(selectedValue, "primary");
   const selectedCompatibilityOption =
     canonicalSelectedValue &&
+    ACTIVE_PRIMARY_CATEGORY_IDS.has(canonicalSelectedValue) &&
     !catalog.some((item) => item.id === canonicalSelectedValue) &&
     canonicalSelectedValue !== "unknown"
       ? [
@@ -196,11 +215,11 @@ export function primaryCategoryOptions(
         ]
       : [];
   return mergeOptions(
-    catalog
-      .filter((item) => item.isPrimaryCategory)
-      .map((item) => ({ value: item.id, label: item.displayName })),
+    PRIMARY_CATEGORY_OPTIONS.map(([value, label]) => ({ value, label })),
     [
-      ...PRIMARY_CATEGORY_OPTIONS.map(([value, label]) => ({ value, label })),
+      ...catalog
+        .filter((item) => item.isPrimaryCategory && ACTIVE_PRIMARY_CATEGORY_IDS.has(item.id))
+        .map((item) => ({ value: item.id, label: item.displayName })),
       ...selectedCompatibilityOption,
     ],
   );
@@ -214,15 +233,17 @@ export function auxiliaryTagOptions(
     AUXILIARY_TAG_OPTIONS.map(([value, label]) => ({ value, label })),
     [
       ...catalog
-        .filter((item) => !item.isPrimaryCategory)
+        .filter((item) => item.categoryGroup === "subject" && ACTIVE_AUXILIARY_TAG_IDS.has(item.id))
         .map((item) => ({ value: item.id, label: item.displayName })),
-      ...selectedValues.map((value) => {
-        const canonicalValue = canonicalClassificationValue(value, "tag") ?? value;
-        return {
-          value: canonicalValue,
-          label: classificationValueLabel(canonicalValue, "tag", catalog),
-        };
-      }),
+      ...selectedValues
+        .map((value) => {
+          const canonicalValue = canonicalClassificationValue(value, "tag") ?? value;
+          return {
+            value: canonicalValue,
+            label: classificationValueLabel(canonicalValue, "tag", catalog),
+          };
+        })
+        .filter((option) => ACTIVE_AUXILIARY_TAG_IDS.has(option.value)),
     ],
   );
 }

@@ -34,39 +34,36 @@ const rootPath = "C:\\test-data\\专业界面验收图库";
 
 const semanticCatalog: SemanticLabelDescriptor[] = [
   ["photo_portrait", "人像"],
-  ["photo_landscape", "风光自然"],
-  ["photo_street", "街拍纪实"],
+  ["photo_landscape", "风光"],
+  ["photo_street", "街拍"],
   ["photo_architecture", "建筑"],
-  ["photo_still_life", "静物产品"],
-  ["photo_food", "美食"],
+  ["photo_still_life", "静物特写"],
   ["photo_wildlife", "动物"],
   ["photo_macro", "植物"],
-  ["photo_activity", "运动"],
   ["photo_vehicle", "交通工具"],
-  ["photo_document", "文档截图"],
   ["photo_abstract", "抽象艺术"],
   ["indoor", "室内"],
   ["outdoor", "室外"],
   ["single_person", "单人"],
   ["multiple_people", "多人"],
   ["animal", "动物"],
-  ["vehicle", "车辆"],
-  ["food", "食品"],
   ["plant", "植物"],
+  ["food", "食物"],
+  ["scenery", "风景"],
 ].map(([id, displayName]) => ({
   id,
   displayName,
   categoryGroup: id.startsWith("photo_")
     ? "scene"
-    : ["single_person", "multiple_people", "animal", "vehicle", "food", "plant"].includes(id)
+    : ["single_person", "multiple_people", "animal", "plant", "food", "scenery"].includes(id)
       ? "subject"
       : "context",
   threshold: id === "single_person" ? 0.45 : 0.16,
   isPrimaryCategory: id.startsWith("photo_"),
   taxonomyVersion:
-    id.startsWith("photo_") || id === "indoor" || id === "outdoor"
-      ? "photo-organizer-photography-topics-v3"
-      : "photo-organizer-subject-tags-v2",
+    id.startsWith("photo_") || id === "indoor" || id === "outdoor" || id === "scenery"
+      ? "photo-organizer-photography-topics-v4"
+      : "photo-organizer-subject-tags-v3",
 }));
 
 const library: LibrarySummary = {
@@ -275,17 +272,17 @@ export function visualFixtureFromSearch(search: string): VisualFixture | null {
     semanticGroups: [
       {
         labelId: "photo_landscape",
-        displayName: "风光自然",
+        displayName: "风光",
         categoryGroup: "scene",
         assetCount: 7,
       },
       {
         labelId: "photo_architecture",
-        displayName: "建筑与空间",
+        displayName: "建筑",
         categoryGroup: "scene",
         assetCount: 4,
       },
-      { labelId: "photo_food", displayName: "美食", categoryGroup: "scene", assetCount: 4 },
+      { labelId: "photo_still_life", displayName: "静物特写", categoryGroup: "scene", assetCount: 4 },
       { labelId: "outdoor", displayName: "室外", categoryGroup: "context", assetCount: 11 },
     ],
     folders: [
@@ -325,16 +322,13 @@ export function fixtureAssetPage(
 function semanticLabelsFor(index: number) {
   const ids: ReadonlyArray<readonly [string, string]> = [
     ["photo_portrait", "人像"],
-    ["photo_landscape", "风光自然"],
-    ["photo_street", "街拍纪实"],
+    ["photo_landscape", "风光"],
+    ["photo_street", "街拍"],
     ["photo_architecture", "建筑"],
-    ["photo_still_life", "静物产品"],
-    ["photo_food", "美食"],
+    ["photo_still_life", "静物特写"],
     ["photo_wildlife", "动物"],
     ["photo_macro", "植物"],
-    ["photo_activity", "运动"],
     ["photo_vehicle", "交通工具"],
-    ["photo_document", "文档截图"],
     ["photo_abstract", "抽象艺术"],
   ];
   const primary = ids[index % ids.length];
@@ -349,7 +343,7 @@ function semanticLabelsFor(index: number) {
       modelName: "SigLIP2-Base-Patch16-224",
       modelVersion: "onnx-int8-2026-08-11",
       analysisVersion: "photo-organizer-semantic-topic-candidates-siglip2-v2",
-      taxonomyVersion: "photo-organizer-photography-topics-v3",
+      taxonomyVersion: "photo-organizer-photography-topics-v4",
       analyzedAt: "2026-08-07T03:12:00Z",
       isManual: false,
       isPrimary: rank === 0,

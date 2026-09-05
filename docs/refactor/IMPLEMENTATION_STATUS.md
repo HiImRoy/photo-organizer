@@ -35,7 +35,7 @@ Known issues:
 
 - Checkpoint A remains blocked for review until the Manual Verification list in `checkpoint-a-library-safety.md` is completed in the desktop application.
 - Import performance optimization Phases 1 and 2 are implemented in
-  `docs/plans/0005-import-performance.md`; Release import speed was manually
+  `docs/plans/0036-thumbnail-only-decode.md`; Release import speed was manually
   accepted, and the temporary profiling logs were removed after diagnosis.
 - Preview generation now runs off the UI command path. Single-image preview requests
   the original source first and falls back to a bounded screen preview if the source
@@ -145,7 +145,8 @@ Known issues:
 
 - 历史 TinyCLIP、当前 SigLIP 2、缩略图输入、批处理、Tone/Color 和人工 override 已存在过对应实现；当前 MVP 只保留 SigLIP 2 题材模型。
 - D1-D3 taxonomy/拒识/分组基线已实现；`unknown` 不再是模型 prompt，成功空结果由 Effective Resolver 生成虚拟拒识状态。
-- 0029 题材候选层已接入：SigLIP 2 使用多 prompt 匹配 logits 作为可审计候选证据，Places365 映射证据负责可观察场景题材的保守主类，主体任务可补充明确的单人/多人/动物/车辆/食品/植物标签；当前 taxonomy 已收敛为 `photo-organizer-photography-topics-v3`，主体 taxonomy 为 `photo-organizer-subject-tags-v2`。低置信题材统一归入抽象艺术，纪实与工业不再作为摄影师筛选类别。MVP 已移除 TinyCLIP/MobileCLIP 的随包资源和装载入口。
+- 0029 题材候选层已接入：SigLIP 2 使用多 prompt 匹配 logits 作为可审计候选证据，Places365 映射证据负责可观察场景题材的保守主类，主体任务可补充明确的单人/多人/动物/植物/食物标签；当前 taxonomy 已收敛为 `photo-organizer-photography-topics-v4`，主体 taxonomy 为 `photo-organizer-subject-tags-v3`。当前用户界面只开放人像、风光、街拍、建筑、静物特写、动物、植物、交通工具、抽象艺术，以及单人、多人、动物、植物、食物、风景主体标签；风景由高置信风光题材派生。低置信题材统一归入抽象艺术，纪实与工业不再作为摄影师筛选类别。MVP 已移除 TinyCLIP/MobileCLIP 的随包资源和装载入口。
+- 0063 摄影题材与主体标签精简已落地：筛选/编辑选项严格固定为九个题材和六个主体标签，历史 ID 仅在读取层归并并保持可读；实现边界、兼容策略与验收清单见 `docs/plans/0063-photography-label-taxonomy-v4.md`。
 - D8 多强调色第一版已实现：缩略图-only 的 OKLab 加权聚类、感知近色合并、显著性/面积/空间连续性排序、`coveragePalette`/`prominentPalette` 多值返回、数据库 Effective 筛选和中文 UI 展示均已接入。
 - SigLIP 2 评测协议、批量评测 CLI、逐类阈值候选和 margin 扫描已经实现；仓库没有授权的真实摄影评测集，因此尚未完成逐类 quality calibration、混淆矩阵人工复核、Color evaluation、before/after 报告和 manual visual review Exit Criteria，也没有把候选阈值写回运行时。D 仍保持 PARTIAL_REQUIRES_RECONCILIATION。
 

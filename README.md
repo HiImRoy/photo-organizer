@@ -14,6 +14,8 @@ PhotoOrganizer 是一个 Windows 优先、local-first 的桌面照片管理工�
 - 基于 SQLite 保存本地图库索引、分析结果和用户标记。
 - 亮度、对比度、饱和度、影调、主色和强调色提取。
 - SigLIP 2 Base INT8 本地语义分析，以及摄影题材、主体标签和环境属性筛选。
+- Windows 上可选 DirectML 推理；Provider 自检或模型会话失败时自动回退 CPU，GPU 选项不会把“检测到显卡”误报成可用。DirectML 的有效批大小按专用显存分级（最高 32），运行时失败会在同一后端自动降批。
+- 分析任务详情会显示实际后端：\`DirectML GPU\` 表示分类器会话已绑定 DirectML，\`CPU\` 表示当前任务走 CPU。任务前后显存没有明显变化不能单独证明未使用 GPU；DirectML/ONNX Runtime 可能复用已分配的模型显存，验收应同时看任务后端、GPU 计算占用和失败回退提示。
 - 物理本地来源与虚拟收藏夹分离；一张图片可以加入多个收藏夹。
 - 网格、单图预览、信息检查器、直方图、分组、星级和颜色标记。
 - 本地 AI 搜索、相似图片/重复审阅和基础整理预览。
@@ -62,13 +64,25 @@ PhotoOrganizer 的核心模型有两层：
 npm.cmd install
 ```
 
-启动隔离的桌面开发环境：
+手动构建并启动桌面应用（推荐）：
+
+1. 双击项目根目录的 `启动 PhotoOrganizer.cmd`。
+2. 脚本会检查 Node.js、npm 和 Rust，并在 `package-lock.json` 变化时同步依赖。
+3. 前端构建通过后，脚本会启动原生 Tauri 桌面窗口。
+
+也可以从终端运行：
 
 ```powershell
 npm.cmd run start:desktop
 ```
 
-也可以双击项目根目录的 `启动 PhotoOrganizer.cmd`。开发环境默认使用 `%TEMP%\PhotoOrganizer-dev-data` 保存测试数据库、缩略图和日志，不会自动扫描个人照片目录。需要测试已有应用数据时，再显式设置 `PHOTO_ORGANIZER_DATA_DIR`。
+只检查环境，不构建和启动：
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts\manual-build-start.ps1 -CheckOnly
+```
+
+开发环境默认使用 `%TEMP%\PhotoOrganizer-dev-data` 保存测试数据库、缩略图和日志，不会自动扫描个人照片目录。需要测试已有应用数据时，再显式设置 `PHOTO_ORGANIZER_DATA_DIR`。
 
 ## 质量检查
 
@@ -105,6 +119,7 @@ scripts/             开发、检查和 Windows 构建脚本
 
 ## 文档
 
+- [换机开发交接与待办](docs/HANDOFF.md)
 - [架构](docs/architecture.md)
 - [数据模型](docs/data-model.md)
 - [当前功能](docs/current-functionality.md)

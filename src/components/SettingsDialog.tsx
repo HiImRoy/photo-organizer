@@ -1,13 +1,16 @@
 import { useState } from "react";
 
-import type {
+import {
+  analysisBatchLimit,
   AppSettings,
+  GPU_ANALYSIS_BATCH_MAX,
   AppThemeMode,
   ColorShortcut,
   RatingShortcut,
   ViewShortcut,
 } from "../settings";
-import { PanelIcon, SettingsIcon, SortIcon } from "./Icons";
+import type { GpuCapabilities } from "../types";
+import { CloseIcon, PanelIcon, SettingsIcon, SortIcon } from "./Icons";
 
 const ratingRows: Array<{ id: RatingShortcut; label: string }> = [
   { id: "0", label: "清除星级" },
@@ -30,20 +33,21 @@ const viewRows: Array<{ id: ViewShortcut; label: string }> = [
   { id: "single", label: "单图预览" },
 ];
 
-type SettingsSectionId = "appearance" | "performance" | "shortcuts";
+type SettingsSectionId = "display" | "processing" | "shortcuts";
 
 const settingsSections: Array<{
   id: SettingsSectionId;
   label: string;
   hint: string;
 }> = [
-  { id: "appearance", label: "界面", hint: "主题与显示" },
-  { id: "performance", label: "性能", hint: "导入与分析" },
-  { id: "shortcuts", label: "快捷键", hint: "视图、评分与色标" },
+  { id: "display", label: "显示", hint: "主题与启动" },
+  { id: "processing", label: "处理", hint: "导入与分析" },
+  { id: "shortcuts", label: "快捷键", hint: "浏览与标记" },
 ];
 
 export function SettingsDialog({
   settings,
+  gpuCapabilities,
   themeMode,
   onChange,
   onThemeChange,
@@ -51,13 +55,16 @@ export function SettingsDialog({
   onClose,
 }: {
   settings: AppSettings;
+  gpuCapabilities: GpuCapabilities | null;
   themeMode: AppThemeMode;
   onChange: (settings: AppSettings) => void;
   onThemeChange: (theme: AppThemeMode) => void;
   onReset: () => void;
   onClose: () => void;
 }) {
-  const [activeSection, setActiveSection] = useState<SettingsSectionId>("appearance");
+  const [activeSection, setActiveSection] = useState<SettingsSectionId>("display");
+  const gpuProviderReady = gpuCapabilities?.directml.state === "ready";
+  const batchLimit = analysisBatchLimit(gpuCapabilities, settings.gpuAccelerationEnabled);
 
   return (
     <div
@@ -74,23 +81,20 @@ export function SettingsDialog({
         aria-labelledby="settings-dialog-title"
       >
         <header className="settings-dialog-heading">
-          <div>
-            <span className="settings-dialog-kicker">PhotoOrganizer</span>
-            <h2 id="settings-dialog-title">设置</h2>
-          </div>
+          <h2 id="settings-dialog-title">设置</h2>
           <button type="button" className="dialog-close" onClick={onClose} aria-label="关闭设置">
-            ×
+            <CloseIcon width="16" height="16" />
           </button>
         </header>
 
         <div className="settings-dialog-body">
           <nav className="settings-side-nav" aria-label="设置栏目" role="tablist">
-            <span className="settings-side-nav-label">应用设置</span>
             {settingsSections.map((section) => {
               const selected = activeSection === section.id;
               return (
                 <button
                   key={section.id}
+                  id={`settings-tab-${section.id}`}
                   type="button"
                   role="tab"
                   aria-selected={selected}
@@ -98,12 +102,12 @@ export function SettingsDialog({
                   className={selected ? "is-active" : ""}
                   onClick={() => setActiveSection(section.id)}
                 >
-                  {section.id === "appearance" ? (
-                    <PanelIcon width="15" height="15" />
-                  ) : section.id === "performance" ? (
-                    <SortIcon width="15" height="15" />
+                  {section.id === "display" ? (
+                    <PanelIcon width="16" height="16" />
+                  ) : section.id === "processing" ? (
+                    <SortIcon width="16" height="16" />
                   ) : (
-                    <SettingsIcon width="15" height="15" />
+                    <SettingsIcon width="16" height="16" />
                   )}
                   <span>
                     <strong>{section.label}</strong>
@@ -112,108 +116,183 @@ export function SettingsDialog({
                 </button>
               );
             })}
-            <p className="settings-side-nav-note">修改会自动保存</p>
           </nav>
 
           <div className="settings-dialog-content">
-            {activeSection === "appearance" ? (
+            {activeSection === "display" ? (
               <section
                 className="settings-page"
-                id="settings-panel-appearance"
+                id="settings-panel-display"
                 role="tabpanel"
-                aria-labelledby="settings-appearance-title"
+                aria-labelledby="settings-tab-display"
               >
-                <div className="settings-page-heading">
-                  <span>界面</span>
-                  <h3 id="settings-appearance-title">主题与显示</h3>
-                  <p>调整 PhotoOrganizer 的整体显示方式。</p>
-                </div>
-                <div className="settings-form">
-                  <div className="settings-field-row">
-                    <div>
-                      <strong>主题</strong>
-                      <small>在深色和白天主题之间切换</small>
+                <SettingsPageHeading title="显示" detail="主题与启动浏览方式" />
+                <div className="settings-groups">
+                  <SettingsGroup title="外观">
+                    <div className="settings-field-row">
+                      <div>
+                        <strong>主题</strong>
+                      </div>
+                      <div className="settings-choice-row" role="radiogroup" aria-label="界面主题">
+                        <label className={themeMode === "dark" ? "is-active" : ""}>
+                          <input
+                            type="radio"
+                            name="settings-theme"
+                            checked={themeMode === "dark"}
+                            onChange={() => onThemeChange("dark")}
+                          />
+                          深色
+                        </label>
+                        <label className={themeMode === "light" ? "is-active" : ""}>
+                          <input
+                            type="radio"
+                            name="settings-theme"
+                            checked={themeMode === "light"}
+                            onChange={() => onThemeChange("light")}
+                          />
+                          白天
+                        </label>
+                      </div>
                     </div>
-                    <div className="settings-choice-row" role="radiogroup" aria-label="界面主题">
-                      <label className={themeMode === "dark" ? "is-active" : ""}>
-                        <input
-                          type="radio"
-                          name="settings-theme"
-                          checked={themeMode === "dark"}
-                          onChange={() => onThemeChange("dark")}
-                        />
-                        深色
-                      </label>
-                      <label className={themeMode === "light" ? "is-active" : ""}>
-                        <input
-                          type="radio"
-                          name="settings-theme"
-                          checked={themeMode === "light"}
-                          onChange={() => onThemeChange("light")}
-                        />
-                        白天
-                      </label>
+                  </SettingsGroup>
+
+                  <SettingsGroup title="启动">
+                    <div className="settings-field-row">
+                      <div>
+                        <strong>默认预览</strong>
+                        <small>下次启动时打开</small>
+                      </div>
+                      <div
+                        className="settings-choice-row"
+                        role="radiogroup"
+                        aria-label="启动默认预览"
+                      >
+                        <label className={settings.startupView === "grid" ? "is-active" : ""}>
+                          <input
+                            type="radio"
+                            name="settings-startup-view"
+                            checked={settings.startupView === "grid"}
+                            onChange={() => onChange({ ...settings, startupView: "grid" })}
+                          />
+                          多图
+                        </label>
+                        <label className={settings.startupView === "single" ? "is-active" : ""}>
+                          <input
+                            type="radio"
+                            name="settings-startup-view"
+                            checked={settings.startupView === "single"}
+                            onChange={() => onChange({ ...settings, startupView: "single" })}
+                          />
+                          单图
+                        </label>
+                      </div>
                     </div>
-                  </div>
+                    <label className="settings-field-row settings-select-field">
+                      <span>
+                        <strong>默认每行图片数</strong>
+                        <small>多图预览的初始密度</small>
+                      </span>
+                      <select
+                        aria-label="默认每行图片数"
+                        value={settings.defaultGridColumns}
+                        onChange={(event) =>
+                          onChange({ ...settings, defaultGridColumns: Number(event.target.value) })
+                        }
+                      >
+                        {[2, 4, 6, 8, 10, 12].map((value) => (
+                          <option value={value} key={value}>
+                            {value} 张
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                  </SettingsGroup>
                 </div>
               </section>
             ) : null}
 
-            {activeSection === "performance" ? (
+            {activeSection === "processing" ? (
               <section
                 className="settings-page"
-                id="settings-panel-performance"
+                id="settings-panel-processing"
                 role="tabpanel"
-                aria-labelledby="settings-performance-title"
+                aria-labelledby="settings-tab-processing"
               >
-                <div className="settings-page-heading">
-                  <span>性能</span>
-                  <h3 id="settings-performance-title">导入与分析</h3>
-                  <p>控制缩略图处理和模型分析的资源占用。修改对新任务生效。</p>
-                </div>
-                <div className="settings-form">
-                  <label className="settings-field-row settings-number-field">
-                    <span>
-                      <strong>导入并行数</strong>
-                      <small>缩略图生成与基础特征处理 worker</small>
-                    </span>
-                    <select
-                      aria-label="导入并行数"
-                      value={settings.importWorkerCount}
-                      onChange={(event) =>
-                        onChange({ ...settings, importWorkerCount: Number(event.target.value) })
-                      }
-                    >
-                      <option value="1">1</option>
-                      <option value="2">2</option>
-                    </select>
-                  </label>
-                  <label className="settings-field-row settings-number-field">
-                    <span>
-                      <strong>分析批大小</strong>
-                      <small>CPU 模型一次送入的缩略图数量</small>
-                    </span>
-                    <select
-                      aria-label="分析批大小"
-                      value={settings.analysisBatchSize}
-                      onChange={(event) =>
-                        onChange({ ...settings, analysisBatchSize: Number(event.target.value) })
-                      }
-                    >
-                      {[1, 2, 3, 4, 5, 6, 7, 8].map((value) => (
-                        <option value={value} key={value}>
-                          {value}
-                        </option>
-                      ))}
-                    </select>
-                  </label>
-                  <div className="settings-field-row settings-readonly-row">
-                    <span>
-                      <strong>分析任务并行数</strong>
-                      <small>单模型单任务，避免 CPU 争用</small>
-                    </span>
-                    <b>1</b>
-                  </div>
+                <SettingsPageHeading title="处理" detail="调整新任务的资源占用" />
+                <div className="settings-groups">
+                  <SettingsGroup title="导入">
+                    <label className="settings-field-row settings-select-field">
+                      <span>
+                        <strong>并行任务</strong>
+                        <small>缩略图生成与基础特征处理</small>
+                      </span>
+                      <select
+                        aria-label="导入并行数"
+                        value={settings.importWorkerCount}
+                        onChange={(event) =>
+                          onChange({ ...settings, importWorkerCount: Number(event.target.value) })
+                        }
+                      >
+                        <option value="1">1</option>
+                        <option value="2">2（推荐）</option>
+                      </select>
+                    </label>
+                  </SettingsGroup>
+
+                  <SettingsGroup title="分析" aside="单任务运行">
+                    <div className="settings-readonly-row">
+                      <span>
+                        <strong>独立 GPU 加速</strong>
+                        <small>{gpuCapabilities?.message ?? "正在检测硬件…"}</small>
+                      </span>
+                      <b>{gpuStatusLabel(gpuCapabilities)}</b>
+                    </div>
+                    <label className="settings-field-row settings-toggle-field">
+                      <span>
+                        <strong>启用 GPU 加速</strong>
+                        <small>
+                          {gpuProviderReady
+                            ? "Provider 已就绪"
+                            : "Provider 未就绪，当前分析仍使用 CPU"}
+                        </small>
+                      </span>
+                      <input
+                        type="checkbox"
+                        aria-label="启用 GPU 加速"
+                        checked={settings.gpuAccelerationEnabled}
+                        disabled={!gpuProviderReady}
+                        onChange={(event) =>
+                          onChange({ ...settings, gpuAccelerationEnabled: event.target.checked })
+                        }
+                      />
+                    </label>
+                    <label className="settings-field-row settings-select-field">
+                      <span>
+                        <strong>批大小</strong>
+                        <small>一次送入模型的缩略图数量；当前有效上限 {batchLimit}</small>
+                      </span>
+                      <select
+                        aria-label="分析批大小"
+                        value={Math.min(settings.analysisBatchSize, batchLimit)}
+                        onChange={(event) =>
+                          onChange({ ...settings, analysisBatchSize: Number(event.target.value) })
+                        }
+                      >
+                        {Array.from(
+                          { length: GPU_ANALYSIS_BATCH_MAX },
+                          (_, index) => index + 1,
+                        ).map((value) => (
+                          <option value={value} key={value} disabled={value > batchLimit}>
+                            {value === 4
+                              ? "4（推荐）"
+                              : value > batchLimit
+                                ? value + "（当前上限）"
+                                : value}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                  </SettingsGroup>
                 </div>
               </section>
             ) : null}
@@ -223,17 +302,12 @@ export function SettingsDialog({
                 className="settings-page"
                 id="settings-panel-shortcuts"
                 role="tabpanel"
-                aria-labelledby="settings-shortcuts-title"
+                aria-labelledby="settings-tab-shortcuts"
               >
-                <div className="settings-page-heading">
-                  <span>快捷键</span>
-                  <h3 id="settings-shortcuts-title">视图与标记</h3>
-                  <p>设置视图、评分和色标快捷键；输入单个字符后立即保存。</p>
-                </div>
-                <div className="settings-shortcut-groups">
-                  <section className="settings-shortcut-group">
-                    <h4>视图</h4>
-                    <div className="settings-shortcut-list">
+                <SettingsPageHeading title="快捷键" detail="输入单个字符后自动保存" />
+                <div className="settings-groups settings-shortcut-groups">
+                  <SettingsGroup title="浏览">
+                    <div className="settings-shortcut-list settings-shortcut-list-two">
                       {viewRows.map((row) => (
                         <ShortcutInput
                           key={row.id}
@@ -251,10 +325,10 @@ export function SettingsDialog({
                         />
                       ))}
                     </div>
-                  </section>
-                  <section className="settings-shortcut-group">
-                    <h4>星级</h4>
-                    <div className="settings-shortcut-list">
+                  </SettingsGroup>
+
+                  <SettingsGroup title="星级">
+                    <div className="settings-shortcut-list settings-shortcut-list-rating">
                       {ratingRows.map((row) => (
                         <ShortcutInput
                           key={row.id}
@@ -271,11 +345,31 @@ export function SettingsDialog({
                           }
                         />
                       ))}
+                      <ShortcutInput
+                        label="降低一级"
+                        value={settings.shortcuts.ratingDown}
+                        onChange={(value) =>
+                          onChange({
+                            ...settings,
+                            shortcuts: { ...settings.shortcuts, ratingDown: value },
+                          })
+                        }
+                      />
+                      <ShortcutInput
+                        label="提高一级"
+                        value={settings.shortcuts.ratingUp}
+                        onChange={(value) =>
+                          onChange({
+                            ...settings,
+                            shortcuts: { ...settings.shortcuts, ratingUp: value },
+                          })
+                        }
+                      />
                     </div>
-                  </section>
-                  <section className="settings-shortcut-group">
-                    <h4>色标</h4>
-                    <div className="settings-shortcut-list settings-color-shortcuts">
+                  </SettingsGroup>
+
+                  <SettingsGroup title="色标">
+                    <div className="settings-shortcut-list settings-shortcut-list-color">
                       {colorRows.map((row) => (
                         <ShortcutInput
                           key={row.id}
@@ -293,32 +387,7 @@ export function SettingsDialog({
                         />
                       ))}
                     </div>
-                  </section>
-                  <section className="settings-shortcut-group settings-step-group">
-                    <h4>星级调整</h4>
-                    <div className="settings-shortcut-list settings-step-shortcuts">
-                      <ShortcutInput
-                        label="星级减少"
-                        value={settings.shortcuts.ratingDown}
-                        onChange={(value) =>
-                          onChange({
-                            ...settings,
-                            shortcuts: { ...settings.shortcuts, ratingDown: value },
-                          })
-                        }
-                      />
-                      <ShortcutInput
-                        label="星级增加"
-                        value={settings.shortcuts.ratingUp}
-                        onChange={(value) =>
-                          onChange({
-                            ...settings,
-                            shortcuts: { ...settings.shortcuts, ratingUp: value },
-                          })
-                        }
-                      />
-                    </div>
-                  </section>
+                  </SettingsGroup>
                 </div>
               </section>
             ) : null}
@@ -326,7 +395,7 @@ export function SettingsDialog({
         </div>
 
         <footer className="settings-dialog-footer">
-          <span className="settings-footer-note">设置保存在本机</span>
+          <span className="settings-footer-note">自动保存到本机</span>
           <div className="settings-footer-actions" role="group" aria-label="设置操作">
             <button
               type="button"
@@ -349,6 +418,49 @@ export function SettingsDialog({
   );
 }
 
+function gpuStatusLabel(capabilities: GpuCapabilities | null) {
+  if (!capabilities) return "检测中";
+  if (capabilities.directml.state === "ready") return "可用";
+  if (capabilities.dedicatedGpuAvailable) return "待接入";
+  if (
+    capabilities.status === "no_gpu" ||
+    capabilities.status === "integrated_only" ||
+    capabilities.status === "unsupported_platform"
+  ) {
+    return "不可用";
+  }
+  return "检查失败";
+}
+
+function SettingsPageHeading({ title, detail }: { title: string; detail: string }) {
+  return (
+    <header className="settings-page-heading">
+      <h3>{title}</h3>
+      <p>{detail}</p>
+    </header>
+  );
+}
+
+function SettingsGroup({
+  title,
+  aside,
+  children,
+}: {
+  title: string;
+  aside?: string;
+  children: React.ReactNode;
+}) {
+  return (
+    <section className="settings-group">
+      <header className="settings-group-heading">
+        <h4>{title}</h4>
+        {aside ? <span>{aside}</span> : null}
+      </header>
+      <div className="settings-group-content">{children}</div>
+    </section>
+  );
+}
+
 function ShortcutInput({
   label,
   value,
@@ -365,6 +477,7 @@ function ShortcutInput({
         aria-label={`${label}快捷键`}
         value={value}
         maxLength={1}
+        onFocus={(event) => event.currentTarget.select()}
         onChange={(event) => onChange(event.target.value.slice(-1))}
       />
     </label>

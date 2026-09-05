@@ -8,9 +8,9 @@ The semantic workspace release bundles the following additional MIT-licensed art
 
 - TinyCLIP code/model lineage: Microsoft Cream/TinyCLIP and `wkcn/TinyCLIP-ViT-8M-16-Text-3M-YFCC15M`.
 - ONNX conversion: `onnx-community/TinyCLIP-ViT-8M-16-Text-3M-YFCC15M-ONNX`, including `model-int8.onnx`, tokenizer and preprocessing metadata.
-- Microsoft ONNX Runtime 1.24.1 Windows x64 CPU binary (`onnxruntime.dll`).
+- Microsoft ONNX Runtime 1.24.1 Windows x64 DirectML package (onnxruntime.dll and onnxruntime_providers_shared.dll); the package is MIT-licensed and includes the CPU fallback provider.
 
-Exact source URLs, hashes and upstream license/notice files are archived under `src-tauri/resources/models/tinyclip-vit-8m-16-text-3m-yfcc15m/` and `src-tauri/resources/runtime/`. The release does **not** include Python, OpenCV, ExifTool, CUDA or cuDNN.
+Exact source URLs, hashes and upstream license/notice files are archived under `src-tauri/resources/models/tinyclip-vit-8m-16-text-3m-yfcc15m/` and `src-tauri/resources/runtime/`. The release does **not** include Python, OpenCV, ExifTool, CUDA or cuDNN. DirectML is a Windows system component and is not redistributed.
 
 This file is a release checklist, not a substitute for the license metadata generated from locked dependencies. Before a public release:
 

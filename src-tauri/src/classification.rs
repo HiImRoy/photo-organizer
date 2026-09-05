@@ -24,7 +24,7 @@ pub struct ClassificationFieldDescriptor {
 
 pub fn registry_descriptors() -> Vec<ClassificationFieldDescriptor> {
     vec![
-        descriptor(FIELD_PRIMARY_CATEGORY, "场景分类", "single"),
+        descriptor(FIELD_PRIMARY_CATEGORY, "拍摄题材", "single"),
         descriptor(FIELD_AUXILIARY_TAGS, "辅助标签", "multi"),
         descriptor(FIELD_TONE, "影调", "single"),
         descriptor(FIELD_DOMINANT_COLOR_CATEGORY, "主色", "multi"),
@@ -321,6 +321,7 @@ mod tests {
         assert!(registry.iter().all(|field| {
             field.supports_manual_override && field.supports_restore_auto && field.filterable
         }));
+        assert_eq!(registry[0].display_name, "拍摄题材");
         assert!(!is_registry_field("brightness"));
     }
 

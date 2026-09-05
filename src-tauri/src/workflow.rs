@@ -97,6 +97,20 @@ pub struct CollectionDetail {
     pub assets: Vec<WorkflowAsset>,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum CollectionDeleteMode {
+    DeleteSubtree,
+    PromoteChildren,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CollectionMembershipMutation {
+    pub affected_asset_count: i64,
+    pub skipped_asset_count: i64,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct DuplicateGroup {
@@ -396,21 +410,123 @@ pub fn create_collection_under(
     collection_summary(&connection, connection.last_insert_rowid())
 }
 
-pub fn delete_collection(repository: &Repository, collection_id: i64) -> AppResult<bool> {
+pub fn rename_collection(
+    repository: &Repository,
+    collection_id: i64,
+    name: &str,
+) -> AppResult<CollectionSummary> {
+    let name = validate_collection_name(name)?;
     let connection = open(repository)?;
-    let existing_system_key: Option<String> = connection
-        .query_row(
-            "SELECT system_key FROM collections WHERE id=?1",
-            [collection_id],
-            |row| row.get(0),
-        )
-        .optional()?;
-    if existing_system_key.as_deref() == Some("default_favorites") {
+    let (_, parent_collection_id) = require_manual_collection(&connection, collection_id)?;
+    ensure_collection_name_available(&connection, name, parent_collection_id, Some(collection_id))?;
+    connection.execute(
+        "UPDATE collections SET name=?2, updated_at=?3 WHERE id=?1",
+        params![collection_id, name, now()],
+    )?;
+    collection_summary(&connection, collection_id)
+}
+
+pub fn move_collection(
+    repository: &Repository,
+    collection_id: i64,
+    parent_collection_id: Option<i64>,
+) -> AppResult<CollectionSummary> {
+    let connection = open(repository)?;
+    let (name, current_parent_id) = require_manual_collection(&connection, collection_id)?;
+    if current_parent_id == parent_collection_id {
+        return collection_summary(&connection, collection_id);
+    }
+    if parent_collection_id == Some(collection_id) {
         return Err(AppError::InvalidArgument(
-            "default favorites collection cannot be deleted".into(),
+            "collection cannot be its own parent".into(),
         ));
     }
-    Ok(connection.execute("DELETE FROM collections WHERE id=?1", [collection_id])? > 0)
+    if let Some(parent_collection_id) = parent_collection_id {
+        require_manual_collection(&connection, parent_collection_id)?;
+        let creates_cycle: bool = connection.query_row(
+            "WITH RECURSIVE descendants(id) AS (
+                 SELECT id FROM collections WHERE parent_collection_id=?1
+                 UNION ALL
+                 SELECT child.id
+                 FROM collections child
+                 JOIN descendants parent ON child.parent_collection_id=parent.id
+             )
+             SELECT EXISTS(SELECT 1 FROM descendants WHERE id=?2)",
+            params![collection_id, parent_collection_id],
+            |row| row.get(0),
+        )?;
+        if creates_cycle {
+            return Err(AppError::InvalidArgument(
+                "collection cannot be moved into one of its descendants".into(),
+            ));
+        }
+    }
+    ensure_collection_name_available(
+        &connection,
+        &name,
+        parent_collection_id,
+        Some(collection_id),
+    )?;
+    connection.execute(
+        "UPDATE collections
+         SET parent_collection_id=?2,
+             display_order=COALESCE((
+                 SELECT MAX(display_order) + 1
+                 FROM collections
+                 WHERE parent_collection_id IS ?2 AND id<>?1
+             ), 0),
+             updated_at=?3
+         WHERE id=?1",
+        params![collection_id, parent_collection_id, now()],
+    )?;
+    collection_summary(&connection, collection_id)
+}
+
+pub fn delete_collection(repository: &Repository, collection_id: i64) -> AppResult<bool> {
+    delete_collection_with_mode(
+        repository,
+        collection_id,
+        CollectionDeleteMode::DeleteSubtree,
+    )
+}
+
+pub fn delete_collection_with_mode(
+    repository: &Repository,
+    collection_id: i64,
+    mode: CollectionDeleteMode,
+) -> AppResult<bool> {
+    let mut connection = open(repository)?;
+    let transaction = connection.transaction()?;
+    let (_, parent_collection_id) = require_manual_collection(&transaction, collection_id)?;
+    if mode == CollectionDeleteMode::PromoteChildren {
+        let has_name_conflict: bool = transaction.query_row(
+            "SELECT EXISTS(
+                 SELECT 1
+                 FROM collections child
+                 JOIN collections sibling
+                   ON sibling.parent_collection_id IS ?2
+                  AND sibling.name=child.name COLLATE NOCASE
+                  AND sibling.id<>?1
+                 WHERE child.parent_collection_id=?1
+             )",
+            params![collection_id, parent_collection_id],
+            |row| row.get(0),
+        )?;
+        if has_name_conflict {
+            return Err(AppError::InvalidArgument(
+                "a promoted child would conflict with an existing collection name".into(),
+            ));
+        }
+        transaction.execute(
+            "UPDATE collections
+             SET parent_collection_id=?2, updated_at=?3
+             WHERE parent_collection_id=?1",
+            params![collection_id, parent_collection_id, now()],
+        )?;
+    }
+    let deleted = transaction.execute("DELETE FROM collections WHERE id=?1", [collection_id])?;
+    transaction.commit()?;
+    Ok(deleted > 0)
 }
 
 pub fn add_assets_to_collection(
@@ -418,47 +534,123 @@ pub fn add_assets_to_collection(
     collection_id: i64,
     asset_ids: &[i64],
 ) -> AppResult<CollectionSummary> {
+    add_assets_to_collections(repository, &[collection_id], asset_ids)?
+        .into_iter()
+        .next()
+        .ok_or_else(|| AppError::NotFound(format!("collection {collection_id}")))
+}
+
+pub fn add_assets_to_collections(
+    repository: &Repository,
+    collection_ids: &[i64],
+    asset_ids: &[i64],
+) -> AppResult<Vec<CollectionSummary>> {
     let mut connection = open(repository)?;
     let transaction = connection.transaction()?;
-    let exists: bool = transaction.query_row(
-        "SELECT EXISTS(SELECT 1 FROM collections WHERE id=?1)",
-        [collection_id],
-        |row| row.get(0),
-    )?;
-    if !exists {
-        return Err(AppError::NotFound(format!("collection {collection_id}")));
+    let unique_collection_ids = collection_ids.iter().copied().collect::<BTreeSet<_>>();
+    if unique_collection_ids.is_empty() {
+        return Err(AppError::InvalidArgument(
+            "at least one target collection is required".into(),
+        ));
     }
-    let is_default_favorites: bool = transaction.query_row(
-        "SELECT collection_kind='system_favorites'
-         FROM collections WHERE id=?1",
-        [collection_id],
-        |row| row.get(0),
-    )?;
     let timestamp = now();
     let unique_asset_ids = asset_ids.iter().copied().collect::<BTreeSet<_>>();
-    for asset_id in &unique_asset_ids {
+    for collection_id in &unique_collection_ids {
+        let collection_kind: Option<String> = transaction
+            .query_row(
+                "SELECT collection_kind FROM collections WHERE id=?1",
+                [collection_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let collection_kind = collection_kind
+            .ok_or_else(|| AppError::NotFound(format!("collection {collection_id}")))?;
+        for asset_id in &unique_asset_ids {
+            transaction.execute(
+                "INSERT OR IGNORE INTO collection_assets(collection_id, asset_id, added_at)
+                 SELECT ?1, id, ?3 FROM assets WHERE id=?2",
+                params![collection_id, asset_id, timestamp],
+            )?;
+        }
+        if collection_kind == "system_favorites" {
+            for asset_id in &unique_asset_ids {
+                transaction.execute("UPDATE assets SET is_favorite=1 WHERE id=?1", [asset_id])?;
+            }
+        }
         transaction.execute(
-            "INSERT OR IGNORE INTO collection_assets(collection_id, asset_id, added_at)
-             SELECT ?1, id, ?3 FROM assets WHERE id=?2",
-            params![collection_id, asset_id, timestamp],
+            "UPDATE collections SET updated_at=?2 WHERE id=?1",
+            params![collection_id, timestamp],
         )?;
     }
-    if is_default_favorites {
-        transaction.execute(
-            "UPDATE assets SET is_favorite=1
-             WHERE id IN (
-                 SELECT asset_id FROM collection_assets WHERE collection_id=?1
-             )",
-            [collection_id],
-        )?;
-    }
-    transaction.execute(
-        "UPDATE collections SET updated_at=?2 WHERE id=?1",
-        params![collection_id, timestamp],
-    )?;
     transaction.commit()?;
     let connection = open(repository)?;
-    collection_summary(&connection, collection_id)
+    unique_collection_ids
+        .into_iter()
+        .map(|collection_id| collection_summary(&connection, collection_id))
+        .collect()
+}
+
+pub fn move_assets_between_collections(
+    repository: &Repository,
+    source_collection_id: i64,
+    target_collection_id: i64,
+    asset_ids: &[i64],
+) -> AppResult<CollectionMembershipMutation> {
+    if source_collection_id == target_collection_id {
+        return Err(AppError::InvalidArgument(
+            "source and target collections must differ".into(),
+        ));
+    }
+    let mut connection = open(repository)?;
+    let transaction = connection.transaction()?;
+    require_manual_collection(&transaction, source_collection_id)?;
+    let target_kind: Option<String> = transaction
+        .query_row(
+            "SELECT collection_kind FROM collections WHERE id=?1",
+            [target_collection_id],
+            |row| row.get(0),
+        )
+        .optional()?;
+    let target_kind = target_kind
+        .ok_or_else(|| AppError::NotFound(format!("collection {target_collection_id}")))?;
+    let unique_asset_ids = asset_ids.iter().copied().collect::<BTreeSet<_>>();
+    let timestamp = now();
+    let mut affected_asset_count = 0_i64;
+    for asset_id in &unique_asset_ids {
+        let is_direct_member: bool = transaction.query_row(
+            "SELECT EXISTS(
+                 SELECT 1 FROM collection_assets
+                 WHERE collection_id=?1 AND asset_id=?2
+             )",
+            params![source_collection_id, asset_id],
+            |row| row.get(0),
+        )?;
+        if !is_direct_member {
+            continue;
+        }
+        transaction.execute(
+            "INSERT OR IGNORE INTO collection_assets(collection_id, asset_id, added_at)
+             VALUES(?1, ?2, ?3)",
+            params![target_collection_id, asset_id, timestamp],
+        )?;
+        transaction.execute(
+            "DELETE FROM collection_assets WHERE collection_id=?1 AND asset_id=?2",
+            params![source_collection_id, asset_id],
+        )?;
+        if target_kind == "system_favorites" {
+            transaction.execute("UPDATE assets SET is_favorite=1 WHERE id=?1", [asset_id])?;
+        }
+        affected_asset_count += 1;
+    }
+    transaction.execute(
+        "UPDATE collections SET updated_at=?3 WHERE id IN (?1, ?2)",
+        params![source_collection_id, target_collection_id, timestamp],
+    )?;
+    transaction.commit()?;
+    Ok(CollectionMembershipMutation {
+        affected_asset_count,
+        skipped_asset_count: unique_asset_ids.len() as i64 - affected_asset_count,
+    })
 }
 
 pub fn remove_assets_from_collection(
@@ -1171,6 +1363,57 @@ fn build_collection_nodes(
         .collect()
 }
 
+fn require_manual_collection(
+    connection: &Connection,
+    collection_id: i64,
+) -> AppResult<(String, Option<i64>)> {
+    let record = connection
+        .query_row(
+            "SELECT name, parent_collection_id, collection_kind
+             FROM collections WHERE id=?1",
+            [collection_id],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, Option<i64>>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            },
+        )
+        .optional()?
+        .ok_or_else(|| AppError::NotFound(format!("collection {collection_id}")))?;
+    if record.2 != "manual" {
+        return Err(AppError::InvalidArgument(
+            "default favorites collection cannot be managed as a regular collection".into(),
+        ));
+    }
+    Ok((record.0, record.1))
+}
+
+fn ensure_collection_name_available(
+    connection: &Connection,
+    name: &str,
+    parent_collection_id: Option<i64>,
+    excluded_collection_id: Option<i64>,
+) -> AppResult<()> {
+    let conflict: bool = connection.query_row(
+        "SELECT EXISTS(
+             SELECT 1 FROM collections
+             WHERE parent_collection_id IS ?1
+               AND name=?2 COLLATE NOCASE
+               AND (?3 IS NULL OR id<>?3)
+         )",
+        params![parent_collection_id, name, excluded_collection_id],
+        |row| row.get(0),
+    )?;
+    if conflict {
+        return Err(AppError::InvalidArgument(
+            "a collection with the same name already exists at this level".into(),
+        ));
+    }
+    Ok(())
+}
+
 fn validate_collection_name(name: &str) -> AppResult<&str> {
     let name = name.trim();
     if name.is_empty() || name.chars().count() > 100 {
@@ -1697,6 +1940,114 @@ mod tests {
                 ),
             )
             .is_err()
+        );
+    }
+
+    #[test]
+    fn collection_management_preserves_hierarchy_rules() {
+        let (_temporary, repository, _library_id, _asset_id) = fixture_repository();
+        let parent = create_collection(&repository, "旅行", "").expect("parent");
+        let child =
+            create_collection_under(&repository, "海边", "", Some(parent.id)).expect("child");
+        let target = create_collection(&repository, "归档", "").expect("target");
+
+        let renamed = rename_collection(&repository, parent.id, "旅途").expect("rename");
+        assert_eq!(renamed.name, "旅途");
+        assert!(rename_collection(&repository, target.id, "旅途").is_err());
+
+        let moved = move_collection(&repository, child.id, Some(target.id)).expect("move child");
+        assert_eq!(moved.parent_collection_id, Some(target.id));
+        assert!(move_collection(&repository, target.id, Some(child.id)).is_err());
+
+        let promoted_parent =
+            create_collection(&repository, "待删除父级", "").expect("promoted parent");
+        let promoted_child =
+            create_collection_under(&repository, "保留子级", "", Some(promoted_parent.id))
+                .expect("promoted child");
+        delete_collection_with_mode(
+            &repository,
+            promoted_parent.id,
+            CollectionDeleteMode::PromoteChildren,
+        )
+        .expect("delete and promote");
+        let promoted = list_collections(&repository)
+            .expect("collections")
+            .into_iter()
+            .find(|collection| collection.id == promoted_child.id)
+            .expect("promoted child remains");
+        assert_eq!(promoted.parent_collection_id, None);
+
+        let subtree_parent =
+            create_collection(&repository, "整树删除", "").expect("subtree parent");
+        let subtree_child =
+            create_collection_under(&repository, "随父删除", "", Some(subtree_parent.id))
+                .expect("subtree child");
+        delete_collection_with_mode(
+            &repository,
+            subtree_parent.id,
+            CollectionDeleteMode::DeleteSubtree,
+        )
+        .expect("delete subtree");
+        assert!(
+            list_collections(&repository)
+                .expect("collections after subtree delete")
+                .iter()
+                .all(|collection| collection.id != subtree_child.id)
+        );
+    }
+
+    #[test]
+    fn collection_membership_supports_multi_target_add_and_direct_move() {
+        let (_temporary, repository, _library_id, asset_id) = fixture_repository();
+        let second_asset_id = asset_id + 1;
+        let first = create_collection(&repository, "第一组", "").expect("first");
+        let second = create_collection(&repository, "第二组", "").expect("second");
+
+        let summaries = add_assets_to_collections(
+            &repository,
+            &[first.id, second.id, first.id],
+            &[asset_id, second_asset_id, asset_id],
+        )
+        .expect("multi target add");
+        assert_eq!(summaries.len(), 2);
+        assert!(summaries.iter().all(|summary| summary.asset_count == 2));
+
+        remove_assets_from_collection(&repository, first.id, &[second_asset_id])
+            .expect("prepare skipped member");
+        let mutation = move_assets_between_collections(
+            &repository,
+            first.id,
+            second.id,
+            &[asset_id, second_asset_id],
+        )
+        .expect("move direct members");
+        assert_eq!(mutation.affected_asset_count, 1);
+        assert_eq!(mutation.skipped_asset_count, 1);
+        assert_eq!(
+            collection_summary(&open(&repository).expect("database"), first.id)
+                .expect("first summary")
+                .asset_count,
+            0
+        );
+
+        let default_collection_id = list_collections(&repository)
+            .expect("collections")
+            .into_iter()
+            .find(|collection| collection.system_key.as_deref() == Some("default_favorites"))
+            .expect("default favorites")
+            .id;
+        add_assets_to_collections(&repository, &[default_collection_id], &[asset_id])
+            .expect("add favorites");
+        let connection = open(&repository).expect("favorite mirror");
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT is_favorite FROM assets WHERE id=?1",
+                    [asset_id],
+                    |row| row.get::<_, i64>(0),
+                )
+                .expect("favorite state"),
+            1
         );
     }
 

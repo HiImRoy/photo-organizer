@@ -13,16 +13,22 @@ export interface AppShortcuts {
 }
 
 export interface AppSettings {
+  startupView: ViewShortcut;
+  defaultGridColumns: number;
   importWorkerCount: number;
   analysisBatchSize: number;
+  gpuAccelerationEnabled: boolean;
   shortcuts: AppShortcuts;
 }
 
 export const SETTINGS_STORAGE_KEY = "photo-organizer-settings";
 
 export const DEFAULT_APP_SETTINGS: AppSettings = {
+  startupView: "grid",
+  defaultGridColumns: 6,
   importWorkerCount: 2,
   analysisBatchSize: 4,
+  gpuAccelerationEnabled: false,
   shortcuts: {
     view: {
       grid: "g",
@@ -89,8 +95,11 @@ export function normalizeAppSettings(input: Partial<AppSettings>): AppSettings {
   ) as Record<ColorShortcut, string>;
 
   return {
+    startupView: input.startupView === "single" ? "single" : "grid",
+    defaultGridColumns: normalizeGridColumns(input.defaultGridColumns),
     importWorkerCount: clampInteger(input.importWorkerCount, 1, 2, 2),
-    analysisBatchSize: clampInteger(input.analysisBatchSize, 1, 8, 4),
+    analysisBatchSize: clampInteger(input.analysisBatchSize, 1, GPU_ANALYSIS_BATCH_MAX, 4),
+    gpuAccelerationEnabled: input.gpuAccelerationEnabled === true,
     shortcuts: {
       view,
       ratings,
@@ -101,6 +110,55 @@ export function normalizeAppSettings(input: Partial<AppSettings>): AppSettings {
   };
 }
 
+export const CPU_ANALYSIS_BATCH_MAX = 8;
+export const GPU_ANALYSIS_BATCH_MAX = 32;
+
+export type AnalysisBackend = "cpu" | "direct_ml";
+
+export type AnalysisGpuCapabilities = {
+  directml: { state: string };
+  recommendedAnalysisBatchSize?: number;
+};
+
+export function preferredAnalysisBackend(
+  capabilities: AnalysisGpuCapabilities | null,
+  gpuAccelerationEnabled: boolean,
+): AnalysisBackend {
+  return gpuAccelerationEnabled && capabilities?.directml.state === "ready" ? "direct_ml" : "cpu";
+}
+
+export function analysisBatchLimit(
+  capabilities: AnalysisGpuCapabilities | null,
+  gpuAccelerationEnabled: boolean,
+) {
+  return gpuAccelerationEnabled && capabilities?.directml.state === "ready"
+    ? clampInteger(
+        capabilities?.recommendedAnalysisBatchSize,
+        1,
+        GPU_ANALYSIS_BATCH_MAX,
+        GPU_ANALYSIS_BATCH_MAX,
+      )
+    : CPU_ANALYSIS_BATCH_MAX;
+}
+
+export function effectiveAnalysisBatchSize(
+  configuredBatchSize: number,
+  capabilities: AnalysisGpuCapabilities | null,
+  gpuAccelerationEnabled: boolean,
+) {
+  return clampInteger(
+    configuredBatchSize,
+    1,
+    analysisBatchLimit(capabilities, gpuAccelerationEnabled),
+    4,
+  );
+}
+
+function normalizeGridColumns(value: unknown) {
+  const parsed = typeof value === "number" ? value : Number(value);
+  if (!Number.isFinite(parsed)) return 6;
+  return Math.round(Math.min(12, Math.max(2, parsed)) / 2) * 2;
+}
 function cloneDefaultSettings(): AppSettings {
   return normalizeAppSettings(DEFAULT_APP_SETTINGS);
 }

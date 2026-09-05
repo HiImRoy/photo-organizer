@@ -9,7 +9,7 @@
 ## 1. Source baseline
 
 - Git HEAD：`3fb17ed feat: complete photo organizer workflow refinements`
-- 评审时工作区已有尚未提交的导入/语义吞吐修正：`docs/architecture.md`、`docs/plans/0019-import-and-analysis-throughput.md`、`docs/testing.md`、`src-tauri/src/db.rs`、`scanner.rs`、`semantic_tasks.rs`、`workflow.rs`。
+- 评审时工作区已有尚未提交的导入/语义吞吐修正：`docs/architecture.md`、`docs/plans/0036-thumbnail-only-decode.md`、`docs/testing.md`、`src-tauri/src/db.rs`、`scanner.rs`、`semantic_tasks.rs`、`workflow.rs`。
 - 本 Checkpoint 不回滚或改写这些既有改动。
 - LAP 对照：`julyx10/lap` commit `4d0960f`；仅作产品/工作流/性能概念研究，未复制 GPL 实现。
 

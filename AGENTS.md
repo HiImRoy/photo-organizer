@@ -100,6 +100,18 @@ Each implementation task must:
 6. Review the final diff.
 7. Update relevant documentation.
 8. Report unresolved risks honestly.
+### Manual launch contract
+
+`启动 PhotoOrganizer.cmd` is the canonical manual build-and-launch entry for
+desktop acceptance testing. It must remain usable from a fresh Windows terminal.
+Any change to Node/Rust prerequisites, package scripts, Tauri configuration,
+startup environment variables, WebView2 workarounds, data paths, bundled model
+resources, or build/start commands must update this entry, its implementation in
+`scripts/manual-build-start.ps1`, and the README instructions in the same task.
+
+Changes that affect startup or packaging are not complete until
+`scripts/manual-build-start.ps1 -CheckOnly` and the frontend build have been
+verified. Do not replace this entry with a browser-only development command.
 
 ## Safety constraints
 
@@ -152,3 +164,20 @@ A task is complete only when:
 - No original test fixture is unexpectedly modified.
 - User-visible behavior is documented.
 - The final diff has been reviewed.
+
+## Agent delegation and ownership
+
+- For all subsequent code-development work and trivial execution tasks, the
+  main agent must delegate the actual implementation or execution to a
+  subagent configured with model `gpt-5.6-luna` and `reasoning_effort=max`.
+- The main agent remains responsible for planning, scope and boundary
+  definition, review, integration, and final acceptance/verification.
+  Delegation does not transfer accountability.
+- Before parallel work starts, explicitly assign file ownership and
+  non-overlapping responsibilities to each subagent. A subagent may edit only
+  its assigned files; coordinate shared files sequentially to prevent
+  concurrent overwrites.
+- If a subagent with the required model and reasoning setting is unavailable,
+  report that limitation truthfully and stop or request direction as
+  appropriate. Never claim that delegation occurred, and never silently
+  substitute another model or reasoning setting.

@@ -24,18 +24,19 @@ use crate::scanner::{
     scan_library_with_options, validate_scan_root_with_app_data,
 };
 use crate::semantic::{
-    Places365Classifier, SIGLIP2_ANALYSIS_VERSION, SIGLIP2_MODEL_NAME, SIGLIP2_MODEL_VERSION,
-    SemanticClassifier, SemanticLabelDescriptor, SemanticRuntimeStatus, TopicModelKind,
-    semantic_catalog,
+    ExecutionBackend, Places365Classifier, SIGLIP2_ANALYSIS_VERSION, SIGLIP2_MODEL_NAME,
+    SIGLIP2_MODEL_VERSION, SemanticClassifier, SemanticLabelDescriptor, SemanticRuntimeStatus,
+    TopicModelKind, semantic_catalog,
 };
 use crate::semantic_tasks::{SEMANTIC_BATCH_SIZE, spawn_semantic_job};
 use crate::subject::{SubjectClassifier, SubjectModel, SubjectRuntimeStatus};
 use crate::tasks::{SemanticTaskRegistry, SourceScanGuard, SourceScanRegistry, TaskRegistry};
 use crate::workflow;
 use crate::workflow::{
-    BrowseNode, CollectionDetail, CollectionSummary, DuplicateGroup, EditExportPlan,
-    EditExportResult, EditRecipe, EditRollbackPlan, FaceFeatureStatus, LocalSearchResponse,
-    SimilarAsset, SimilarityClusterResponse, WorkflowAsset,
+    BrowseNode, CollectionDeleteMode, CollectionDetail, CollectionMembershipMutation,
+    CollectionSummary, DuplicateGroup, EditExportPlan, EditExportResult, EditRecipe,
+    EditRollbackPlan, FaceFeatureStatus, LocalSearchResponse, SimilarAsset,
+    SimilarityClusterResponse, WorkflowAsset,
 };
 
 pub struct AppState {
@@ -46,6 +47,7 @@ pub struct AppState {
     pub semantic_tasks: Arc<SemanticTaskRegistry>,
     pub semantic: Arc<RwLock<Arc<dyn SemanticClassifier>>>,
     pub subject: Arc<RwLock<Arc<dyn SubjectClassifier>>>,
+    pub gpu_provider: Arc<RwLock<Option<crate::gpu::GpuProviderStatus>>>,
 }
 
 impl AppState {
@@ -63,6 +65,7 @@ impl AppState {
             semantic_tasks: Arc::new(SemanticTaskRegistry::default()),
             semantic: Arc::new(RwLock::new(semantic)),
             subject: Arc::new(RwLock::new(subject)),
+            gpu_provider: Arc::new(RwLock::new(None)),
         }
     }
 }
@@ -81,9 +84,10 @@ pub fn restore_persisted_models(app: tauri::AppHandle, state: &AppState) {
             return;
         }
     };
-    let Some((name, version, analysis_version)) = active_model else {
+    let Some((name, version, analysis_version, persisted_backend)) = active_model else {
         return;
     };
+    let requested_backend = ExecutionBackend::parse(Some(&persisted_backend));
     if name != SIGLIP2_MODEL_NAME
         || version != SIGLIP2_MODEL_VERSION
         || analysis_version != SIGLIP2_ANALYSIS_VERSION
@@ -100,23 +104,67 @@ pub fn restore_persisted_models(app: tauri::AppHandle, state: &AppState) {
     let semantic_tasks = state.semantic_tasks.clone();
     let semantic = state.semantic.clone();
     let subject = state.subject.clone();
+    let gpu_provider = state.gpu_provider.clone();
     let thread_app = app.clone();
     if let Err(error) = std::thread::Builder::new()
         .name("restore-photo-models".into())
         .spawn(move || {
-            let classifier = match Places365Classifier::load_with_topic_model(
-                &paths.semantic_model_dir,
-                &paths.siglip2_model_dir,
-                &paths.onnx_runtime_path,
-                TopicModelKind::Siglip2Base,
-            ) {
-                Ok(classifier) => classifier,
-                Err(error) => {
-                    log::warn!("could not restore persisted semantic model: {error}");
-                    return;
-                }
-            };
-            let semantic_status = classifier.status();
+            let (classifier, semantic_status) =
+                match Places365Classifier::load_with_topic_model_with_backend(
+                    &paths.semantic_model_dir,
+                    &paths.siglip2_model_dir,
+                    &paths.onnx_runtime_path,
+                    TopicModelKind::Siglip2Base,
+                    requested_backend,
+                ) {
+                    Ok(classifier) => {
+                        let status = classifier.status();
+                        if requested_backend.is_gpu()
+                            && status.selected_backend == Some(requested_backend)
+                        {
+                            *gpu_provider.write() = Some(crate::gpu::GpuProviderStatus {
+                                id: "directml".into(),
+                                state: "ready".into(),
+                                message: "DirectML 模型会话自检通过。".into(),
+                            });
+                        }
+                        (classifier, status)
+                    }
+                    Err(error) if requested_backend.is_gpu() => {
+                        log::warn!(
+                            "DirectML semantic model restore failed; falling back to CPU: {error}"
+                        );
+                        *gpu_provider.write() = Some(crate::gpu::GpuProviderStatus {
+                            id: "directml".into(),
+                            state: "error".into(),
+                            message: format!("模型会话自检失败，已回退 CPU：{error}"),
+                        });
+                        let classifier =
+                            match Places365Classifier::load_with_topic_model_with_backend(
+                                &paths.semantic_model_dir,
+                                &paths.siglip2_model_dir,
+                                &paths.onnx_runtime_path,
+                                TopicModelKind::Siglip2Base,
+                                ExecutionBackend::Cpu,
+                            ) {
+                                Ok(classifier) => classifier,
+                                Err(fallback_error) => {
+                                    log::warn!(
+                                        "could not restore semantic model after CPU fallback: \
+                                         {fallback_error}"
+                                    );
+                                    return;
+                                }
+                            };
+                        let mut status = classifier.status();
+                        status.message = format!("DirectML 初始化失败，已回退 CPU：{error}");
+                        (classifier, status)
+                    }
+                    Err(error) => {
+                        log::warn!("could not restore persisted semantic model: {error}");
+                        return;
+                    }
+                };
             if let Some(topic_model) = semantic_status.topic_model.as_ref() {
                 let model_path = paths
                     .siglip2_model_dir
@@ -129,6 +177,9 @@ pub fn restore_persisted_models(app: tauri::AppHandle, state: &AppState) {
                     &model_path,
                     &tokenizer_path,
                     "https://huggingface.co/onnx-community/siglip2-base-patch16-224-ONNX",
+                    semantic_status
+                        .selected_backend
+                        .unwrap_or(ExecutionBackend::Cpu),
                 ) {
                     log::warn!("could not persist restored semantic model: {error}");
                 }
@@ -166,6 +217,7 @@ pub fn restore_persisted_models(app: tauri::AppHandle, state: &AppState) {
                 semantic_tasks,
                 semantic,
                 subject,
+                gpu_provider,
             };
             resume_pending_semantic_jobs(thread_app, &resume_state);
         })
@@ -641,8 +693,23 @@ pub fn get_semantic_status(state: State<'_, AppState>) -> Result<SemanticRuntime
 }
 
 #[tauri::command]
+pub fn get_gpu_capabilities(state: State<'_, AppState>) -> crate::gpu::GpuCapabilities {
+    let mut capabilities =
+        crate::gpu::detect_gpu_capabilities_with_runtime(&state.paths.onnx_runtime_path);
+    if capabilities.dedicated_gpu_available {
+        if let Some(cached) = state.gpu_provider.read().clone() {
+            capabilities.directml = cached;
+        } else {
+            *state.gpu_provider.write() = Some(capabilities.directml.clone());
+        }
+    }
+    capabilities
+}
+
+#[tauri::command]
 pub fn prepare_semantic_model(
     topic_model: Option<String>,
+    backend: Option<String>,
     state: State<'_, AppState>,
 ) -> Result<SemanticRuntimeStatus, String> {
     let topic_model = crate::semantic::TopicModelKind::parse(
@@ -651,18 +718,54 @@ pub fn prepare_semantic_model(
             .unwrap_or(crate::semantic::DEFAULT_TOPIC_MODEL.id()),
     )
     .ok_or_else(|| "不支持的题材模型，当前 MVP 仅支持 SigLIP 2 Base。".to_string())?;
-    let classifier = Places365Classifier::load_with_topic_model(
+    let requested_backend = crate::semantic::ExecutionBackend::parse(backend.as_deref());
+    let (classifier, status) = match Places365Classifier::load_with_topic_model_with_backend(
         &state.paths.semantic_model_dir,
         &state.paths.siglip2_model_dir,
         &state.paths.onnx_runtime_path,
         topic_model,
-    )
-    .map_err(|error| error.to_string())?;
-    let status = classifier.status();
+        requested_backend,
+    ) {
+        Ok(classifier) => {
+            let status = classifier.status();
+            (classifier, status)
+        }
+        Err(error) if requested_backend.is_gpu() => {
+            log::warn!(
+                "DirectML semantic model initialization failed; falling back to CPU: {error}"
+            );
+            *state.gpu_provider.write() = Some(crate::gpu::GpuProviderStatus {
+                id: "directml".into(),
+                state: "error".into(),
+                message: format!("模型会话自检失败，已回退 CPU：{error}"),
+            });
+            let classifier = Places365Classifier::load_with_topic_model_with_backend(
+                &state.paths.semantic_model_dir,
+                &state.paths.siglip2_model_dir,
+                &state.paths.onnx_runtime_path,
+                topic_model,
+                crate::semantic::ExecutionBackend::Cpu,
+            )
+            .map_err(|fallback_error| {
+                format!("DirectML 初始化失败，且 CPU 回退也失败：{fallback_error}")
+            })?;
+            let mut status = classifier.status();
+            status.message = format!("DirectML 初始化失败，已回退 CPU：{error}");
+            (classifier, status)
+        }
+        Err(error) => return Err(error.to_string()),
+    };
     let selected_topic_model = status
         .topic_model
         .as_ref()
         .ok_or_else(|| "题材模型未能装载，请检查模型资源和 ONNX Runtime。".to_string())?;
+    if requested_backend.is_gpu() && status.selected_backend == Some(requested_backend) {
+        *state.gpu_provider.write() = Some(crate::gpu::GpuProviderStatus {
+            id: "directml".into(),
+            state: "ready".into(),
+            message: "DirectML 模型会话自检通过。".into(),
+        });
+    }
     state
         .repository
         .register_semantic_model(
@@ -692,6 +795,7 @@ pub fn prepare_semantic_model(
             &model_path,
             &tokenizer_path,
             source_url,
+            status.selected_backend.unwrap_or(ExecutionBackend::Cpu),
         )
         .map_err(ipc_error)?;
     let classifier: Arc<dyn SemanticClassifier> = Arc::new(classifier);
@@ -705,15 +809,53 @@ pub fn get_subject_status(state: State<'_, AppState>) -> Result<SubjectRuntimeSt
 }
 
 #[tauri::command]
-pub fn prepare_subject_model(state: State<'_, AppState>) -> Result<SubjectRuntimeStatus, String> {
-    let classifier = SubjectModel::load(
+pub fn prepare_subject_model(
+    backend: Option<String>,
+    state: State<'_, AppState>,
+) -> Result<SubjectRuntimeStatus, String> {
+    let requested_backend = crate::semantic::ExecutionBackend::parse(backend.as_deref());
+    let (classifier, status) = match SubjectModel::load_with_backend(
         &state.paths.subject_model_dir,
         &state.paths.face_model_dir,
         &state.paths.onnx_runtime_path,
-    )
-    .map_err(|error| error.to_string())?;
+        requested_backend,
+    ) {
+        Ok(classifier) => {
+            let status = classifier.status();
+            (classifier, status)
+        }
+        Err(error) if requested_backend.is_gpu() => {
+            log::warn!(
+                "DirectML subject model initialization failed; falling back to CPU: {error}"
+            );
+            *state.gpu_provider.write() = Some(crate::gpu::GpuProviderStatus {
+                id: "directml".into(),
+                state: "error".into(),
+                message: format!("主体模型会话自检失败，已回退 CPU：{error}"),
+            });
+            let classifier = SubjectModel::load_with_backend(
+                &state.paths.subject_model_dir,
+                &state.paths.face_model_dir,
+                &state.paths.onnx_runtime_path,
+                crate::semantic::ExecutionBackend::Cpu,
+            )
+            .map_err(|fallback_error| {
+                format!("DirectML 初始化失败，且主体模型 CPU 回退也失败：{fallback_error}")
+            })?;
+            let mut status = classifier.status();
+            status.message = format!("DirectML 初始化失败，主体模型已回退 CPU：{error}");
+            (classifier, status)
+        }
+        Err(error) => return Err(error.to_string()),
+    };
+    if requested_backend.is_gpu() && status.selected_backend == Some(requested_backend) {
+        *state.gpu_provider.write() = Some(crate::gpu::GpuProviderStatus {
+            id: "directml".into(),
+            state: "ready".into(),
+            message: "DirectML 主体模型会话自检通过。".into(),
+        });
+    }
     let classifier: Arc<dyn SubjectClassifier> = Arc::new(classifier);
-    let status = classifier.status();
     *state.subject.write() = classifier;
     Ok(status)
 }
@@ -1057,8 +1199,36 @@ pub fn create_collection(
 }
 
 #[tauri::command]
-pub fn delete_collection(collection_id: i64, state: State<'_, AppState>) -> Result<bool, String> {
-    workflow::delete_collection(&state.repository, collection_id).map_err(ipc_error)
+pub fn rename_collection(
+    collection_id: i64,
+    name: String,
+    state: State<'_, AppState>,
+) -> Result<CollectionSummary, String> {
+    workflow::rename_collection(&state.repository, collection_id, &name).map_err(ipc_error)
+}
+
+#[tauri::command]
+pub fn move_collection(
+    collection_id: i64,
+    parent_collection_id: Option<i64>,
+    state: State<'_, AppState>,
+) -> Result<CollectionSummary, String> {
+    workflow::move_collection(&state.repository, collection_id, parent_collection_id)
+        .map_err(ipc_error)
+}
+
+#[tauri::command]
+pub fn delete_collection(
+    collection_id: i64,
+    mode: Option<CollectionDeleteMode>,
+    state: State<'_, AppState>,
+) -> Result<bool, String> {
+    workflow::delete_collection_with_mode(
+        &state.repository,
+        collection_id,
+        mode.unwrap_or(CollectionDeleteMode::DeleteSubtree),
+    )
+    .map_err(ipc_error)
 }
 
 #[tauri::command]
@@ -1080,6 +1250,16 @@ pub fn add_assets_to_collection(
 }
 
 #[tauri::command]
+pub fn add_assets_to_collections(
+    collection_ids: Vec<i64>,
+    asset_ids: Vec<i64>,
+    state: State<'_, AppState>,
+) -> Result<Vec<CollectionSummary>, String> {
+    workflow::add_assets_to_collections(&state.repository, &collection_ids, &asset_ids)
+        .map_err(ipc_error)
+}
+
+#[tauri::command]
 pub fn remove_assets_from_collection(
     collection_id: i64,
     asset_ids: Vec<i64>,
@@ -1087,6 +1267,22 @@ pub fn remove_assets_from_collection(
 ) -> Result<CollectionSummary, String> {
     workflow::remove_assets_from_collection(&state.repository, collection_id, &asset_ids)
         .map_err(ipc_error)
+}
+
+#[tauri::command]
+pub fn move_assets_between_collections(
+    source_collection_id: i64,
+    target_collection_id: i64,
+    asset_ids: Vec<i64>,
+    state: State<'_, AppState>,
+) -> Result<CollectionMembershipMutation, String> {
+    workflow::move_assets_between_collections(
+        &state.repository,
+        source_collection_id,
+        target_collection_id,
+        &asset_ids,
+    )
+    .map_err(ipc_error)
 }
 
 #[tauri::command]
@@ -1321,6 +1517,10 @@ fn spawn_with_app(
     batch_size: usize,
 ) -> Result<(), String> {
     let classifier = state.semantic.read().clone();
+    let backend = classifier
+        .status()
+        .selected_backend
+        .unwrap_or(crate::semantic::ExecutionBackend::Cpu);
     let subject_classifier = {
         let subject = state.subject.read().clone();
         subject.metadata().installed.then_some(subject)
@@ -1335,6 +1535,7 @@ fn spawn_with_app(
         candidates,
         state.paths.thumbnail_dir.clone(),
         batch_size,
+        backend,
         move |progress| {
             if let Err(error) = app.emit("semantic-progress", progress) {
                 log::warn!("could not emit semantic progress: {error}");
@@ -1397,7 +1598,10 @@ fn load_preview_data_url(
         ));
     }
 
-    let cache_name = format!("{asset_id}-{fingerprint}-{}-{}.jpg", max_width, max_height);
+    let cache_name = format!(
+        "{asset_id}-{fingerprint}-{}-{max_width}-{max_height}.jpg",
+        crate::imaging::SCREEN_PREVIEW_SPEC
+    );
     let cache_path = paths.preview_dir.join(cache_name);
     let bytes = if cache_path.is_file() {
         fs::read(&cache_path)?

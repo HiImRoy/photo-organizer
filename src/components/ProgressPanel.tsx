@@ -3,6 +3,7 @@ import { CloseIcon, PauseIcon } from "./Icons";
 
 interface ProgressPanelProps {
   progress: ScanProgress;
+  taskName: string;
   cancelling: boolean;
   onCancel: () => void;
   onDismiss: () => void;
@@ -12,26 +13,37 @@ const stageLabels: Record<string, string> = {
   preparing: "准备图库",
   discovering: "发现图片",
   processing: "生成索引与缩略图",
-  completed: "扫描完成",
-  cancelled: "扫描已取消",
-  failed: "扫描失败",
+  completed: "导入完成",
+  cancelled: "导入已取消",
+  failed: "导入失败",
 };
 
-export function ProgressPanel({ progress, cancelling, onCancel, onDismiss }: ProgressPanelProps) {
+export function ProgressPanel({
+  progress,
+  taskName,
+  cancelling,
+  onCancel,
+  onDismiss,
+}: ProgressPanelProps) {
   const terminal = ["completed", "cancelled", "failed"].includes(progress.status);
   const ratio = progress.discovered
     ? Math.min(100, Math.round((progress.processed / progress.discovered) * 100))
     : progress.stage === "discovering"
       ? 8
       : 0;
+  const operationLabel = terminal ? (stageLabels[progress.stage] ?? progress.stage) : "导入中";
 
   return (
     <section className={`scan-panel status-${progress.status}`} aria-live="polite">
       <div className="scan-panel-top">
-        <div>
-          <div className="section-label">后台任务</div>
-          <strong>{stageLabels[progress.stage] ?? progress.stage}</strong>
+        <div className="scan-panel-copy">
+          <div className="section-label" title={taskName}>
+            {taskName}
+          </div>
+          <strong>{operationLabel}</strong>
+          {!terminal ? <small>{stageLabels[progress.stage] ?? progress.stage}</small> : null}
         </div>
+        <span className="task-panel-percent">{ratio}%</span>
         {terminal ? (
           <button className="icon-button" type="button" onClick={onDismiss} aria-label="关闭状态">
             <CloseIcon width="18" height="18" />

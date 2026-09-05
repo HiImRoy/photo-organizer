@@ -14,9 +14,9 @@
 
 ## 分类协议
 
-当前摄影题材 taxonomy 为 `photo-organizer-photography-topics-v3`：`photo_portrait`、`photo_landscape`、`photo_street`、`photo_architecture`、`photo_still_life`、`photo_food`、`photo_wildlife`、`photo_macro`、`photo_activity`、`photo_vehicle`、`photo_document`、`photo_abstract`。`photo_documentary` 已从摄影师筛选 taxonomy 移除；没有通过当前题材阈值的结果统一归入 `photo_abstract`（界面显示“抽象艺术”），不再展示“未知”。`indoor`/`outdoor` 是独立环境证据；主体标签收敛为 `single_person`、`multiple_people`、`animal`、`vehicle`、`food`、`plant`。旧的 `person`、`group`、`portrait`、`pet` 和 `unknown` 读取时会归并到当前标签，不再作为新自动标签。
+当前摄影题材 taxonomy 为 `photo-organizer-photography-topics-v4`：`photo_portrait`、`photo_landscape`、`photo_street`、`photo_architecture`、`photo_still_life`、`photo_wildlife`、`photo_macro`、`photo_vehicle`、`photo_abstract`。界面名称依次为人像、风光、街拍、建筑、静物特写、动物、植物、交通工具、抽象艺术；没有通过当前题材阈值的结果统一归入 `photo_abstract`，不再展示“未知”。`indoor`/`outdoor` 仍是独立环境证据，但不进入主体筛选；主体层开放 `single_person`、`multiple_people`、`animal`、`plant`、`food`、`scenery`，其中 `scenery` 由高置信 `photo_landscape` 派生。旧的 `person`、`group`、`portrait`、`pet` 和 `unknown` 读取时会归并到当前标签，不再作为新自动标签。
 
-SigLIP 2 使用每类多条版本化英文提示词的匹配 logits，经 sigmoid 后用独立阈值与候选间隔做拒识；Places365 365 类叶子概率按映射聚合，使用最低分数与类间隔门槛；主体模型在任务层只通过明确映射补充人像、动物、车辆、食品和植物题材。模型输出分数仅用于当前模型内排序和阈值评测，不能未经标注集校准直接解释为准确率。
+SigLIP 2 使用每类多条版本化英文提示词的匹配 logits，经 sigmoid 后用独立阈值与候选间隔做拒识；Places365 365 类叶子概率按映射聚合，使用最低分数与类间隔门槛；主体模型在任务层只通过明确映射补充人像、动物、静物特写和植物题材，风景由题材结果派生。模型输出分数仅用于当前模型内排序和阈值评测，不能未经标注集校准直接解释为准确率。
 
 ## 资源完整性
 
@@ -43,11 +43,14 @@ SigLIP 2 使用每类多条版本化英文提示词的匹配 logits，经 sigmoi
 
 ## 基准入口
 
+当前基准入口只接受应用拥有的 `grid-640-v1` 缩略图。若手头是源图库，应先用隔离的导入基准生成应用缩略图；直接把源图目录传给语义基准会被拒绝。
+
 ```powershell
-cargo run --manifest-path src-tauri/Cargo.toml --no-default-features --bin semantic-benchmark -- --images src-tauri/icons --model places365 --backend cpu --batch-size 1
+cargo run --manifest-path src-tauri/Cargo.toml --bin import-benchmark -- --images "test-data/manual-verification-20260808/Parent 库" --data-dir "target/s2-benchmark"
+cargo run --manifest-path src-tauri/Cargo.toml --bin semantic-benchmark -- --images "target/s2-benchmark/app-data/thumbnails" --model places365 --backend cpu --batch-size 4 --warmup-batches 1
 ```
 
-报告记录模型名称/版本/哈希、实际 backend、样本/失败数、平均/P50/P95、吞吐和最多八个样例预测及原始候选证据。模型不可用时明确返回不可用，不伪造性能。
+报告记录模型名称/版本/哈希、实际 selected backend、配置批大小、warm-up 样本数、已测批次数、失败批次数、样本/失败数、平均/P50/P95、吞吐和最多八个样例预测及原始候选证据。模型不可用时明确返回不可用，不伪造性能；当前峰值显存仍未接入报告。
 
 ## 当前质量评测实现
 

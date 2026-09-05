@@ -20,7 +20,7 @@ pub const THUMBNAIL_SPEC: &str = "grid-640-v1";
 pub const ANALYSIS_THUMBNAIL_MAX_DIMENSION: u32 = 640;
 pub const ANALYSIS_VERSION: &str = "basic-color-v6";
 pub const COLOR_ALGORITHM_VERSION: &str = "accent-oklab-v3";
-pub const SCREEN_PREVIEW_SPEC: &str = "screen-2560-v1";
+pub const SCREEN_PREVIEW_SPEC: &str = "screen-bounded-v2";
 
 const MAX_COLOR_CLUSTERS: usize = 8;
 const COLOR_CLUSTER_ITERATIONS: usize = 8;
@@ -437,12 +437,19 @@ pub fn load_oriented_bounded_image(
     let source_metadata = read_source_metadata(source_path);
     let exif = source_metadata.exif;
     let decoded = match source_metadata.embedded_thumbnail.as_deref() {
-        Some(bytes) => decode_bounded_memory_image(bytes, max_dimension).or_else(|_| {
-            decode_bounded_source(source_path, None, max_dimension).map(|(image, _)| image)
-        })?,
+        Some(bytes) => match decode_bounded_memory_image(bytes, max_dimension) {
+            Ok(image) if embedded_preview_is_large_enough(&image, max_dimension) => image,
+            Ok(_) | Err(_) => {
+                decode_bounded_source(source_path, None, max_dimension).map(|(image, _)| image)?
+            }
+        },
         None => decode_bounded_source(source_path, None, max_dimension)?.0,
     };
     Ok(apply_orientation(decoded, exif.orientation))
+}
+
+fn embedded_preview_is_large_enough(image: &DynamicImage, requested_max_dimension: u32) -> bool {
+    image.width().max(image.height()) >= requested_max_dimension.max(1)
 }
 
 fn write_thumbnail_once(image: &RgbaImage, target: &Path) -> AppResult<()> {
@@ -1859,6 +1866,20 @@ mod tests {
         assert!(processed.timings.thumbnail_decode_us > 0);
     }
 
+    #[test]
+    fn screen_preview_rejects_an_embedded_thumbnail_smaller_than_the_request() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let source = temp.path().join("embedded-screen-preview.jpg");
+        let primary = RgbaImage::from_pixel(1600, 900, Rgba([20, 80, 200, 255]));
+        let embedded = RgbaImage::from_pixel(320, 180, Rgba([220, 40, 30, 255]));
+        fs::write(&source, jpeg_with_embedded_thumbnail(&primary, &embedded))
+            .expect("write source");
+
+        let preview = load_oriented_bounded_image(&source, 1000).expect("bounded preview");
+
+        assert_eq!(preview.width().max(preview.height()), 1000);
+        assert!(preview.width().min(preview.height()) > 500);
+    }
     fn jpeg_with_embedded_thumbnail(primary: &RgbaImage, thumbnail: &RgbaImage) -> Vec<u8> {
         let mut primary_bytes = Vec::new();
         JpegEncoder::new_with_quality(&mut primary_bytes, 92)

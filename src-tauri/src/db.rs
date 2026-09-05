@@ -23,9 +23,9 @@ use crate::models::{
     SemanticMatchMode, SemanticProgress, SortDirection,
 };
 use crate::semantic::{
-    ANALYSIS_VERSION as SEMANTIC_ANALYSIS_VERSION, MODEL_NAME, MODEL_VERSION, ModelMetadata,
-    SIGLIP2_ANALYSIS_VERSION, SIGLIP2_MODEL_NAME, SIGLIP2_MODEL_VERSION, SemanticAnalysisOutput,
-    TAXONOMY_VERSION, canonical_label_id, category_group_for_label_id,
+    ANALYSIS_VERSION as SEMANTIC_ANALYSIS_VERSION, ExecutionBackend, MODEL_NAME, MODEL_VERSION,
+    ModelMetadata, SIGLIP2_ANALYSIS_VERSION, SIGLIP2_MODEL_NAME, SIGLIP2_MODEL_VERSION,
+    SemanticAnalysisOutput, TAXONOMY_VERSION, canonical_label_id, category_group_for_label_id,
     known_display_name_for_label_id,
 };
 use crate::source_identity::{SourceIdentity, identity_key, is_same_or_descendant};
@@ -2009,6 +2009,7 @@ impl Repository {
         model_path: &Path,
         tokenizer_path: &Path,
         source_url: &str,
+        execution_backend: ExecutionBackend,
     ) -> AppResult<()> {
         let tokenizer_sha256 = sha256_file(tokenizer_path)?;
         let model_sha256 = metadata
@@ -2027,12 +2028,12 @@ impl Repository {
                 name, version, analysis_version, license, source_url, model_sha256,
                 tokenizer_sha256, model_path, tokenizer_path, execution_backend,
                 installed_at, is_active
-             ) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 'cpu', ?10, 1)
+             ) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, 1)
              ON CONFLICT(name, version, analysis_version) DO UPDATE SET
                 license=excluded.license, source_url=excluded.source_url,
                 model_path=excluded.model_path, tokenizer_path=excluded.tokenizer_path,
                 model_sha256=excluded.model_sha256, tokenizer_sha256=excluded.tokenizer_sha256,
-                execution_backend='cpu', installed_at=excluded.installed_at, is_active=1",
+                execution_backend=excluded.execution_backend, installed_at=excluded.installed_at, is_active=1",
             params![
                 metadata.name,
                 metadata.version,
@@ -2043,6 +2044,7 @@ impl Repository {
                 tokenizer_sha256,
                 model_path.to_string_lossy().into_owned(),
                 tokenizer_path.to_string_lossy().into_owned(),
+                execution_backend.id(),
                 now(),
             ],
         )?;
@@ -2050,11 +2052,11 @@ impl Repository {
         Ok(())
     }
 
-    pub fn active_semantic_model_key(&self) -> AppResult<Option<(String, String, String)>> {
+    pub fn active_semantic_model_key(&self) -> AppResult<Option<(String, String, String, String)>> {
         let connection = self.open()?;
         connection
             .query_row(
-                "SELECT name, version, analysis_version
+                "SELECT name, version, analysis_version, execution_backend
                  FROM semantic_models
                  WHERE is_active=1
                  ORDER BY id DESC
@@ -2065,6 +2067,8 @@ impl Repository {
                         row.get::<_, String>(0)?,
                         row.get::<_, String>(1)?,
                         row.get::<_, String>(2)?,
+                        row.get::<_, Option<String>>(3)?
+                            .unwrap_or_else(|| "cpu".into()),
                     ))
                 },
             )
@@ -2700,7 +2704,7 @@ impl Repository {
         connection.execute(
             "UPDATE analysis_jobs SET status=?2, progress_current=?3, progress_total=?4,
                 completed_count=?5, failed_count=?6, skipped_count=?7,
-                error_message=?8, updated_at=?9 WHERE id=?1",
+                execution_backend=?8, error_message=?9, updated_at=?10 WHERE id=?1",
             params![
                 progress.job_id,
                 progress.status,
@@ -2709,6 +2713,7 @@ impl Repository {
                 as_i64(progress.completed),
                 as_i64(progress.failed),
                 as_i64(progress.skipped),
+                progress.execution_backend,
                 progress.error,
                 now(),
             ],
@@ -5273,7 +5278,7 @@ mod tests {
                     execution_backend, installed_at, is_active
                  ) VALUES(?1, ?2, ?3, 'Apache-2.0', 'https://example.test/model',
                           'model-sha', 'tokenizer-sha', 'model.onnx', 'tokenizer.json',
-                          'cpu', '2026-08-17T00:00:00Z', 1)",
+                          'direct_ml', '2026-08-17T00:00:00Z', 1)",
                 params![
                     SIGLIP2_MODEL_NAME,
                     SIGLIP2_MODEL_VERSION,
@@ -5290,9 +5295,56 @@ mod tests {
             Some((
                 SIGLIP2_MODEL_NAME.into(),
                 SIGLIP2_MODEL_VERSION.into(),
-                SIGLIP2_ANALYSIS_VERSION.into()
+                SIGLIP2_ANALYSIS_VERSION.into(),
+                "direct_ml".into()
             ))
         );
+    }
+
+    #[test]
+    fn semantic_job_progress_persists_actual_execution_backend() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let repository = Repository::new(temp.path().join("database.sqlite3"));
+        repository.initialize().expect("initialize");
+        let connection = repository.open().expect("open database");
+        connection
+            .execute(
+                "INSERT INTO analysis_jobs(id, job_type, status, progress_total, created_at, updated_at)
+                 VALUES(?1, 'semantic_classification', 'queued', 3, ?2, ?2)",
+                params!["gpu-job", now()],
+            )
+            .expect("insert semantic job");
+        drop(connection);
+
+        repository
+            .update_semantic_job_progress(&SemanticProgress {
+                job_id: "gpu-job".into(),
+                library_id: 0,
+                status: "running".into(),
+                total: 3,
+                processed: 1,
+                completed: 1,
+                failed: 0,
+                skipped: 0,
+                current_asset_id: None,
+                current_path: None,
+                execution_backend: Some("direct_ml".into()),
+                model_name: "SigLIP 2 Base".into(),
+                model_version: "test".into(),
+                error: None,
+            })
+            .expect("update semantic progress");
+
+        let backend: String = repository
+            .open()
+            .expect("reopen database")
+            .query_row(
+                "SELECT execution_backend FROM analysis_jobs WHERE id=?1",
+                ["gpu-job"],
+                |row| row.get(0),
+            )
+            .expect("read execution backend");
+        assert_eq!(backend, "direct_ml");
     }
 
     #[test]

@@ -1,11 +1,14 @@
 import { describe, expect, it } from "vitest";
 
+import { emptyAssetFilter } from "./types";
 import {
   assetQueryFromV1,
   createAssetQueryV1,
   describeAssetScopeV1,
   normalizeAssetQueryV1,
   stableAssetIds,
+  updateAssetQueryBrowseRoot,
+  updateAssetQueryFilter,
 } from "./query";
 
 describe("AssetQueryV1", () => {
@@ -58,5 +61,45 @@ describe("AssetQueryV1", () => {
       filter: { ...createAssetQueryV1(7).filter, collectionId: 12 },
     });
     expect(collection.root).toEqual({ kind: "collection", collectionId: 12 });
+  });
+
+  it("keeps source and virtual browse roots mutually exclusive", () => {
+    const source = createAssetQueryV1(7);
+    const favorites = updateAssetQueryBrowseRoot(source, { kind: "favorites" });
+    expect(favorites).toMatchObject({
+      libraryId: null,
+      filter: { favoriteOnly: true, collectionId: null },
+    });
+
+    const collection = updateAssetQueryBrowseRoot(favorites, {
+      kind: "collection",
+      collectionId: 12,
+    });
+    expect(collection).toMatchObject({
+      libraryId: null,
+      filter: { favoriteOnly: false, collectionId: 12 },
+    });
+
+    const nextSource = updateAssetQueryBrowseRoot(collection, { kind: "source", libraryId: 9 });
+    expect(nextSource).toMatchObject({
+      libraryId: 9,
+      filter: { favoriteOnly: false, collectionId: null },
+    });
+
+    const stale = normalizeAssetQueryV1({
+      ...createAssetQueryV1(null),
+      filter: { ...source.filter, favoriteOnly: true, collectionId: 12 },
+    });
+    expect(stale.filter).toMatchObject({ favoriteOnly: false, collectionId: 12 });
+  });
+
+  it("preserves the active browse root while changing ordinary filters", () => {
+    const favorites = updateAssetQueryBrowseRoot(createAssetQueryV1(7), { kind: "favorites" });
+    const cleared = updateAssetQueryFilter(favorites, { ...emptyAssetFilter });
+
+    expect(cleared).toMatchObject({
+      libraryId: null,
+      filter: { favoriteOnly: true, collectionId: null },
+    });
   });
 });

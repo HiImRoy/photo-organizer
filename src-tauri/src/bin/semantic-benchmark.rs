@@ -5,16 +5,16 @@ use std::process::ExitCode;
 
 use clap::{Parser, ValueEnum};
 use photo_organizer_lib::semantic::{
-    BenchmarkReport, ExecutionBackend, OpenVocabularyClipClassifier, Places365Classifier,
-    SemanticClassifier, TopicModelKind, UnavailableClassifier, benchmark_classifier,
-    discover_benchmark_images,
+    BenchmarkOptions, BenchmarkReport, ExecutionBackend, OpenVocabularyClipClassifier,
+    Places365Classifier, SemanticClassifier, TopicModelKind, UnavailableClassifier,
+    benchmark_classifier_with_options, discover_benchmark_thumbnails,
 };
 
 #[derive(Debug, Parser)]
 #[command(
     name = "semantic-benchmark",
     about = "Benchmark a PhotoOrganizer semantic classifier adapter",
-    long_about = "Runs the bundled Places365 environment classifier or SigLIP 2 Base topic classifier against an explicit fixture directory and records real CPU predictions and timing. The unavailable adapter remains available to verify the no-fake-label fallback."
+    long_about = "Runs the bundled Places365 environment classifier or SigLIP 2 Base topic classifier against an explicit fixture directory and records backend, warm-up, batch latency and timing for application-owned thumbnails. The unavailable adapter remains available to verify the no-fake-label fallback."
 )]
 struct Arguments {
     #[arg(long, value_name = "DIR")]
@@ -37,6 +37,9 @@ struct Arguments {
 
     #[arg(long, default_value_t = 1)]
     batch_size: usize,
+
+    #[arg(long, default_value_t = 1)]
+    warmup_batches: usize,
 
     #[arg(long, value_name = "REPORT.json|REPORT.csv")]
     output: Option<PathBuf>,
@@ -87,7 +90,14 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
     if !(1..=1024).contains(&arguments.batch_size) {
         return Err("--batch-size must be between 1 and 1024".into());
     }
-    let images = discover_benchmark_images(&arguments.images);
+    if arguments.warmup_batches > 16 {
+        return Err("--warmup-batches must be between 0 and 16".into());
+    }
+    let images = discover_benchmark_thumbnails(&arguments.images);
+    if images.is_empty() {
+        return Err("--images contains no application-owned grid-640-v1 thumbnails".into());
+    }
+    let requested_backend: ExecutionBackend = arguments.backend.into();
     let classifier: Box<dyn SemanticClassifier> = if arguments.model == "unavailable" {
         Box::new(UnavailableClassifier::default())
     } else if arguments.model == "places365" {
@@ -110,10 +120,12 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
                 .join("runtime")
                 .join("onnxruntime.dll")
         });
-        Box::new(Places365Classifier::load(
+        Box::new(Places365Classifier::load_with_topic_model_with_backend(
             &model_dir,
             &embedding_model_dir,
             &runtime,
+            TopicModelKind::Siglip2Base,
+            requested_backend,
         )?)
     } else if arguments.model == "siglip2-base" {
         let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
@@ -135,20 +147,27 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
                 .join("runtime")
                 .join("onnxruntime.dll")
         });
-        Box::new(OpenVocabularyClipClassifier::load(
+        Box::new(OpenVocabularyClipClassifier::load_with_backend(
             topic_model,
             &model_dir,
             &runtime,
+            requested_backend,
         )?)
     } else {
         return Err("--model must be places365, siglip2-base or unavailable".into());
     };
-    let report = benchmark_classifier(
+    let report = benchmark_classifier_with_options(
         classifier.as_ref(),
         &arguments.model,
         &images,
-        arguments.backend.into(),
+        classifier
+            .status()
+            .selected_backend
+            .unwrap_or(requested_backend),
         arguments.batch_size,
+        BenchmarkOptions {
+            warmup_batches: arguments.warmup_batches,
+        },
     );
 
     if let Some(output) = arguments.output {
@@ -191,15 +210,18 @@ fn write_report(
 }
 
 fn report_as_csv(report: &BenchmarkReport) -> String {
-    let header = "schema_version,requested_model,model_name,model_version,backend,batch_size,sample_count,failure_count,mean_latency_ms,p50_latency_ms,p95_latency_ms,throughput_per_second,peak_memory_bytes,status,error\n";
+    let header = "schema_version,requested_model,model_name,model_version,backend,batch_size,warmup_sample_count,measured_batch_count,failed_batch_count,sample_count,failure_count,mean_latency_ms,p50_latency_ms,p95_latency_ms,throughput_per_second,peak_memory_bytes,status,error\n";
     let row = format!(
-        "{},{},{},{},{:?},{},{},{},{},{},{},{},{},{},{}\n",
+        "{},{},{},{},{:?},{},{},{},{},{},{},{},{},{},{},{},{},{}\n",
         report.schema_version,
         csv_cell(&report.requested_model),
         csv_cell(&report.model.name),
         csv_cell(&report.model.version),
         report.backend,
         report.batch_size,
+        report.warmup_sample_count,
+        report.measured_batch_count,
+        report.failed_batch_count,
         report.sample_count,
         report.failure_count,
         optional_number(report.mean_latency_ms),
@@ -248,6 +270,9 @@ mod tests {
             },
             backend: ExecutionBackend::Cpu,
             batch_size: 1,
+            warmup_sample_count: 0,
+            measured_batch_count: 0,
+            failed_batch_count: 0,
             sample_count: 2,
             failure_count: 2,
             mean_latency_ms: None,

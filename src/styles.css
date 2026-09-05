@@ -6409,6 +6409,28 @@ button.primary-action:active:not(:disabled) {
   border-color: transparent;
 }
 
+.photo-app .detail-technical-info {
+  margin-top: 10px;
+  border-top: 1px solid var(--border-soft);
+}
+
+.photo-app .detail-technical-info summary {
+  min-height: 34px;
+  padding: 9px 0;
+  color: var(--text-muted);
+  cursor: pointer;
+  font-size: 11px;
+  list-style-position: inside;
+}
+
+.photo-app .detail-technical-info[open] summary {
+  color: var(--text-secondary);
+}
+
+.photo-app .detail-technical-info .model-properties {
+  margin-top: 0;
+}
+
 .right-panel .semantic-empty {
   border-style: solid;
 }
@@ -12652,16 +12674,23 @@ button.primary-action:active:not(:disabled) {
   outline: none !important;
 }
 
-.photo-app .asset-card-shell.is-selected::after,
-.photo-app .asset-card-shell.is-active::after {
+.photo-app .asset-card-shell.is-active::after,
+.photo-app .asset-card-shell.is-selected:not(.is-active)::after {
   position: absolute;
   z-index: 20;
   inset: 0;
   box-sizing: border-box;
-  border: 2px solid var(--accent);
   border-radius: 12px;
   content: "";
   pointer-events: none;
+}
+
+.photo-app .asset-card-shell.is-active::after {
+  border: 2px solid var(--accent);
+}
+
+.photo-app .asset-card-shell.is-selected:not(.is-active)::after {
+  border: 1px solid color-mix(in srgb, var(--text-high) 52%, transparent);
 }
 
 .photo-app .asset-card-shell.is-selected .asset-card,
@@ -12926,7 +12955,7 @@ button.primary-action:active:not(:disabled) {
 }
 
 .photo-app .asset-card-shell:hover {
-  transform: translateY(-2px);
+  transform: none;
 }
 
 .photo-app .asset-card-frame,
@@ -12947,7 +12976,7 @@ button.primary-action:active:not(:disabled) {
 
 .photo-app .asset-card:hover,
 .photo-app .asset-card-frame:hover {
-  box-shadow: var(--shadow-hover-soft) !important;
+  box-shadow: 0 1px 5px rgba(0, 0, 0, 0.12) !important;
 }
 
 .photo-app .asset-card-shell.is-selected .asset-card,
@@ -13100,33 +13129,6 @@ button.primary-action:active:not(:disabled) {
   margin-left: auto;
 }
 
-.photo-app .grid-zoom-control {
-  display: inline-flex;
-  min-width: 166px;
-  align-items: center;
-  gap: 7px;
-  margin-left: 14px;
-  color: var(--text-muted);
-  font-size: 9px;
-  white-space: nowrap;
-}
-
-.photo-app .grid-zoom-control .grid-zoom-slider {
-  width: 112px;
-  height: 18px;
-  margin: 0;
-  accent-color: var(--accent);
-  cursor: pointer;
-}
-
-.photo-app .grid-zoom-control output {
-  min-width: 31px;
-  color: var(--text-secondary);
-  font-size: 9px;
-  font-variant-numeric: tabular-nums;
-  text-align: right;
-}
-
 @media (max-width: 720px) {
   .photo-app .content-toolbar-summary {
     order: 1;
@@ -13140,22 +13142,12 @@ button.primary-action:active:not(:disabled) {
   .photo-app .content-toolbar-manual {
     order: 3;
   }
-
-  .photo-app .grid-zoom-control {
-    order: 4;
-    margin-left: auto;
-  }
 }
 
 @media (max-width: 540px) {
-  .photo-app .content-toolbar-controls,
-  .photo-app .grid-zoom-control {
+  .photo-app .content-toolbar-controls {
     width: 100%;
     margin-left: 0;
-  }
-
-  .photo-app .grid-zoom-control .grid-zoom-slider {
-    flex: 1 1 auto;
   }
 }
 
@@ -13187,6 +13179,16 @@ button.primary-action:active:not(:disabled) {
 .photo-app .sidebar-filter-area {
   display: flex;
   flex-direction: column;
+}
+
+.photo-app .sidebar-filter-empty {
+  display: grid;
+  min-height: 112px;
+  place-items: center;
+  padding: 20px;
+  color: var(--text-muted);
+  font-size: 11px;
+  text-align: center;
 }
 
 .photo-app .sidebar-filter-module .panel-section {
@@ -14485,22 +14487,22 @@ button.primary-action:active:not(:disabled) {
   font-size: 9px;
 }
 
-.photo-app .organization-level-guide {
+.photo-app .organization-level-columns {
   display: grid;
-  gap: 2px;
-  margin: 2px 0 8px;
-  padding: 7px 8px;
+  grid-template-columns: 16px 16px minmax(0, 1fr) minmax(0, 1fr) repeat(3, 28px);
+  gap: 3px;
+  margin: 2px 0 4px;
+  padding: 0 4px;
   color: var(--text-muted);
-  border-left: 2px solid var(--accent);
-  background: color-mix(in srgb, var(--accent) 6%, transparent);
-  font-size: 9px;
-  line-height: 1.45;
+  font-size: 10px;
 }
 
-.photo-app .organization-level-guide strong {
-  color: var(--text-secondary);
-  font-size: 9px;
-  font-weight: 650;
+.photo-app .organization-level-columns span:first-child {
+  grid-column: 3;
+}
+
+.photo-app .organization-level-columns span:last-child {
+  grid-column: 4;
 }
 
 .photo-app .organization-levels {
@@ -14745,13 +14747,13 @@ button.primary-action:active:not(:disabled) {
 }
 
 .photo-app .organization-empty {
-  min-height: 330px;
-  margin: 18px 20px;
-  padding: 42px 28px;
-  gap: 9px;
-  border: 1px dashed var(--line-visible);
-  border-radius: 12px;
-  background: color-mix(in srgb, var(--panel) 42%, transparent);
+  min-height: 140px;
+  margin: 12px 16px;
+  padding: 28px 20px;
+  gap: 6px;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
 }
 
 .photo-app .organization-empty-kicker {
@@ -14843,11 +14845,9 @@ button.primary-action:active:not(:disabled) {
 }
 
 .photo-app .organization-empty.is-compact {
-  min-height: 150px;
-  margin: 16px 0;
-  padding: 24px 16px;
-  border-style: solid;
-  border-radius: 10px;
+  min-height: 96px;
+  margin: 12px 0;
+  padding: 22px 12px;
 }
 
 .photo-app .organization-empty.is-compact strong {
@@ -15313,8 +15313,9 @@ button.primary-action:active:not(:disabled) {
   container: photo-center / inline-size;
 }
 
-.photo-app .content-toolbar {
+.photo-app .center-workspace:not(.organization-mode-shell) > .content-toolbar {
   box-sizing: border-box;
+  flex: 0 0 auto;
   flex-wrap: nowrap;
   row-gap: 3px;
 }
@@ -15335,19 +15336,18 @@ button.primary-action:active:not(:disabled) {
   gap: 6px;
 }
 
+.photo-app .content-toolbar-controls > * {
+  min-width: 0;
+  max-width: 100%;
+}
+
 .photo-app .content-toolbar .content-toolbar-query {
   flex: 0 0 auto;
   white-space: nowrap;
 }
 
-.photo-app .grid-zoom-control {
-  flex: 0 1 166px;
-  min-width: 146px;
-  margin-left: 8px;
-}
-
 @container photo-center (max-width: 980px) {
-  .photo-app .content-toolbar {
+  .photo-app .center-workspace:not(.organization-mode-shell) > .content-toolbar {
     min-height: 76px;
     padding-block: 4px;
     flex-wrap: wrap;
@@ -15376,17 +15376,10 @@ button.primary-action:active:not(:disabled) {
     justify-content: flex-start;
     padding-inline: 0;
   }
-
-  .photo-app .grid-zoom-control {
-    order: 4;
-    flex: 0 1 166px;
-    min-width: 146px;
-    margin-left: 0;
-  }
 }
 
 @container photo-center (max-width: 640px) {
-  .photo-app .content-toolbar {
+  .photo-app .center-workspace:not(.organization-mode-shell) > .content-toolbar {
     min-height: 0;
     align-items: center;
     padding-block: 6px;
@@ -15394,8 +15387,7 @@ button.primary-action:active:not(:disabled) {
 
   .photo-app .content-toolbar-summary,
   .photo-app .content-toolbar-controls,
-  .photo-app .content-toolbar-manual,
-  .photo-app .grid-zoom-control {
+  .photo-app .content-toolbar-manual {
     width: 100%;
     margin-left: 0;
   }
@@ -15415,16 +15407,6 @@ button.primary-action:active:not(:disabled) {
     order: 3;
     flex: 1 1 100% !important;
   }
-
-  .photo-app .grid-zoom-control {
-    order: 4;
-    flex: 1 1 100%;
-    min-width: 0;
-  }
-
-  .photo-app .grid-zoom-control .grid-zoom-slider {
-    flex: 1 1 auto;
-  }
 }
 
 @container photo-center (max-width: 420px) {
@@ -15437,16 +15419,23 @@ button.primary-action:active:not(:disabled) {
   }
 
   .photo-app .content-toolbar-controls {
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr);
     gap: 4px;
   }
 
+  .photo-app .content-toolbar .group-select-control {
+    width: 100%;
+  }
+
   .photo-app .content-toolbar .group-select-control select {
-    min-width: 92px;
+    width: 100%;
+    min-width: 0;
   }
 
   .photo-app .content-toolbar .analysis-status-filter-bar {
+    grid-column: 1 / -1;
     min-width: 0;
-    flex: 1 1 180px;
   }
 
   .photo-app .content-toolbar .analysis-status-filter-heading strong {
@@ -15669,20 +15658,19 @@ button.primary-action:active:not(:disabled) {
   }
 }
 
-/* First-run entry is a quiet workbench cue rather than a centered marketing
-   card. The accent rule and small capability rail give the empty canvas a
-   useful starting point without adding another nested surface. */
+/* First-run entry stays on the canvas itself. A single accent rule provides
+   orientation without turning the empty state into a floating marketing card. */
 .photo-app .welcome-state {
   display: grid;
-  grid-template-columns: 3px minmax(0, 1fr) 150px;
+  grid-template-columns: 3px minmax(0, 1fr);
   align-items: stretch;
-  width: min(760px, calc(100% - 56px));
+  width: min(560px, calc(100% - 56px));
   margin: 12vh auto auto;
   padding: 0;
-  overflow: hidden;
-  border: 1px solid var(--line-subtle);
-  border-radius: var(--control-radius);
-  background: color-mix(in srgb, var(--panel) 72%, transparent);
+  overflow: visible;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
   box-shadow: none;
 }
 
@@ -15700,27 +15688,16 @@ button.primary-action:active:not(:disabled) {
   padding: 30px 32px;
 }
 
-.photo-app .welcome-state-copy > small {
+.photo-app .welcome-state-icon {
   color: var(--accent-strong);
-  font-size: 9px;
-  font-weight: 650;
-  letter-spacing: 0.08em;
 }
 
 .photo-app .welcome-state-copy h1 {
-  margin: 7px 0 8px;
+  margin: 10px 0 18px;
   color: var(--text-high);
   font-size: clamp(19px, 2vw, 25px);
   font-weight: 620;
   letter-spacing: -0.02em;
-}
-
-.photo-app .welcome-state-copy p {
-  max-width: 420px;
-  margin: 0 0 18px;
-  color: var(--text-secondary);
-  font-size: 11px;
-  line-height: 1.65;
 }
 
 .photo-app .welcome-state-actions {
@@ -15737,37 +15714,11 @@ button.primary-action:active:not(:disabled) {
   font-size: 9px;
 }
 
-.photo-app .welcome-state-notes {
-  display: grid;
-  align-content: center;
-  gap: 14px;
-  padding: 22px 18px;
-  border-left: 1px solid var(--line-subtle);
-  background: color-mix(in srgb, var(--panel-inset) 42%, transparent);
-}
-
-.photo-app .welcome-state-notes > div {
-  display: grid;
-  grid-template-columns: 20px minmax(0, 1fr);
-  align-items: center;
-  gap: 7px;
-  color: var(--text-secondary);
-  font-size: 9px;
-}
-
-.photo-app .welcome-state-notes svg {
-  color: var(--accent-strong);
-}
-
-.photo-app .welcome-state-note-mark {
-  display: inline-grid;
-  width: 18px;
-  height: 18px;
-  place-items: center;
-  color: var(--accent-strong);
-  border: 1px solid var(--line-visible);
-  border-radius: 50%;
-  font-size: 12px;
+.photo-app .welcome-state-local-note {
+  margin-top: 14px;
+  color: var(--text-muted);
+  font-size: 10px;
+  letter-spacing: 0;
 }
 
 .photo-app .import-option + .import-option {
@@ -15787,16 +15738,11 @@ button.primary-action:active:not(:disabled) {
 
 @media (max-width: 620px) {
   .photo-app .welcome-state {
-    grid-template-columns: 3px minmax(0, 1fr);
     width: min(560px, calc(100% - 32px));
   }
 
-  .photo-app .welcome-state-notes {
-    grid-column: 2;
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-    padding: 14px 24px;
-    border-top: 1px solid var(--line-subtle);
-    border-left: 0;
+  .photo-app .welcome-state-copy {
+    padding: 26px 24px;
   }
 }
 
@@ -15886,4 +15832,839 @@ button.primary-action:active:not(:disabled) {
 .photo-app .content-toolbar-controls .single-selection-toolbar-toggle .single-selection-mark svg {
   width: 14px;
   height: 14px;
+}
+
+/* Single-preview selection uses a crisp state change rather than a pale
+   floating badge: the checked circle gets a stronger surface and a
+   theme-aware check color, while the toolbar geometry stays unchanged. */
+.photo-app .content-toolbar-controls .single-selection-toolbar-toggle {
+  background: color-mix(in srgb, var(--panel-raised) 82%, transparent) !important;
+}
+
+.photo-app .content-toolbar-controls .single-selection-toolbar-toggle.is-selected {
+  color: var(--canvas);
+  border-color: var(--accent-strong) !important;
+  background: var(--accent-strong) !important;
+  box-shadow: none !important;
+}
+
+.photo-app .content-toolbar-controls .single-selection-toolbar-toggle .single-selection-mark svg {
+  width: 16px;
+  height: 16px;
+}
+
+/* The filmstrip keeps current-image focus and batch selection separate. A
+   small corner check makes Ctrl/Command selection visible without covering
+   the photograph or adding another footer control. */
+.photo-app .filmstrip button {
+  position: relative;
+}
+
+.photo-app .filmstrip button.is-selected {
+  border-color: color-mix(in srgb, var(--accent-strong) 82%, var(--line-visible)) !important;
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent-strong) 72%, transparent) !important;
+}
+
+.photo-app .filmstrip button.is-selected::before {
+  position: absolute;
+  inset: auto;
+  top: 4px;
+  right: 4px;
+  display: grid;
+  z-index: 2;
+  width: 16px;
+  height: 16px;
+  place-items: center;
+  color: var(--canvas);
+  border: 1px solid color-mix(in srgb, var(--accent-strong) 84%, var(--line-visible));
+  border-radius: 50%;
+  background: var(--accent-strong);
+  content: "✓";
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 1;
+  pointer-events: none;
+}
+
+/* Collection management reuses the library tree and dialog control language. */
+.collection-menu-trigger {
+  display: grid;
+  width: 25px;
+  height: 25px;
+  flex: 0 0 25px;
+  place-items: center;
+  padding: 0;
+  color: var(--text-muted);
+  border: 0;
+  border-radius: var(--control-radius);
+  background: transparent;
+  cursor: pointer;
+  opacity: 0;
+}
+.library-tree-row:hover .collection-menu-trigger,
+.collection-menu-trigger:focus-visible,
+.collection-menu-trigger[aria-expanded="true"] {
+  opacity: 1;
+}
+.collection-menu-trigger:hover {
+  color: var(--text-high);
+  background: var(--panel-raised);
+}
+.collection-context-menu {
+  position: absolute;
+  z-index: 14;
+  top: calc(100% - 2px);
+  right: 3px;
+  display: grid;
+  min-width: 156px;
+  padding: 4px;
+  border: 1px solid var(--border);
+  border-radius: var(--control-radius);
+  background: var(--panel-raised);
+  box-shadow: 0 10px 24px rgba(0, 0, 0, 0.34);
+}
+.collection-context-menu button {
+  min-height: 30px;
+  padding: 6px 9px;
+  color: var(--text-secondary);
+  text-align: left;
+  border: 0;
+  border-radius: var(--control-radius);
+  background: transparent;
+  cursor: pointer;
+}
+.collection-context-menu button:hover {
+  color: var(--text-high);
+  background: var(--panel-inset);
+}
+.collection-context-menu .danger-action:hover {
+  color: var(--error);
+}
+.collection-action-dialog {
+  width: min(420px, calc(100vw - 32px));
+  max-height: min(620px, calc(100vh - 48px));
+  padding: 18px;
+  overflow: auto;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  background: var(--panel);
+  box-shadow: 0 18px 52px rgba(0, 0, 0, 0.42);
+}
+.collection-dialog-count {
+  margin: 4px 0 10px;
+  color: var(--text-muted);
+  font-size: 12px;
+}
+.collection-choice-list,
+.collection-delete-options {
+  display: grid;
+  gap: 6px;
+}
+.collection-choice-list {
+  max-height: 300px;
+  overflow: auto;
+}
+.collection-choice,
+.collection-delete-options label {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  min-height: 36px;
+  gap: 9px;
+  padding: 0 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--control-radius);
+  background: var(--panel-inset);
+}
+.collection-choice small,
+.collection-delete-options > span {
+  color: var(--text-muted);
+}
+.collection-dialog-field {
+  display: grid;
+  gap: 7px;
+  margin: 10px 0;
+}
+.collection-dialog-field input,
+.collection-dialog-field select {
+  min-height: var(--control-height-compact);
+  padding: 0 10px;
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: var(--control-radius);
+  background: var(--panel-inset);
+}
+.collection-delete-options > strong {
+  margin-bottom: 4px;
+}
+.collection-delete-options label {
+  grid-template-columns: auto minmax(0, 1fr);
+}
+.danger-primary-action {
+  min-height: var(--control-height-compact);
+  padding: 0 14px;
+  color: #fff;
+  border: 0;
+  border-radius: var(--control-radius);
+  background: var(--error);
+  cursor: pointer;
+}
+.danger-primary-action:disabled {
+  cursor: default;
+  opacity: 0.5;
+}
+
+/* Settings information architecture: one navigation column, one focused page,
+   and flat functional groups. Only real persisted preferences appear here. */
+.photo-app .settings-dialog {
+  width: min(780px, calc(100vw - 36px));
+  height: min(620px, calc(100vh - 48px));
+}
+
+.photo-app .settings-dialog-heading {
+  min-height: 56px;
+  padding: 0 18px;
+}
+
+.photo-app .settings-dialog-heading h2 {
+  margin: 0;
+  font-size: 16px;
+  letter-spacing: -0.015em;
+}
+
+.photo-app .settings-dialog-heading .dialog-close {
+  width: var(--control-height-compact);
+  min-width: var(--control-height-compact);
+  height: var(--control-height-compact);
+  min-height: var(--control-height-compact);
+  padding: 0;
+  border-radius: var(--control-radius);
+}
+
+.photo-app .settings-dialog-body {
+  grid-template-columns: 164px minmax(0, 1fr);
+}
+
+.photo-app .settings-side-nav {
+  gap: 2px;
+  padding: 12px 8px;
+}
+
+.photo-app .settings-side-nav button {
+  min-height: 44px;
+  gap: 9px;
+  padding: 6px 10px;
+  border: 0;
+  border-radius: var(--control-radius);
+  box-shadow: inset 2px 0 transparent;
+}
+
+.photo-app .settings-side-nav button:hover {
+  background: color-mix(in srgb, var(--panel-raised) 66%, transparent);
+  transform: none;
+}
+
+.photo-app .settings-side-nav button.is-active {
+  border: 0;
+  background: var(--accent-soft);
+  box-shadow: inset 2px 0 var(--accent);
+}
+
+.photo-app .settings-side-nav button > span {
+  gap: 2px;
+}
+
+.photo-app .settings-side-nav button strong {
+  font-size: 11px;
+}
+
+.photo-app .settings-side-nav button small {
+  font-size: 9px;
+}
+
+.photo-app .settings-page {
+  padding: 22px 30px 20px;
+}
+
+.photo-app .settings-page-heading {
+  display: flex;
+  min-height: 42px;
+  align-items: baseline;
+  gap: 12px;
+  padding: 0 0 14px;
+}
+
+.photo-app .settings-page-heading h3 {
+  margin: 0;
+  font-size: 18px;
+}
+
+.photo-app .settings-page-heading p {
+  margin: 0;
+  font-size: 9px;
+}
+
+.photo-app .settings-groups {
+  display: grid;
+  gap: 18px;
+  padding-top: 16px;
+}
+
+.photo-app .settings-group {
+  min-width: 0;
+}
+
+.photo-app .settings-group-heading {
+  display: flex;
+  min-height: 24px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.photo-app .settings-group-heading h4 {
+  margin: 0;
+  color: var(--text-secondary);
+  font-size: 11px;
+  font-weight: 650;
+}
+
+.photo-app .settings-group-heading span {
+  color: var(--text-muted);
+  font-size: 9px;
+}
+
+.photo-app .settings-group-content {
+  border-top: 1px solid var(--border-soft);
+}
+
+.photo-app .settings-field-row,
+.photo-app .settings-select-field {
+  min-height: 56px;
+  padding: 9px 2px;
+}
+
+.photo-app .settings-field-row:last-child,
+.photo-app .settings-select-field:last-child {
+  border-bottom: 1px solid var(--border-soft);
+}
+
+.photo-app .settings-field-row > div:first-child,
+.photo-app .settings-field-row > span:first-child,
+.photo-app .settings-select-field > span {
+  display: grid;
+  min-width: 0;
+  gap: 3px;
+}
+
+.photo-app .settings-field-row strong,
+.photo-app .settings-select-field strong {
+  font-size: 11px;
+}
+
+.photo-app .settings-field-row small,
+.photo-app .settings-select-field small {
+  font-size: 9px;
+}
+
+.photo-app .settings-choice-row {
+  height: var(--control-height-compact);
+  border-radius: var(--control-radius);
+}
+
+.photo-app .settings-choice-row label {
+  min-width: 72px;
+  min-height: 30px;
+  padding: 0 12px;
+  font-size: 10px;
+}
+
+.photo-app .settings-choice-row label:first-child {
+  border-radius: calc(var(--control-radius) - 1px) 0 0 calc(var(--control-radius) - 1px);
+}
+
+.photo-app .settings-choice-row label:last-child {
+  border-radius: 0 calc(var(--control-radius) - 1px) calc(var(--control-radius) - 1px) 0;
+}
+
+.photo-app .settings-choice-row input {
+  width: 12px;
+  height: 12px;
+  margin: 0;
+}
+
+.photo-app .settings-select-field select {
+  min-width: 112px;
+  height: var(--control-height-compact);
+  padding: 0 28px 0 10px;
+  color: var(--text-high);
+  border: 1px solid var(--border-soft);
+  border-radius: var(--control-radius);
+  outline: 0;
+  background: var(--panel-inset);
+  font-size: 10px;
+}
+
+.photo-app .settings-select-field select:focus-visible {
+  border-color: var(--accent);
+  outline: 2px solid color-mix(in srgb, var(--focus) 48%, transparent);
+  outline-offset: 1px;
+}
+
+.photo-app .settings-toggle-field input {
+  appearance: none;
+  width: 34px;
+  height: 20px;
+  margin: 0;
+  border: 1px solid var(--border-soft);
+  border-radius: 999px;
+  background: var(--panel-inset);
+  cursor: pointer;
+}
+
+.photo-app .settings-toggle-field input:checked {
+  background: var(--accent);
+  border-color: var(--accent-strong);
+}
+
+.photo-app .settings-toggle-field input:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.photo-app .settings-shortcut-groups {
+  grid-template-columns: 1fr;
+  gap: 18px;
+  padding-top: 16px;
+}
+
+.photo-app .settings-shortcut-list,
+.photo-app .settings-shortcut-list-two,
+.photo-app .settings-shortcut-list-rating,
+.photo-app .settings-shortcut-list-color {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0 20px;
+  border-top: 0;
+}
+
+.photo-app .settings-shortcut-field {
+  min-height: 42px;
+  padding: 5px 2px;
+  color: var(--text-secondary);
+  border: 0;
+  border-bottom: 1px solid var(--border-soft);
+  border-radius: 0;
+  background: transparent;
+  font-size: 10px;
+}
+
+.photo-app .settings-shortcut-field input {
+  width: 32px;
+  min-width: 32px;
+  min-height: 28px;
+  color: var(--text-high);
+  border: 1px solid var(--border-soft);
+  border-radius: 7px;
+  background: var(--panel-inset);
+  font-size: 11px;
+  font-weight: 650;
+  text-transform: uppercase;
+}
+
+.photo-app .settings-shortcut-field input:focus-visible {
+  border-color: var(--accent);
+  outline: 2px solid color-mix(in srgb, var(--focus) 48%, transparent);
+  outline-offset: 1px;
+}
+
+.photo-app .settings-dialog-footer {
+  min-height: 56px;
+  padding: 10px 18px;
+}
+
+@media (max-width: 640px) {
+  .photo-app .settings-dialog {
+    width: calc(100vw - 20px);
+    height: calc(100vh - 24px);
+  }
+
+  .photo-app .settings-dialog-body {
+    grid-template-columns: 138px minmax(0, 1fr);
+  }
+
+  .photo-app .settings-page {
+    padding: 22px 20px 26px;
+  }
+
+  .photo-app .settings-shortcut-list,
+  .photo-app .settings-shortcut-list-two,
+  .photo-app .settings-shortcut-list-rating,
+  .photo-app .settings-shortcut-list-color {
+    grid-template-columns: 1fr;
+  }
+}
+
+@media (max-width: 500px) {
+  .photo-app .settings-side-nav {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    padding: 7px;
+    border-right: 0;
+    border-bottom: 1px solid var(--border-soft);
+  }
+
+  .photo-app .settings-side-nav button {
+    min-height: 38px;
+    justify-content: center;
+    padding: 5px;
+    box-shadow: inset 0 -2px transparent;
+  }
+
+  .photo-app .settings-side-nav button.is-active {
+    box-shadow: inset 0 -2px var(--accent);
+  }
+
+  .photo-app .settings-side-nav button small {
+    display: none;
+  }
+
+  .photo-app .settings-page-heading {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 3px;
+  }
+}
+
+/* Compact background-task entry: details stay out of the gallery until requested. */
+.photo-app .topbar {
+  position: relative;
+  z-index: 30;
+}
+
+.photo-app .task-status-anchor {
+  position: relative;
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+}
+
+.photo-app .task-status-trigger {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 22px;
+  min-height: 22px;
+  padding: 0 3px;
+  color: var(--text-muted);
+  border: 0;
+  border-radius: var(--control-radius);
+  background: transparent;
+  cursor: pointer;
+  transition:
+    color 140ms cubic-bezier(0.25, 1, 0.5, 1),
+    background-color 140ms cubic-bezier(0.25, 1, 0.5, 1);
+}
+
+.photo-app .task-status-trigger:hover,
+.photo-app .task-status-trigger[aria-expanded="true"] {
+  color: var(--text-high);
+  background: color-mix(in srgb, var(--panel-raised) 72%, transparent);
+}
+
+.photo-app .task-status-dot {
+  width: 5px;
+  height: 5px;
+  flex: 0 0 5px;
+  border-radius: 50%;
+  background: var(--accent);
+}
+
+.photo-app .task-status-mini-track {
+  display: block;
+  width: 34px;
+  height: 3px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: var(--line-visible);
+}
+
+.photo-app .task-status-mini-track i {
+  display: block;
+  height: 100%;
+  min-width: 2px;
+  border-radius: inherit;
+  background: var(--accent);
+  transition: width 180ms cubic-bezier(0.25, 1, 0.5, 1);
+}
+
+.photo-app .task-status-count {
+  min-width: 9px;
+  color: var(--text-muted);
+  font-size: 9px;
+  font-variant-numeric: tabular-nums;
+  text-align: center;
+}
+
+.photo-app .task-status-popover {
+  position: absolute;
+  top: calc(100% + 8px);
+  left: 50%;
+  z-index: 80;
+  width: min(370px, calc(100vw - 24px));
+  padding: 10px 12px 11px;
+  border: 1px solid var(--line-visible);
+  border-radius: var(--neu-radius-control);
+  background: var(--panel-raised);
+  box-shadow: var(--neu-shadow-float);
+  transform: translateX(-50%);
+}
+
+.photo-app .task-status-popover-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-height: 24px;
+  color: var(--text-high);
+  font-size: 11px;
+}
+
+.photo-app .task-status-popover-header .icon-button {
+  width: 24px;
+  min-width: 24px;
+  height: 24px;
+  min-height: 24px;
+  padding: 0;
+}
+
+.photo-app .task-status-list {
+  display: grid;
+  gap: 0;
+}
+
+.photo-app .task-status-popover .scan-panel,
+.photo-app .task-status-popover .semantic-taskbar {
+  margin: 0;
+  padding: 9px 0 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+}
+
+.photo-app .task-status-popover .scan-panel-top {
+  gap: 12px;
+}
+
+.photo-app .task-status-popover .scan-counts {
+  gap: 8px;
+}
+
+.photo-app .task-status-popover .semantic-taskbar {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 8px;
+}
+
+.photo-app .task-status-popover .scan-panel + .semantic-taskbar,
+.photo-app .task-status-popover .semantic-taskbar + .scan-panel {
+  margin-top: 9px;
+  border-top: 1px solid var(--line-subtle);
+}
+
+.photo-app .task-status-popover .task-detail-heading,
+.photo-app .task-status-popover .task-detail-actions {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+
+.photo-app .task-status-popover .task-detail-heading span {
+  min-width: 0;
+}
+
+.photo-app .task-status-popover .task-detail-heading strong,
+.photo-app .task-status-popover .task-detail-heading small {
+  display: block;
+}
+
+.photo-app .task-status-popover .task-detail-heading strong {
+  color: var(--text);
+  font-size: 10px;
+}
+
+.photo-app .task-status-popover .task-detail-heading small {
+  margin-top: 2px;
+  color: var(--text-muted);
+  font-size: 8px;
+}
+
+.photo-app .task-status-popover .task-detail-actions {
+  justify-content: flex-end;
+}
+
+.photo-app .task-status-popover .task-detail-actions button {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  min-height: 26px;
+  padding: 0 8px;
+  color: var(--text-secondary);
+  font-size: 8px;
+  border: 1px solid var(--line-visible);
+  border-radius: var(--control-radius);
+  background: var(--panel-inset);
+  cursor: pointer;
+}
+
+.photo-app .task-status-popover .task-detail-actions button:hover:not(:disabled) {
+  color: var(--text-high);
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+
+@media (max-width: 860px) {
+  .photo-app .task-status-popover {
+    right: 0;
+    left: auto;
+    transform: none;
+  }
+}
+
+/* Readable compact task status: task scope, operation, progress and overall percentage. */
+.photo-app .task-status-trigger {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(88px, 104px) auto;
+  width: min(300px, 30vw);
+  min-width: 220px;
+  height: 30px;
+  min-height: 30px;
+  gap: 8px;
+  padding: 0 8px;
+  color: var(--text-muted);
+  border: 1px solid transparent;
+  border-radius: var(--control-radius);
+  background: transparent;
+  text-align: left;
+}
+
+.photo-app .task-status-trigger:hover,
+.photo-app .task-status-trigger[aria-expanded="true"] {
+  border-color: var(--line-subtle);
+  background: color-mix(in srgb, var(--panel-raised) 72%, transparent);
+}
+
+.photo-app .task-status-copy {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 6px;
+}
+
+.photo-app .task-status-summary {
+  min-width: 0;
+  overflow: hidden;
+  color: inherit;
+  font-size: 9px;
+  font-variant-numeric: tabular-nums;
+  line-height: 1.2;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.photo-app .task-status-mini-track {
+  display: block;
+  width: auto;
+  min-width: 0;
+  height: 6px;
+  overflow: hidden;
+  border: 1px solid var(--line-visible);
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--text-muted) 22%, var(--panel-inset));
+}
+
+.photo-app .task-status-mini-track i {
+  display: block;
+  height: 100%;
+  min-width: 0;
+  border-radius: inherit;
+  background: linear-gradient(90deg, var(--accent), var(--accent-strong));
+  box-shadow: none;
+  transition: width 160ms cubic-bezier(0.25, 1, 0.5, 1);
+}
+
+.photo-app .task-status-percent,
+.photo-app .task-panel-percent {
+  color: var(--text-muted);
+  font-size: 9px;
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+  white-space: nowrap;
+}
+
+.photo-app .task-status-popover .scan-panel-top {
+  align-items: flex-start;
+}
+
+.photo-app .task-status-popover .scan-panel-copy {
+  min-width: 0;
+  overflow: hidden;
+}
+
+.photo-app .task-status-popover .scan-panel-copy .section-label,
+.photo-app .task-status-popover .task-scope-label {
+  overflow: hidden;
+  color: var(--text-muted);
+  font-size: 9px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.photo-app .task-status-popover .scan-panel-copy small {
+  display: block;
+  margin-top: 2px;
+  color: var(--text-muted);
+  font-size: 8px;
+}
+
+.photo-app .task-status-popover .task-scope-label {
+  margin-top: 0;
+}
+
+.photo-app .task-status-popover .task-detail-heading > span {
+  min-width: 0;
+  overflow: hidden;
+}
+
+.photo-app .task-status-popover .progress-track span,
+.photo-app .task-status-popover .task-progress i {
+  min-width: 0;
+  background: linear-gradient(90deg, var(--accent), var(--accent-strong));
+  box-shadow: none;
+}
+
+/* Progress fill starts flush with the track; only the trailing edge is rounded. */
+.photo-app .task-status-mini-track i,
+.photo-app .task-status-popover .progress-track span,
+.photo-app .task-status-popover .task-progress i {
+  border-radius: 0 999px 999px 0;
+}
+@media (max-width: 860px) {
+  .photo-app .task-status-trigger {
+    width: min(280px, 42vw);
+    min-width: 190px;
+  }
+}
+
+@media (max-width: 560px) {
+  .photo-app .task-status-trigger {
+    width: min(260px, calc(100vw - 42px));
+    min-width: 0;
+    grid-template-columns: minmax(0, 1fr) 78px auto;
+  }
+
+  .photo-app .task-status-summary {
+    font-size: 8px;
+  }
 }

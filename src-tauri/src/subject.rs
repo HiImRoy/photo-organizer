@@ -2,7 +2,6 @@ use std::path::{Path, PathBuf};
 
 use image::imageops::FilterType;
 use ort::session::Session;
-use ort::session::builder::GraphOptimizationLevel;
 use ort::value::Tensor;
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
@@ -12,7 +11,7 @@ use crate::semantic::{ExecutionBackend, ModelMetadata, SemanticError, SemanticLa
 pub const MODEL_NAME: &str = "PicoDet-S-COCO";
 pub const MODEL_VERSION: &str = "onnx-2026-08-10";
 pub const ANALYSIS_VERSION: &str = "photo-organizer-subject-picodet-yunet-v1";
-pub const TAXONOMY_VERSION: &str = "photo-organizer-subject-tags-v2";
+pub const TAXONOMY_VERSION: &str = "photo-organizer-subject-tags-v3";
 pub const MODEL_FILE: &str = "picodet_s_320_lcnet_postprocessed.onnx";
 pub const LABELS_FILE: &str = "coco80.txt";
 pub const MODEL_SHA256: &str = "09fc88131be8ad224f13739a5cf8fc838600d76a77539af7f0400fa90506c5f3";
@@ -35,7 +34,6 @@ const YUNET_OUTPUT_NAMES: [&str; 12] = [
     "kps_8", "kps_16", "kps_32",
 ];
 
-const VEHICLE_CLASSES: &[usize] = &[1, 2, 3, 4, 5, 6, 7, 8];
 const ANIMAL_CLASSES: &[usize] = &[14, 15, 16, 17, 18, 19, 20, 21, 22, 23];
 const FOOD_CLASSES: &[usize] = &[39, 40, 41, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55];
 const PLANT_CLASSES: &[usize] = &[58];
@@ -73,7 +71,7 @@ struct SubjectLabelDefinition {
     threshold: f32,
 }
 
-const SUBJECT_LABELS: [SubjectLabelDefinition; 6] = [
+const SUBJECT_LABELS: [SubjectLabelDefinition; 5] = [
     SubjectLabelDefinition {
         id: "single_person",
         display_name: "单人",
@@ -90,13 +88,8 @@ const SUBJECT_LABELS: [SubjectLabelDefinition; 6] = [
         threshold: DETECTION_SCORE_THRESHOLD,
     },
     SubjectLabelDefinition {
-        id: "vehicle",
-        display_name: "车辆",
-        threshold: DETECTION_SCORE_THRESHOLD,
-    },
-    SubjectLabelDefinition {
         id: "food",
-        display_name: "食品",
+        display_name: "食物",
         threshold: DETECTION_SCORE_THRESHOLD,
     },
     SubjectLabelDefinition {
@@ -185,6 +178,7 @@ pub struct SubjectModel {
     face_output_names: Option<Vec<String>>,
     model_size_bytes: u64,
     face_model_size_bytes: Option<u64>,
+    backend: ExecutionBackend,
 }
 
 impl std::fmt::Debug for SubjectModel {
@@ -203,6 +197,20 @@ impl SubjectModel {
         face_model_dir: &Path,
         runtime_path: &Path,
     ) -> Result<Self, SemanticError> {
+        Self::load_with_backend(
+            model_dir,
+            face_model_dir,
+            runtime_path,
+            ExecutionBackend::Cpu,
+        )
+    }
+
+    pub fn load_with_backend(
+        model_dir: &Path,
+        face_model_dir: &Path,
+        runtime_path: &Path,
+        backend: ExecutionBackend,
+    ) -> Result<Self, SemanticError> {
         let model_path = model_dir.join(MODEL_FILE);
         let labels_path = model_dir.join(LABELS_FILE);
         crate::semantic::verify_sha256(&model_path, MODEL_SHA256)?;
@@ -216,14 +224,14 @@ impl SubjectModel {
         }
         crate::semantic::initialize_ort(runtime_path)?;
 
-        let detector = create_session(&model_path, "PicoDet")?;
+        let detector = create_session(&model_path, "PicoDet", backend)?;
         let (detector_input_name, scale_factor_input_name, detector_output_name) =
             validate_picodet_contract(&detector)?;
 
         let face_model_path = face_model_dir.join(FACE_MODEL_FILE);
         let (face_detector, face_input_name, face_output_names, face_model_size_bytes) =
             match crate::semantic::verify_sha256(&face_model_path, FACE_MODEL_SHA256)
-                .and_then(|_| create_session(&face_model_path, "YuNet"))
+                .and_then(|_| create_session(&face_model_path, "YuNet", backend))
                 .and_then(|session| {
                     let (input, outputs) = validate_yunet_contract(&session)?;
                     Ok((session, input, outputs))
@@ -258,6 +266,7 @@ impl SubjectModel {
             face_output_names,
             model_size_bytes,
             face_model_size_bytes,
+            backend,
         })
     }
 
@@ -295,7 +304,7 @@ impl SubjectClassifier for SubjectModel {
             message: message.into(),
             model: self.metadata(),
             face_model: self.face_metadata(),
-            selected_backend: Some(ExecutionBackend::Cpu),
+            selected_backend: Some(self.backend),
         }
     }
 
@@ -304,7 +313,7 @@ impl SubjectClassifier for SubjectModel {
         images: &[PathBuf],
         backend: ExecutionBackend,
     ) -> Result<Vec<SubjectAnalysisOutput>, SemanticError> {
-        if !matches!(backend, ExecutionBackend::Auto | ExecutionBackend::Cpu) {
+        if !crate::semantic::backend_matches(self.backend, backend) {
             return Err(SemanticError::BackendUnavailable(backend));
         }
         let mut results = Vec::with_capacity(images.len());
@@ -390,7 +399,7 @@ fn model_metadata(installed: bool, size: Option<u64>) -> ModelMetadata {
         installed,
         model_size_bytes: size,
         model_sha256: Some(MODEL_SHA256.into()),
-        supported_backends: vec![ExecutionBackend::Cpu],
+        supported_backends: vec![ExecutionBackend::Cpu, ExecutionBackend::DirectMl],
     }
 }
 
@@ -403,7 +412,7 @@ fn face_model_metadata(installed: bool, size: Option<u64>) -> ModelMetadata {
         installed,
         model_size_bytes: size,
         model_sha256: Some(FACE_MODEL_SHA256.into()),
-        supported_backends: vec![ExecutionBackend::Cpu],
+        supported_backends: vec![ExecutionBackend::Cpu, ExecutionBackend::DirectMl],
     }
 }
 
@@ -418,26 +427,12 @@ fn load_coco_labels(path: &Path) -> Result<Vec<String>, SemanticError> {
         .collect())
 }
 
-fn create_session(path: &Path, model_name: &str) -> Result<Session, SemanticError> {
-    let builder = Session::builder().map_err(|error| {
-        SemanticError::Inference(format!(
-            "could not create {model_name} ONNX session: {error}"
-        ))
-    })?;
-    let builder = builder
-        .with_optimization_level(GraphOptimizationLevel::Level3)
-        .map_err(|error| {
-            SemanticError::Inference(format!(
-                "could not optimize {model_name} ONNX graph: {error}"
-            ))
-        })?;
-    let mut builder = builder
-        .with_intra_threads(crate::semantic::cpu_thread_count())
-        .map_err(|error| {
-            SemanticError::Inference(format!(
-                "could not configure {model_name} ONNX threads: {error}"
-            ))
-        })?;
+fn create_session(
+    path: &Path,
+    model_name: &str,
+    backend: ExecutionBackend,
+) -> Result<Session, SemanticError> {
+    let mut builder = crate::semantic::build_session_builder(model_name, backend)?;
     builder.commit_from_file(path).map_err(|error| {
         SemanticError::Inference(format!("could not load {model_name} ONNX graph: {error}"))
     })
@@ -644,9 +639,6 @@ fn aggregate_subjects(detections: &[(usize, f32)], face_score: f32) -> SubjectAn
     if let Some(score) = max_for_classes(&class_scores, ANIMAL_CLASSES) {
         predictions.push(prediction("animal", score));
     }
-    if let Some(score) = max_for_classes(&class_scores, VEHICLE_CLASSES) {
-        predictions.push(prediction("vehicle", score));
-    }
     if let Some(score) = max_for_classes(&class_scores, FOOD_CLASSES) {
         predictions.push(prediction("food", score));
     }
@@ -685,7 +677,20 @@ mod tests {
     #[test]
     fn subject_catalog_is_non_primary_and_chinese() {
         let catalog = subject_catalog();
-        assert_eq!(catalog.len(), 6);
+        assert_eq!(catalog.len(), 5);
+        assert_eq!(
+            catalog
+                .iter()
+                .map(|label| (label.id.as_str(), label.display_name.as_str()))
+                .collect::<Vec<_>>(),
+            vec![
+                ("single_person", "单人"),
+                ("multiple_people", "多人"),
+                ("animal", "动物"),
+                ("food", "食物"),
+                ("plant", "植物"),
+            ]
+        );
         assert!(
             catalog
                 .iter()
@@ -707,7 +712,7 @@ mod tests {
             .iter()
             .map(|prediction| prediction.label_id.as_str())
             .collect::<Vec<_>>();
-        assert_eq!(labels, &["multiple_people", "animal", "vehicle"]);
+        assert_eq!(labels, &["multiple_people", "animal"]);
     }
 
     #[test]

@@ -3,6 +3,9 @@ use std::sync::Arc;
 
 use crate::db::{Repository, SemanticAssetCandidate};
 use crate::error::{AppError, AppResult};
+use crate::gpu::{
+    CPU_ANALYSIS_BATCH_LIMIT, MAX_DIRECTML_ANALYSIS_BATCH_SIZE, analysis_batch_limit_for_backend,
+};
 use crate::models::SemanticProgress;
 use crate::semantic::{
     ExecutionBackend, SemanticAnalysisOutput, SemanticClassifier, SemanticPrediction,
@@ -11,10 +14,9 @@ use crate::semantic::{
 use crate::subject::{SubjectAnalysisOutput, SubjectClassifier};
 use crate::tasks::{SemanticControlSignal, SemanticTaskRegistry};
 
-// Keep model inference small enough for CPU-only desktops. This is the
-// application analysis batch, independent from offline benchmark utilities.
+// Keep CPU inference small enough for ordinary desktops; DirectML may use a wider
+// application analysis batch after the GPU capacity tier has been checked.
 pub(crate) const SEMANTIC_BATCH_SIZE: usize = 4;
-const MAX_SEMANTIC_BATCH_SIZE: usize = 8;
 
 #[allow(clippy::too_many_arguments)]
 pub fn spawn_semantic_job<F>(
@@ -27,6 +29,7 @@ pub fn spawn_semantic_job<F>(
     candidates: Vec<SemanticAssetCandidate>,
     thumbnail_dir: PathBuf,
     batch_size: usize,
+    backend: ExecutionBackend,
     emit: F,
 ) -> AppResult<()>
 where
@@ -36,11 +39,25 @@ where
         AppError::InvalidArgument(format!("semantic job is already running: {job_id}"))
     })?;
     let thread_job_id = job_id.clone();
+    let gpu_capabilities = crate::gpu::detect_gpu_capabilities();
+    let max_batch_size = analysis_batch_limit_for_backend(&gpu_capabilities, backend);
+    debug_assert!(
+        max_batch_size
+            <= if backend == ExecutionBackend::DirectMl {
+                MAX_DIRECTML_ANALYSIS_BATCH_SIZE
+            } else {
+                CPU_ANALYSIS_BATCH_LIMIT
+            }
+    );
     let batch_size = if batch_size == 0 {
         SEMANTIC_BATCH_SIZE
     } else {
-        batch_size.clamp(1, MAX_SEMANTIC_BATCH_SIZE)
+        batch_size.clamp(1, max_batch_size)
     };
+    let subject_backend = subject_classifier
+        .as_ref()
+        .and_then(|classifier| classifier.status().selected_backend)
+        .unwrap_or(backend);
     std::thread::Builder::new()
         .name(format!("semantic-{thread_job_id}"))
         .spawn(move || {
@@ -59,11 +76,18 @@ where
                     skipped: 0,
                     current_asset_id: None,
                     current_path: None,
-                    execution_backend: Some("cpu".into()),
+                    execution_backend: Some(
+                        match backend {
+                            ExecutionBackend::DirectMl => "direct_ml",
+                            _ => "cpu",
+                        }
+                        .into(),
+                    ),
                     model_name: classifier.result_metadata().name,
                     model_version: classifier.result_metadata().version,
                     error: None,
                 });
+            progress.execution_backend = Some(backend.id().into());
             progress.status = "running".into();
             progress.error = None;
             let _ = repository.update_semantic_job_progress(&progress);
@@ -143,12 +167,13 @@ where
                         })
                         .collect::<Vec<_>>();
                     let outputs =
-                        classify_batch_with_fallback(classifier.as_ref(), &cache_ready, &paths);
+                        classify_batch_with_fallback(classifier.as_ref(), &cache_ready, &paths, backend);
                     let subject_outputs = subject_classifier.as_ref().map(|subject_classifier| {
                         classify_subject_batch_with_fallback(
                             subject_classifier.as_ref(),
                             &cache_ready,
                             &paths,
+                            subject_backend,
                         )
                     });
                     let mut successful = Vec::with_capacity(cache_ready.len());
@@ -158,6 +183,7 @@ where
                     {
                         match output {
                             Ok(mut output) => {
+                                add_derived_subject_evidence(&mut output);
                                 if let Some(subject_outputs) = subject_outputs.as_ref()
                                     && let Some(Ok(subject_output)) = subject_outputs.get(index)
                                 {
@@ -249,6 +275,32 @@ where
     Ok(())
 }
 
+fn add_derived_subject_evidence(output: &mut SemanticAnalysisOutput) {
+    let Some((similarity, threshold)) = output
+        .predictions
+        .iter()
+        .find(|prediction| prediction.is_primary && prediction.label_id == "photo_landscape")
+        .map(|prediction| (prediction.similarity, prediction.threshold))
+    else {
+        return;
+    };
+    if output
+        .predictions
+        .iter()
+        .any(|prediction| prediction.label_id == "scenery")
+    {
+        return;
+    }
+    output.predictions.push(SemanticPrediction {
+        label_id: "scenery".into(),
+        display_name: "风景".into(),
+        category_group: "subject".into(),
+        similarity,
+        threshold,
+        is_primary: false,
+    });
+}
+
 fn fuse_topic_with_subject_evidence(
     output: &mut SemanticAnalysisOutput,
     subject_output: &SubjectAnalysisOutput,
@@ -261,8 +313,12 @@ fn fuse_topic_with_subject_evidence(
                 Some(("photo_portrait", "人像", prediction.similarity, 0.22_f32))
             }
             "animal" => Some(("photo_wildlife", "动物", prediction.similarity, 0.22_f32)),
-            "vehicle" => Some(("photo_vehicle", "交通工具", prediction.similarity, 0.22_f32)),
-            "food" => Some(("photo_food", "美食", prediction.similarity, 0.21_f32)),
+            "food" => Some((
+                "photo_still_life",
+                "静物特写",
+                prediction.similarity,
+                0.21_f32,
+            )),
             "plant" => Some(("photo_macro", "植物", prediction.similarity, 0.22_f32)),
             _ => None,
         })
@@ -311,30 +367,94 @@ fn classify_subject_batch_with_fallback(
     classifier: &dyn SubjectClassifier,
     candidates: &[&SemanticAssetCandidate],
     paths: &[PathBuf],
+    backend: ExecutionBackend,
 ) -> Vec<Result<SubjectAnalysisOutput, String>> {
-    match classifier.classify_batch(paths, ExecutionBackend::Cpu) {
+    classify_subject_batch_adaptively(classifier, candidates, paths, backend)
+}
+
+fn classify_subject_batch_adaptively(
+    classifier: &dyn SubjectClassifier,
+    candidates: &[&SemanticAssetCandidate],
+    paths: &[PathBuf],
+    backend: ExecutionBackend,
+) -> Vec<Result<SubjectAnalysisOutput, String>> {
+    debug_assert_eq!(candidates.len(), paths.len());
+    match classifier.classify_batch(paths, backend) {
         Ok(outputs) if outputs.len() == paths.len() => outputs.into_iter().map(Ok).collect(),
         Ok(outputs) => {
-            let error = format!(
+            let batch_error = format!(
                 "subject model returned {} results for {} images",
                 outputs.len(),
                 paths.len()
             );
-            candidates
-                .iter()
-                .map(|candidate| Err(format!("{}: {error}", candidate.absolute_path.display())))
-                .collect()
+            if paths.len() > 1 {
+                log::warn!(
+                    "subject {} batch returned an invalid result count; backing off from {} images",
+                    backend.id(),
+                    paths.len()
+                );
+                let midpoint = paths.len() / 2;
+                let mut results = classify_subject_batch_adaptively(
+                    classifier,
+                    &candidates[..midpoint],
+                    &paths[..midpoint],
+                    backend,
+                );
+                results.extend(classify_subject_batch_adaptively(
+                    classifier,
+                    &candidates[midpoint..],
+                    &paths[midpoint..],
+                    backend,
+                ));
+                results
+            } else {
+                candidates
+                    .iter()
+                    .map(|candidate| {
+                        Err(format!(
+                            "{}: {}",
+                            candidate.absolute_path.display(),
+                            batch_error
+                        ))
+                    })
+                    .collect()
+            }
         }
-        Err(batch_error) => {
-            let batch_error = batch_error.to_string();
-            candidates
-                .iter()
-                .zip(paths)
-                .map(|(candidate, path)| {
-                    classify_subject_single_with_fallback(classifier, candidate, path, &batch_error)
-                })
-                .collect()
+        Err(batch_error) if paths.len() > 1 => {
+            log::warn!(
+                "subject {} batch of {} thumbnails failed; backing off to smaller batches: {}",
+                backend.id(),
+                paths.len(),
+                batch_error
+            );
+            let midpoint = paths.len() / 2;
+            let mut results = classify_subject_batch_adaptively(
+                classifier,
+                &candidates[..midpoint],
+                &paths[..midpoint],
+                backend,
+            );
+            results.extend(classify_subject_batch_adaptively(
+                classifier,
+                &candidates[midpoint..],
+                &paths[midpoint..],
+                backend,
+            ));
+            results
         }
+        Err(batch_error) => candidates
+            .iter()
+            .zip(paths)
+            .map(|(candidate, path)| {
+                classify_subject_single_with_fallback(
+                    classifier,
+                    candidate,
+                    path,
+                    &batch_error.to_string(),
+                    backend,
+                )
+            })
+            .collect(),
     }
 }
 
@@ -343,9 +463,10 @@ fn classify_subject_single_with_fallback(
     candidate: &SemanticAssetCandidate,
     path: &Path,
     batch_error: &str,
+    backend: ExecutionBackend,
 ) -> Result<SubjectAnalysisOutput, String> {
     let retry_paths = [path.to_path_buf()];
-    let last_error = match classifier.classify_batch(&retry_paths, ExecutionBackend::Cpu) {
+    let last_error = match classifier.classify_batch(&retry_paths, backend) {
         Ok(mut outputs) if outputs.len() == 1 => return Ok(outputs.remove(0)),
         Ok(outputs) => format!(
             "subject model returned {} results for one image",
@@ -379,30 +500,94 @@ fn classify_batch_with_fallback(
     classifier: &dyn SemanticClassifier,
     candidates: &[&SemanticAssetCandidate],
     paths: &[PathBuf],
+    backend: ExecutionBackend,
 ) -> Vec<Result<SemanticAnalysisOutput, String>> {
-    match classifier.classify_batch(paths, ExecutionBackend::Cpu) {
+    classify_batch_adaptively(classifier, candidates, paths, backend)
+}
+
+fn classify_batch_adaptively(
+    classifier: &dyn SemanticClassifier,
+    candidates: &[&SemanticAssetCandidate],
+    paths: &[PathBuf],
+    backend: ExecutionBackend,
+) -> Vec<Result<SemanticAnalysisOutput, String>> {
+    debug_assert_eq!(candidates.len(), paths.len());
+    match classifier.classify_batch(paths, backend) {
         Ok(outputs) if outputs.len() == paths.len() => outputs.into_iter().map(Ok).collect(),
         Ok(outputs) => {
-            let error = format!(
+            let batch_error = format!(
                 "semantic model returned {} results for {} images",
                 outputs.len(),
                 paths.len()
             );
-            candidates
-                .iter()
-                .map(|candidate| Err(format!("{}: {}", candidate.absolute_path.display(), error)))
-                .collect()
+            if paths.len() > 1 {
+                log::warn!(
+                    "semantic {} batch returned an invalid result count; backing off from {} images",
+                    backend.id(),
+                    paths.len()
+                );
+                let midpoint = paths.len() / 2;
+                let mut results = classify_batch_adaptively(
+                    classifier,
+                    &candidates[..midpoint],
+                    &paths[..midpoint],
+                    backend,
+                );
+                results.extend(classify_batch_adaptively(
+                    classifier,
+                    &candidates[midpoint..],
+                    &paths[midpoint..],
+                    backend,
+                ));
+                results
+            } else {
+                candidates
+                    .iter()
+                    .map(|candidate| {
+                        Err(format!(
+                            "{}: {}",
+                            candidate.absolute_path.display(),
+                            batch_error
+                        ))
+                    })
+                    .collect()
+            }
         }
-        Err(batch_error) => {
-            let batch_error = batch_error.to_string();
-            candidates
-                .iter()
-                .zip(paths)
-                .map(|(candidate, path)| {
-                    classify_single_with_fallback(classifier, candidate, path, &batch_error)
-                })
-                .collect()
+        Err(batch_error) if paths.len() > 1 => {
+            log::warn!(
+                "semantic {} batch of {} thumbnails failed; backing off to smaller batches: {}",
+                backend.id(),
+                paths.len(),
+                batch_error
+            );
+            let midpoint = paths.len() / 2;
+            let mut results = classify_batch_adaptively(
+                classifier,
+                &candidates[..midpoint],
+                &paths[..midpoint],
+                backend,
+            );
+            results.extend(classify_batch_adaptively(
+                classifier,
+                &candidates[midpoint..],
+                &paths[midpoint..],
+                backend,
+            ));
+            results
         }
+        Err(batch_error) => candidates
+            .iter()
+            .zip(paths)
+            .map(|(candidate, path)| {
+                classify_single_with_fallback(
+                    classifier,
+                    candidate,
+                    path,
+                    &batch_error.to_string(),
+                    backend,
+                )
+            })
+            .collect(),
     }
 }
 
@@ -411,9 +596,10 @@ fn classify_single_with_fallback(
     candidate: &SemanticAssetCandidate,
     path: &Path,
     batch_error: &str,
+    backend: ExecutionBackend,
 ) -> Result<SemanticAnalysisOutput, String> {
     let retry_paths = [path.to_path_buf()];
-    let last_error = match classifier.classify_batch(&retry_paths, ExecutionBackend::Cpu) {
+    let last_error = match classifier.classify_batch(&retry_paths, backend) {
         Ok(mut outputs) if outputs.len() == 1 => return Ok(outputs.remove(0)),
         Ok(outputs) => {
             format!(
@@ -524,6 +710,205 @@ mod tests {
         }
     }
 
+    struct AdaptiveClassifier {
+        calls: Mutex<Vec<Vec<PathBuf>>>,
+        max_batch_size: usize,
+    }
+
+    impl SemanticClassifier for AdaptiveClassifier {
+        fn metadata(&self) -> ModelMetadata {
+            ModelMetadata {
+                name: "adaptive-test-model".into(),
+                version: "test-version".into(),
+                analysis_version: "test-analysis".into(),
+                license: Some("test".into()),
+                installed: true,
+                model_size_bytes: None,
+                model_sha256: None,
+                supported_backends: vec![ExecutionBackend::Cpu],
+            }
+        }
+
+        fn status(&self) -> SemanticRuntimeStatus {
+            SemanticRuntimeStatus {
+                status: "ready".into(),
+                message: "test".into(),
+                model: self.metadata(),
+                topic_model: None,
+                selected_backend: Some(ExecutionBackend::Cpu),
+            }
+        }
+
+        fn classify_batch(
+            &self,
+            images: &[PathBuf],
+            _backend: ExecutionBackend,
+        ) -> Result<Vec<SemanticAnalysisOutput>, SemanticError> {
+            self.calls.lock().push(images.to_vec());
+            if images.len() > self.max_batch_size {
+                return Err(SemanticError::Inference(format!(
+                    "test batch too large: {}",
+                    images.len()
+                )));
+            }
+            Ok(images
+                .iter()
+                .map(|_| SemanticAnalysisOutput {
+                    predictions: Vec::new(),
+                    embedding: Vec::new(),
+                    raw_similarities: Vec::new(),
+                })
+                .collect())
+        }
+    }
+
+    struct AdaptiveSubjectClassifier {
+        calls: Mutex<Vec<Vec<PathBuf>>>,
+        max_batch_size: usize,
+    }
+
+    impl SubjectClassifier for AdaptiveSubjectClassifier {
+        fn metadata(&self) -> ModelMetadata {
+            ModelMetadata {
+                name: "adaptive-subject-test-model".into(),
+                version: "test-version".into(),
+                analysis_version: "test-analysis".into(),
+                license: Some("test".into()),
+                installed: true,
+                model_size_bytes: None,
+                model_sha256: None,
+                supported_backends: vec![ExecutionBackend::Cpu],
+            }
+        }
+
+        fn face_metadata(&self) -> ModelMetadata {
+            self.metadata()
+        }
+
+        fn status(&self) -> SubjectRuntimeStatus {
+            SubjectRuntimeStatus {
+                status: "ready".into(),
+                message: "test".into(),
+                model: self.metadata(),
+                face_model: self.face_metadata(),
+                selected_backend: Some(ExecutionBackend::Cpu),
+            }
+        }
+
+        fn classify_batch(
+            &self,
+            images: &[PathBuf],
+            _backend: ExecutionBackend,
+        ) -> Result<Vec<SubjectAnalysisOutput>, SemanticError> {
+            self.calls.lock().push(images.to_vec());
+            if images.len() > self.max_batch_size {
+                return Err(SemanticError::Inference(format!(
+                    "test subject batch too large: {}",
+                    images.len()
+                )));
+            }
+            Ok(images
+                .iter()
+                .map(|_| SubjectAnalysisOutput {
+                    predictions: Vec::new(),
+                })
+                .collect())
+        }
+    }
+
+    fn adaptive_candidates(count: usize) -> Vec<SemanticAssetCandidate> {
+        (0..count)
+            .map(|index| SemanticAssetCandidate {
+                id: index as i64 + 1,
+                absolute_path: PathBuf::from(format!("source/original-{index}.jpg")),
+                analysis_path: PathBuf::from(format!("cache/asset-{index}-grid-640-v1.jpg")),
+                fingerprint: format!("fingerprint-{index}"),
+                model_name: "test-model".into(),
+                model_version: "test-version".into(),
+                analysis_version: "test-analysis".into(),
+                taxonomy_version: crate::semantic::TAXONOMY_VERSION.into(),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn semantic_batch_failure_splits_on_the_same_thumbnail_backend() {
+        let candidates = adaptive_candidates(4);
+        let candidate_refs = candidates.iter().collect::<Vec<_>>();
+        let paths = candidates
+            .iter()
+            .map(|candidate| candidate.analysis_path.clone())
+            .collect::<Vec<_>>();
+        let classifier = AdaptiveClassifier {
+            calls: Mutex::new(Vec::new()),
+            max_batch_size: 2,
+        };
+
+        let results = classify_batch_with_fallback(
+            &classifier,
+            &candidate_refs,
+            &paths,
+            ExecutionBackend::Cpu,
+        );
+
+        assert_eq!(results.len(), 4);
+        assert!(results.iter().all(Result::is_ok));
+        let calls = classifier.calls.lock();
+        assert_eq!(calls[0].len(), 4);
+        assert!(calls.iter().skip(1).all(|call| call.len() <= 2));
+        assert!(
+            calls
+                .iter()
+                .flatten()
+                .all(|path| path.to_string_lossy().contains("grid-640-v1"))
+        );
+        assert!(
+            calls
+                .iter()
+                .flatten()
+                .all(|path| !path.to_string_lossy().contains("original"))
+        );
+    }
+
+    #[test]
+    fn subject_batch_failure_splits_on_the_same_thumbnail_backend() {
+        let candidates = adaptive_candidates(4);
+        let candidate_refs = candidates.iter().collect::<Vec<_>>();
+        let paths = candidates
+            .iter()
+            .map(|candidate| candidate.analysis_path.clone())
+            .collect::<Vec<_>>();
+        let classifier = AdaptiveSubjectClassifier {
+            calls: Mutex::new(Vec::new()),
+            max_batch_size: 2,
+        };
+
+        let results = classify_subject_batch_with_fallback(
+            &classifier,
+            &candidate_refs,
+            &paths,
+            ExecutionBackend::Cpu,
+        );
+
+        assert_eq!(results.len(), 4);
+        assert!(results.iter().all(Result::is_ok));
+        let calls = classifier.calls.lock();
+        assert_eq!(calls[0].len(), 4);
+        assert!(calls.iter().skip(1).all(|call| call.len() <= 2));
+        assert!(
+            calls
+                .iter()
+                .flatten()
+                .all(|path| path.to_string_lossy().contains("grid-640-v1"))
+        );
+        assert!(
+            calls
+                .iter()
+                .flatten()
+                .all(|path| !path.to_string_lossy().contains("original"))
+        );
+    }
+
     #[test]
     fn failed_batch_retry_never_reopens_original_source() {
         let source = PathBuf::from("source/original.jpg");
@@ -542,8 +927,13 @@ mod tests {
             calls: Mutex::new(Vec::new()),
         };
 
-        let result =
-            classify_single_with_fallback(&classifier, &candidate, &thumbnail, "batch failure");
+        let result = classify_single_with_fallback(
+            &classifier,
+            &candidate,
+            &thumbnail,
+            "batch failure",
+            ExecutionBackend::Cpu,
+        );
 
         assert!(result.is_err());
         assert_eq!(classifier.calls.lock().as_slice(), &[vec![thumbnail]]);
@@ -571,6 +961,7 @@ mod tests {
             &classifier,
             &[&candidate],
             std::slice::from_ref(&thumbnail),
+            ExecutionBackend::Cpu,
         );
 
         assert!(result[0].is_err());
@@ -612,7 +1003,7 @@ mod tests {
         let mut output = SemanticAnalysisOutput {
             predictions: vec![SemanticPrediction {
                 label_id: "photo_landscape".into(),
-                display_name: "风光自然".into(),
+                display_name: "风光".into(),
                 category_group: "scene".into(),
                 similarity: 0.42,
                 threshold: 0.18,
@@ -621,7 +1012,7 @@ mod tests {
             embedding: vec![],
             raw_similarities: vec![SemanticSimilarity {
                 label_id: "photo_landscape".into(),
-                display_name: "风光自然".into(),
+                display_name: "风光".into(),
                 category_group: "topic_candidate".into(),
                 similarity: 0.42,
                 threshold: 0.18,
@@ -660,5 +1051,32 @@ mod tests {
                 .iter()
                 .any(|evidence| evidence.label_id == "photo_portrait")
         );
+    }
+
+    #[test]
+    fn landscape_topic_adds_a_non_primary_scenery_subject_label() {
+        let mut output = SemanticAnalysisOutput {
+            predictions: vec![SemanticPrediction {
+                label_id: "photo_landscape".into(),
+                display_name: "风光".into(),
+                category_group: "scene".into(),
+                similarity: 0.42,
+                threshold: 0.18,
+                is_primary: true,
+            }],
+            embedding: vec![],
+            raw_similarities: vec![],
+        };
+
+        add_derived_subject_evidence(&mut output);
+
+        let scenery = output
+            .predictions
+            .iter()
+            .find(|prediction| prediction.label_id == "scenery")
+            .expect("derived scenery label");
+        assert_eq!(scenery.display_name, "风景");
+        assert_eq!(scenery.category_group, "subject");
+        assert!(!scenery.is_primary);
     }
 }

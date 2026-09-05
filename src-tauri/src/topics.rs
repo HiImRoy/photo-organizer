@@ -13,43 +13,56 @@ pub struct TopicLabelDefinition {
     pub threshold: f32,
 }
 
-pub const TAXONOMY_VERSION: &str = "photo-organizer-photography-topics-v3";
+pub const TAXONOMY_VERSION: &str = "photo-organizer-photography-topics-v4";
 pub const SCORE_MARGIN: f32 = 0.035;
 pub const MAX_RAW_CANDIDATES: usize = 16;
 
 const PORTRAIT_PROMPTS: &[&str] = &["a portrait", "a person", "people"];
 const LANDSCAPE_PROMPTS: &[&str] = &[
-    "a landscape",
+    "a landscape photograph",
     "natural scenery",
-    "mountains, coast, or open land",
+    "a mountain, coast, or open landscape",
 ];
 const STREET_PROMPTS: &[&str] = &[
-    "a street scene",
-    "an urban scene",
-    "a candid moment in a city",
+    "street photography",
+    "a candid street photograph",
+    "an urban public space",
 ];
 const ARCHITECTURE_PROMPTS: &[&str] = &[
     "architecture",
     "a building",
     "an interior or designed space",
 ];
-const STILL_LIFE_PROMPTS: &[&str] = &["a still life", "a product", "arranged objects"];
-const FOOD_PROMPTS: &[&str] = &["food", "a meal or dish", "restaurant food"];
-const WILDLIFE_PROMPTS: &[&str] = &["wildlife", "an animal", "a pet or bird"];
-const MACRO_PROMPTS: &[&str] = &["a plant", "a flower or plant", "botanical photography"];
-const ACTIVITY_PROMPTS: &[&str] = &["a sport", "sports photography", "an action scene"];
-const VEHICLE_PROMPTS: &[&str] = &["a vehicle", "an automobile", "transportation"];
-const DOCUMENT_PROMPTS: &[&str] = &["a document", "a screenshot", "a page with text"];
+const STILL_LIFE_PROMPTS: &[&str] = &[
+    "a close-up still life photograph",
+    "a close-up of an object",
+    "a product detail photograph",
+];
+const WILDLIFE_PROMPTS: &[&str] = &[
+    "wildlife photography",
+    "an animal photograph",
+    "a bird or other animal",
+];
+const MACRO_PROMPTS: &[&str] = &[
+    "a close-up plant photograph",
+    "a flower or plant",
+    "botanical photography",
+];
+const VEHICLE_PROMPTS: &[&str] = &[
+    "a vehicle photograph",
+    "an automobile or motorcycle",
+    "a train, boat, or aircraft",
+];
 const ABSTRACT_PROMPTS: &[&str] = &[
     "an abstract image",
     "shapes, patterns, and textures",
     "experimental art",
 ];
 
-/// Active labels are deliberately limited to visual photographic genres.
-/// Travel, commercial projects, weddings, and similar intent-level labels
-/// should be inferred at session level or confirmed by the user instead of
-/// being forced from one image.
+/// Active labels are deliberately limited to visual photographic genres that
+/// are useful during an individual photographer's cull. They are mutually
+/// exclusive at the primary-category layer; object-level subjects are kept in
+/// the separate subject layer.
 pub const TOPIC_LABELS: &[TopicLabelDefinition] = &[
     TopicLabelDefinition {
         id: "photo_portrait",
@@ -59,13 +72,13 @@ pub const TOPIC_LABELS: &[TopicLabelDefinition] = &[
     },
     TopicLabelDefinition {
         id: "photo_landscape",
-        display_name: "风光自然",
+        display_name: "风光",
         prompts: LANDSCAPE_PROMPTS,
         threshold: 0.18,
     },
     TopicLabelDefinition {
         id: "photo_street",
-        display_name: "街拍纪实",
+        display_name: "街拍",
         prompts: STREET_PROMPTS,
         threshold: 0.19,
     },
@@ -77,14 +90,8 @@ pub const TOPIC_LABELS: &[TopicLabelDefinition] = &[
     },
     TopicLabelDefinition {
         id: "photo_still_life",
-        display_name: "静物产品",
+        display_name: "静物特写",
         prompts: STILL_LIFE_PROMPTS,
-        threshold: 0.21,
-    },
-    TopicLabelDefinition {
-        id: "photo_food",
-        display_name: "美食",
-        prompts: FOOD_PROMPTS,
         threshold: 0.21,
     },
     TopicLabelDefinition {
@@ -100,22 +107,10 @@ pub const TOPIC_LABELS: &[TopicLabelDefinition] = &[
         threshold: 0.22,
     },
     TopicLabelDefinition {
-        id: "photo_activity",
-        display_name: "运动",
-        prompts: ACTIVITY_PROMPTS,
-        threshold: 0.21,
-    },
-    TopicLabelDefinition {
         id: "photo_vehicle",
         display_name: "交通工具",
         prompts: VEHICLE_PROMPTS,
         threshold: 0.22,
-    },
-    TopicLabelDefinition {
-        id: "photo_document",
-        display_name: "文档截图",
-        prompts: DOCUMENT_PROMPTS,
-        threshold: 0.25,
     },
     TopicLabelDefinition {
         id: "photo_abstract",
@@ -213,10 +208,62 @@ mod tests {
                 .display_name,
             "交通工具"
         );
+        assert_eq!(
+            TOPIC_LABELS
+                .iter()
+                .map(|label| label.id)
+                .collect::<Vec<_>>(),
+            vec![
+                "photo_portrait",
+                "photo_landscape",
+                "photo_street",
+                "photo_architecture",
+                "photo_still_life",
+                "photo_wildlife",
+                "photo_macro",
+                "photo_vehicle",
+                "photo_abstract",
+            ]
+        );
+        assert_eq!(
+            TOPIC_LABELS
+                .iter()
+                .find(|label| label.id == "photo_landscape")
+                .unwrap()
+                .display_name,
+            "风光"
+        );
+        assert_eq!(
+            TOPIC_LABELS
+                .iter()
+                .find(|label| label.id == "photo_street")
+                .unwrap()
+                .display_name,
+            "街拍"
+        );
+        assert_eq!(
+            TOPIC_LABELS
+                .iter()
+                .find(|label| label.id == "photo_still_life")
+                .unwrap()
+                .display_name,
+            "静物特写"
+        );
         assert!(
             !TOPIC_LABELS
                 .iter()
                 .any(|label| label.id == "photo_documentary")
+        );
+        assert!(!TOPIC_LABELS.iter().any(|label| label.id == "photo_food"));
+        assert!(
+            !TOPIC_LABELS
+                .iter()
+                .any(|label| label.id == "photo_activity")
+        );
+        assert!(
+            !TOPIC_LABELS
+                .iter()
+                .any(|label| label.id == "photo_document")
         );
     }
 

@@ -60,6 +60,6 @@ JSON 报告包含：
 - 商业产品照、生活静物和摆拍：`photo_still_life`；
 - 广角风景、山地和林地：`photo_landscape` / `photo_macro`；
 - 街头场景与建筑主体：`photo_street` / `photo_architecture`；
-- 文档、截图、抽象纹理等拒识边界：`photo_document` / `photo_abstract`，并保留困难负样本。
+- 抽象纹理和无法可靠归类的拒识边界：`photo_abstract`，并保留困难负样本。
 
 当前仓库没有授权摄影评测集，因此没有质量数字，也不会把 `test-data/` 的纯色手工验证图或仓库图标当作摄影分类样本。已有 PNG 图标 benchmark 仍只用于证明模型加载、推理链路和工程速度。

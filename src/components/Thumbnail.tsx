@@ -1,13 +1,14 @@
 import type { AssetListItem } from "../types";
 import { ImageIcon } from "./Icons";
-import { useThumbnailSource } from "./thumbnailSource";
+import { type GridThumbnailProfile, useThumbnailSource } from "./thumbnailSource";
 
 interface ThumbnailProps {
   asset: AssetListItem;
+  profile?: GridThumbnailProfile;
 }
 
-export function Thumbnail({ asset }: ThumbnailProps) {
-  const { source, failed, loadRef } = useThumbnailSource(asset);
+export function Thumbnail({ asset, profile }: ThumbnailProps) {
+  const { source, failed, loadRef } = useThumbnailSource(asset, profile);
 
   if (!asset.thumbnailAvailable || failed) {
     return (

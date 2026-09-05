@@ -53,7 +53,7 @@
 - 产物隔离：production `dist/` 未包含 `visual-fixture`、验收图库名称或夹具专用文案。
 - 分辨率：1920×1080、1440×900、1366×768、1280×720、960×720 均无页面或工具栏横向溢出；图库网格分别为 8、6、5、5、3 列。
 - 状态：实际检查首次启动空状态、正常图库、扫描进度、错误提示及关闭、排序、图片选中、详情面板、禁用控件和键盘焦点。
-- 截图：`docs/screenshots/ui-library-1440x900.png`、`ui-library-1366x768.png`、`ui-empty-1440x900.png`。
+- 本阶段截图曾用于当时验收；后续界面结构已经重构，旧截图已清理。
 - 安全：未修改 Rust、数据库、Tauri IPC、扫描、缩略图、文件操作或语义逻辑；视觉数据只来自开发 fixture。
 - 桌面环境：`tauri info` 可识别 WebView2，但当前主机未检测到 Rust/Cargo 与 MSVC Build Tools；按本次纯前端范围未执行 Tauri 打包。
 - 已知限制：本轮像素检查运行在本地 Chromium/Vite 预览；未重新执行 Windows 安装包内 WebView2 的视觉 smoke。仓库仍无已跟踪基线，因此最终自审使用文件清单、静态搜索、自动化与截图替代 Git diff。

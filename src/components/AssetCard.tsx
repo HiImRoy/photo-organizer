@@ -1,11 +1,10 @@
-import { useEffect, useRef } from "react";
-
 import { classificationValueLabel } from "../classificationLabels";
 import { formatPercent } from "../format";
 import { MANUAL_COLOR_LABEL_OPTIONS, type AssetListItem, type ManualColorLabel } from "../types";
 import { CheckIcon } from "./Icons";
 import { RatingStars } from "./RatingStars";
 import { Thumbnail } from "./Thumbnail";
+import type { GridThumbnailProfile } from "./thumbnailSource";
 
 type SelectionModifiers = {
   ctrlKey?: boolean;
@@ -15,6 +14,7 @@ type SelectionModifiers = {
 
 interface AssetCardProps {
   asset: AssetListItem;
+  thumbnailProfile: GridThumbnailProfile;
   active: boolean;
   selected: boolean;
   onSelect: (asset: AssetListItem, modifiers?: SelectionModifiers) => void;
@@ -29,6 +29,7 @@ interface AssetCardProps {
 
 export function AssetCard({
   asset,
+  thumbnailProfile,
   active,
   selected,
   onSelect,
@@ -40,14 +41,6 @@ export function AssetCard({
   favorite,
   onToggleFavorite,
 }: AssetCardProps) {
-  const clickTimer = useRef<number | null>(null);
-  useEffect(
-    () => () => {
-      if (clickTimer.current !== null) window.clearTimeout(clickTimer.current);
-    },
-    [],
-  );
-
   const shellClassName = [
     "asset-card-shell",
     active ? "is-active" : "",
@@ -94,32 +87,26 @@ export function AssetCard({
         <button
           type="button"
           className={`asset-card${selected ? " is-selected" : ""}`}
-          onClick={(event) => {
-            const modifiers = {
+          onClick={(event) =>
+            onSelect(asset, {
               ctrlKey: event.ctrlKey,
               metaKey: event.metaKey,
               shiftKey: event.shiftKey,
-            };
-            if (clickTimer.current !== null) window.clearTimeout(clickTimer.current);
-            clickTimer.current = window.setTimeout(() => {
-              onSelect(asset, modifiers);
-              clickTimer.current = null;
-            }, 180);
-          }}
+            })
+          }
           onPointerDown={(event) => onStartDrag?.(asset, event)}
           onDoubleClick={(event) => {
             event.preventDefault();
             event.stopPropagation();
-            if (clickTimer.current !== null) window.clearTimeout(clickTimer.current);
-            clickTimer.current = null;
+            onSelect(asset);
             onOpen?.(asset);
           }}
-          aria-pressed={active}
+          aria-current={active ? "true" : undefined}
           aria-label={`${asset.fileName}${active ? "，当前图片" : ""}`}
           title={asset.fileName}
         >
           <div className="asset-image-wrap">
-            <Thumbnail asset={asset} />
+            <Thumbnail asset={asset} profile={thumbnailProfile} />
             {asset.fileStatus === "missing" ? (
               <span className="asset-alert">源文件缺失</span>
             ) : null}

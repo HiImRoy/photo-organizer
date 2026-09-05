@@ -2,30 +2,37 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { CSSProperties } from "react";
 
 import {
+  addAssetsToCollections,
   cancelLibraryScan,
   cancelSemanticAnalysis,
   assignAssetToLibrary,
   batchUpdateClassification,
   chooseLibraryFolder,
   createCollection,
+  deleteCollection,
   fetchAssets,
   fetchAssetDetail,
   fetchBrowseNodes,
   fetchClassificationRegistry,
   fetchCollections,
   fetchFavoriteAssetIds,
+  fetchGpuCapabilities,
   fetchLibraries,
   fetchSemanticCatalog,
   fetchSemanticGroups,
   fetchSemanticProgress,
   fetchSemanticStatus,
   fetchSubjectStatus,
+  moveAssetsBetweenCollections,
+  moveCollection,
   openLibraryInExplorer,
   pauseSemanticAnalysis,
   prepareSemanticModel,
   prepareSubjectModel,
   reanalyzeAsset,
+  removeAssetsFromCollection,
   removeLibrary,
+  renameCollection,
   rescanLibrary as requestLibraryRescan,
   resumeSemanticAnalysis,
   setLibraryParent,
@@ -52,6 +59,11 @@ import {
 import { AssetCard } from "./components/AssetCard";
 import { AnalysisStatusFilterBar } from "./components/AnalysisStatusFilterBar";
 import { ColorSwatches } from "./components/ColorSwatches";
+import {
+  CollectionActionDialog,
+  type CollectionDialogRequest,
+  type CollectionDialogSubmission,
+} from "./components/CollectionActionDialog";
 import { DetailPanel } from "./components/DetailPanel";
 import { ManualMarkFilterBar } from "./components/ManualMarkFilterBar";
 import { OrganizationWorkspace } from "./components/OrganizationWorkspace";
@@ -64,23 +76,25 @@ import {
   HomeIcon,
   ImportIcon,
   LibraryIcon,
-  PauseIcon,
   PlayIcon,
   SearchIcon,
   SettingsIcon,
   SingleImageIcon,
   SortIcon,
 } from "./components/Icons";
-import { ProgressPanel } from "./components/ProgressPanel";
+import { BackgroundTaskStatus } from "./components/BackgroundTaskStatus";
 import { SettingsDialog } from "./components/SettingsDialog";
 import { Sidebar } from "./components/Sidebar";
 import { Thumbnail } from "./components/Thumbnail";
+import { gridThumbnailProfileForColumns } from "./components/thumbnailSource";
 import { WorkflowWorkspace, type WorkflowTool } from "./components/WorkflowWorkspace";
 import { usePreviewController, type PreviewController } from "./components/usePreviewController";
 import { colorHueMatchThresholdPercent } from "./colorFilter";
 import { formatDate } from "./format";
 import {
   DEFAULT_APP_SETTINGS,
+  effectiveAnalysisBatchSize,
+  preferredAnalysisBackend,
   normalizeAppSettings,
   persistAppSettings,
   readAppSettings,
@@ -92,6 +106,7 @@ import {
   describeAssetScopeV1,
   normalizeAssetQueryV1,
   stableAssetIds,
+  updateAssetQueryBrowseRoot,
   updateAssetQueryFilter,
   updateAssetQueryLibrary,
   updateAssetQueryPage,
@@ -107,6 +122,7 @@ import {
   type BrowseNode,
   type ClassificationFieldDescriptor,
   type CollectionSummary,
+  type GpuCapabilities,
   type LibrarySummary,
   type ManualColorLabel,
   type ScanProgress,
@@ -134,11 +150,9 @@ const WORKFLOW_HEIGHT_MIN = 250;
 const WORKFLOW_HEIGHT_MAX = 640;
 const WORKFLOW_HEIGHT_STEP = 16;
 const TOPIC_MODEL_ID = "siglip2-base";
-const DEFAULT_GRID_COLUMNS = 6;
 const GRID_COLUMNS_MIN = 2;
 const GRID_COLUMNS_MAX = 12;
 const GRID_COLUMNS_STEP = 2;
-const GRID_COLUMN_VALUES = [2, 4, 6, 8, 10, 12] as const;
 
 const GROUP_BY_OPTIONS: Array<{ value: AssetGroupBy; label: string }> = [
   { value: "none", label: "不分组" },
@@ -242,13 +256,14 @@ export default function App() {
   const [selectionAnchorId, setSelectionAnchorId] = useState<number | null>(null);
   const [filterPopoverOpen, setFilterPopoverOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
-  const [viewMode, setViewMode] = useState<ViewMode>("grid");
-  const [themeMode, setThemeMode] = useState<AppThemeMode>(readThemeMode);
   const [appSettings, setAppSettings] = useState<AppSettings>(readAppSettings);
+  const [viewMode, setViewMode] = useState<ViewMode>(appSettings.startupView);
+  const [themeMode, setThemeMode] = useState<AppThemeMode>(readThemeMode);
   const [leftPanelWidth, setLeftPanelWidth] = useState(DEFAULT_LEFT_PANEL_WIDTH);
   const [rightPanelWidth, setRightPanelWidth] = useState(DEFAULT_RIGHT_PANEL_WIDTH);
   const [sidebarLibraryRatio, setSidebarLibraryRatio] = useState<number | null>(null);
-  const [gridColumns, setGridColumns] = useState(DEFAULT_GRID_COLUMNS);
+  const [gridColumns, setGridColumns] = useState(appSettings.defaultGridColumns);
+
   const [workflowPanelHeight, setWorkflowPanelHeight] = useState(WORKFLOW_HEIGHT_DEFAULT);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -256,6 +271,7 @@ export default function App() {
   const [semanticProgress, setSemanticProgress] = useState<SemanticProgress | null>(null);
   const [cancellingScan, setCancellingScan] = useState(false);
   const [semanticStatus, setSemanticStatus] = useState<SemanticRuntimeStatus | null>(null);
+  const [gpuCapabilities, setGpuCapabilities] = useState<GpuCapabilities | null>(null);
   const [subjectStatus, setSubjectStatus] = useState<SubjectRuntimeStatus | null>(null);
   const [refreshKey, setRefreshKey] = useState(0);
   const [workspaceMode, setWorkspaceMode] = useState<"library" | "organization">(
@@ -263,6 +279,9 @@ export default function App() {
   );
   const [workflowTool, setWorkflowTool] = useState<WorkflowTool | null>(null);
   const [collections, setCollections] = useState<CollectionSummary[]>([]);
+  const [collectionDialogRequest, setCollectionDialogRequest] =
+    useState<CollectionDialogRequest | null>(null);
+  const [collectionOperationBusy, setCollectionOperationBusy] = useState(false);
   const [browseNodes, setBrowseNodes] = useState<BrowseNode[]>([]);
   const [favoriteAssetIds, setFavoriteAssetIds] = useState<Set<number>>(new Set());
   const [selectedAssetIds, setSelectedAssetIds] = useState<number[]>([]);
@@ -276,6 +295,8 @@ export default function App() {
   const refreshTimerRef = useRef<number | null>(null);
   const filterPopoverRef = useRef<HTMLDivElement | null>(null);
   const gridResultsRef = useRef<HTMLDivElement | null>(null);
+
+  const aiSearchTriggerRef = useRef<HTMLButtonElement | null>(null);
   const assetsRef = useRef<AssetListItem[]>([]);
   const assetQueryRef = useRef(assetQuery);
   const assetLoadGenerationRef = useRef(0);
@@ -294,7 +315,13 @@ export default function App() {
   const setCurrentLibraryId = useCallback((next: ValueUpdater<number | null>) => {
     setAssetQuery((current) => {
       const libraryId = typeof next === "function" ? next(current.libraryId) : next;
-      if (libraryId === current.libraryId) return current;
+      if (
+        libraryId === current.libraryId &&
+        (libraryId === null ||
+          (!current.filter.favoriteOnly && current.filter.collectionId === null))
+      ) {
+        return current;
+      }
       return updateAssetQueryLibrary(current, libraryId);
     });
   }, []);
@@ -404,6 +431,20 @@ export default function App() {
       active = false;
       unlistenSemantic?.();
       unlistenSubject?.();
+    };
+  }, []);
+
+  useEffect(() => {
+    let active = true;
+    void fetchGpuCapabilities()
+      .then((capabilities) => {
+        if (active) setGpuCapabilities(capabilities);
+      })
+      .catch(() => {
+        // Hardware probing is diagnostic and must not block the main workspace.
+      });
+    return () => {
+      active = false;
     };
   }, []);
 
@@ -609,6 +650,31 @@ export default function App() {
     semanticProgress !== null &&
     ["queued", "running", "paused", "cancelling"].includes(semanticProgress.status);
   const activeFilterCount = countActiveFilters(filter);
+  const activeCollection = filter.favoriteOnly
+    ? (collections.find((collection) => collection.systemKey === "default_favorites") ?? null)
+    : filter.collectionId !== null
+      ? (collections.find((collection) => collection.id === filter.collectionId) ?? null)
+      : null;
+  const activeCollectionHasChildren =
+    activeCollection !== null &&
+    collections.some((collection) => collection.parentCollectionId === activeCollection.id);
+  const collectionSubfilterCount = countActiveFilters({
+    ...filter,
+    favoriteOnly: false,
+    collectionId: null,
+  });
+  const canRemoveFromCurrentCollection =
+    activeCollection !== null && !activeCollectionHasChildren && collectionSubfilterCount === 0;
+  const canMoveFromCurrentCollection =
+    canRemoveFromCurrentCollection && activeCollection?.collectionKind === "manual";
+  const browseRootLabel =
+    activeCollection?.name ??
+    (filter.favoriteOnly
+      ? "默认收藏"
+      : filter.collectionId !== null
+        ? "收藏夹"
+        : (selectedLibrary?.name ?? "未选择图库"));
+  const effectiveGridColumns = gridColumns;
   const currentScope = useMemo<AssetScopeInputV1>(() => {
     const ids = stableAssetIds(selectedAssetIds);
     return ids.length > 0
@@ -623,7 +689,22 @@ export default function App() {
     () => buildFilterConditions(filter, semanticCatalog),
     [filter, semanticCatalog],
   );
-  const libraryName = selectedLibrary?.name || "PhotoOrganizer";
+  const libraryName = browseRootLabel === "未选择图库" ? "PhotoOrganizer" : browseRootLabel;
+  const taskLibraryName = (libraryId: number | null) =>
+    libraryId === null
+      ? null
+      : (libraries.find((library) => library.id === libraryId)?.name ?? null);
+  const scanTaskName =
+    scanProgress === null
+      ? null
+      : (taskLibraryName(scanProgress.libraryId) ?? selectedLibrary?.name ?? "当前图库");
+  const semanticTaskName =
+    semanticProgress === null
+      ? null
+      : (activeCollection?.name ??
+        taskLibraryName(semanticProgress.libraryId) ??
+        selectedLibrary?.name ??
+        "当前图库");
 
   useEffect(() => {
     if (!filterPopoverOpen) return undefined;
@@ -860,8 +941,12 @@ export default function App() {
   }, [scanProgress]);
 
   function updateFilter(next: AssetFilter) {
-    const normalized =
-      next.ratings.length > 1 ? { ...next, ratings: [Math.max(...next.ratings)] } : next;
+    const normalized = {
+      ...next,
+      toneLabels: [],
+      saturationLevels: [],
+      ratings: next.ratings.length > 1 ? [Math.max(...next.ratings)] : next.ratings,
+    };
     setFilterState(normalized);
     setPage(1);
   }
@@ -920,37 +1005,71 @@ export default function App() {
     }
   }
 
+  async function ensureAnalysisModels() {
+    const requestedBackend = preferredAnalysisBackend(
+      gpuCapabilities,
+      appSettings.gpuAccelerationEnabled,
+    );
+    let nextSemanticStatus = semanticStatus;
+    let nextSubjectStatus = subjectStatus;
+    if (
+      nextSemanticStatus?.status !== "ready" ||
+      topicModelIdFromStatus(nextSemanticStatus) !== TOPIC_MODEL_ID ||
+      nextSemanticStatus.selectedBackend !== requestedBackend
+    ) {
+      nextSemanticStatus = await prepareSemanticModel(TOPIC_MODEL_ID, requestedBackend);
+      setSemanticStatus(nextSemanticStatus);
+      if (
+        requestedBackend === "direct_ml" &&
+        nextSemanticStatus &&
+        nextSemanticStatus.selectedBackend !== requestedBackend
+      ) {
+        const fallbackMessage =
+          nextSemanticStatus.message || "DirectML 模型会话未通过，当前分析已回退 CPU。";
+        setGpuCapabilities((current) =>
+          current
+            ? {
+                ...current,
+                directml: {
+                  ...current.directml,
+                  state: "error",
+                  message: fallbackMessage,
+                },
+              }
+            : current,
+        );
+      }
+    }
+    if (
+      nextSubjectStatus &&
+      ((nextSubjectStatus.status !== "ready" && nextSubjectStatus.status !== "partial") ||
+        nextSubjectStatus.selectedBackend !== requestedBackend)
+    ) {
+      try {
+        nextSubjectStatus = await prepareSubjectModel(requestedBackend);
+        setSubjectStatus(nextSubjectStatus);
+      } catch {
+        // Subject analysis is optional; the scene workflow remains usable
+        // when the optional detector cannot be prepared.
+      }
+    }
+    return { nextSemanticStatus, requestedBackend };
+  }
+
   async function prepareOrAnalyze() {
     setError(null);
     try {
-      let nextSemanticStatus = semanticStatus;
-      let nextSubjectStatus = subjectStatus;
-      if (
-        nextSemanticStatus?.status !== "ready" ||
-        topicModelIdFromStatus(nextSemanticStatus) !== TOPIC_MODEL_ID
-      ) {
-        nextSemanticStatus = await prepareSemanticModel(TOPIC_MODEL_ID);
-        setSemanticStatus(nextSemanticStatus);
-      }
-      if (
-        nextSubjectStatus &&
-        nextSubjectStatus.status !== "ready" &&
-        nextSubjectStatus.status !== "partial"
-      ) {
-        try {
-          nextSubjectStatus = await prepareSubjectModel();
-          setSubjectStatus(nextSubjectStatus);
-        } catch {
-          // Subject analysis is optional; the scene workflow remains usable
-          // when the optional detector cannot be prepared.
-        }
-      }
+      const { nextSemanticStatus } = await ensureAnalysisModels();
       if (nextSemanticStatus?.status !== "ready") {
         return;
       }
       if (currentLibraryId === null) return;
       const { jobId } = await startSemanticAnalysis(currentLibraryId, false, {
-        batchSize: appSettings.analysisBatchSize,
+        batchSize: effectiveAnalysisBatchSize(
+          appSettings.analysisBatchSize,
+          gpuCapabilities,
+          nextSemanticStatus.selectedBackend === "direct_ml",
+        ),
       });
       setSemanticProgress(pendingSemanticProgress(jobId, currentLibraryId, nextSemanticStatus));
     } catch (reason) {
@@ -963,11 +1082,18 @@ export default function App() {
     semanticStatus?.status === "ready" && loadedTopicModel === TOPIC_MODEL_ID;
 
   async function analyzeOne(asset: AssetListItem) {
+    setError(null);
     try {
+      const { nextSemanticStatus } = await ensureAnalysisModels();
+      if (nextSemanticStatus?.status !== "ready") return;
       const { jobId } = await reanalyzeAsset(asset.libraryId, asset.id, {
-        batchSize: appSettings.analysisBatchSize,
+        batchSize: effectiveAnalysisBatchSize(
+          appSettings.analysisBatchSize,
+          gpuCapabilities,
+          nextSemanticStatus.selectedBackend === "direct_ml",
+        ),
       });
-      setSemanticProgress(pendingSemanticProgress(jobId, asset.libraryId, semanticStatus));
+      setSemanticProgress(pendingSemanticProgress(jobId, asset.libraryId, nextSemanticStatus));
     } catch (reason) {
       setError(messageFrom(reason));
     }
@@ -1070,6 +1196,13 @@ export default function App() {
         return next;
       });
       setError(messageFrom(reason));
+      return;
+    }
+    try {
+      await refreshCollectionNavigation();
+      if (filter.favoriteOnly) requestDataRefresh(true);
+    } catch (reason) {
+      setError(messageFrom(reason));
     }
   }
 
@@ -1155,15 +1288,18 @@ export default function App() {
   }
 
   function selectLibrary(id: number) {
-    setCurrentLibraryId(id);
+    setAssetQuery((current) =>
+      updateAssetQueryBrowseRoot(
+        { ...current, filter: emptyAssetFilter },
+        { kind: "source", libraryId: id },
+      ),
+    );
     setActiveAssetId(null);
     setDetailAsset(null);
     setSelectionAnchorId(null);
     setSelectedAssetIds([]);
     setWorkspaceMode("library");
     setWorkflowTool(null);
-    setFilterState(emptyAssetFilter);
-    setPage(1);
   }
 
   function selectFavoriteSource() {
@@ -1172,7 +1308,7 @@ export default function App() {
     setDetailAsset(null);
     setSelectionAnchorId(null);
     setSelectedAssetIds([]);
-    updateFilter({ ...filter, favoriteOnly: true, collectionId: null });
+    setAssetQuery((current) => updateAssetQueryBrowseRoot(current, { kind: "favorites" }));
   }
 
   function selectCollectionSource(collectionId: number) {
@@ -1181,7 +1317,9 @@ export default function App() {
     setDetailAsset(null);
     setSelectionAnchorId(null);
     setSelectedAssetIds([]);
-    updateFilter({ ...filter, favoriteOnly: false, collectionId });
+    setAssetQuery((current) =>
+      updateAssetQueryBrowseRoot(current, { kind: "collection", collectionId }),
+    );
   }
 
   async function createSidebarCollection(name: string, parentCollectionId: number | null) {
@@ -1199,27 +1337,115 @@ export default function App() {
     }
   }
 
+  async function refreshCollectionNavigation() {
+    const [nextCollections, nextBrowseNodes, nextFavoriteIds] = await Promise.all([
+      fetchCollections(),
+      fetchBrowseNodes(),
+      currentLibraryId !== null ? fetchFavoriteAssetIds(currentLibraryId) : Promise.resolve([]),
+    ]);
+    setCollections(nextCollections);
+    setBrowseNodes(nextBrowseNodes);
+    setFavoriteAssetIds(new Set(nextFavoriteIds));
+  }
+
+  async function submitCollectionDialog(submission: CollectionDialogSubmission) {
+    setCollectionOperationBusy(true);
+    try {
+      if (submission.kind === "add-assets") {
+        await addAssetsToCollections(submission.collectionIds, submission.assetIds);
+        if (activeCollection && submission.collectionIds.includes(activeCollection.id)) {
+          requestDataRefresh(true);
+        }
+      } else if (submission.kind === "move-assets") {
+        await moveAssetsBetweenCollections(
+          submission.sourceCollectionId,
+          submission.targetCollectionId,
+          submission.assetIds,
+        );
+        setSelectedAssetIds([]);
+        setSelectionAnchorId(null);
+        requestDataRefresh(true);
+      } else if (submission.kind === "rename") {
+        await renameCollection(submission.collectionId, submission.name);
+      } else if (submission.kind === "move-collection") {
+        await moveCollection(submission.collectionId, submission.parentCollectionId);
+      } else {
+        const leavesActiveCollection =
+          filter.collectionId !== null &&
+          (filter.collectionId === submission.collectionId ||
+            (submission.mode === "deleteSubtree" &&
+              isCollectionDescendant(filter.collectionId, submission.collectionId, collections)));
+        await deleteCollection(submission.collectionId, submission.mode);
+        if (leavesActiveCollection) {
+          setAssetQuery((current) =>
+            updateAssetQueryBrowseRoot(
+              current,
+              current.libraryId === null
+                ? { kind: "all" }
+                : { kind: "source", libraryId: current.libraryId },
+            ),
+          );
+        }
+      }
+      await refreshCollectionNavigation();
+      setCollectionDialogRequest(null);
+    } catch (reason) {
+      setError(messageFrom(reason));
+    } finally {
+      setCollectionOperationBusy(false);
+    }
+  }
+
+  async function removeSelectionFromCurrentCollection() {
+    if (!activeCollection || !canRemoveFromCurrentCollection || selectedAssetIds.length === 0) {
+      return;
+    }
+    setCollectionOperationBusy(true);
+    try {
+      await removeAssetsFromCollection(activeCollection.id, selectedAssetIds);
+      setSelectedAssetIds([]);
+      setSelectionAnchorId(null);
+      await refreshCollectionNavigation();
+      requestDataRefresh(true);
+    } catch (reason) {
+      setError(messageFrom(reason));
+    } finally {
+      setCollectionOperationBusy(false);
+    }
+  }
+
   function openWorkflowTool(tool: WorkflowTool) {
     setWorkspaceMode("library");
-    setWorkflowTool(tool);
+    setWorkflowTool((current) => (current === tool ? null : tool));
   }
+
+  const closeWorkflowTool = useCallback((restoreSearchFocus = false) => {
+    setWorkflowTool(null);
+    if (restoreSearchFocus) {
+      window.requestAnimationFrame(() => aiSearchTriggerRef.current?.focus());
+    }
+  }, []);
 
   const focusAsset = useCallback((asset: AssetListItem) => {
     setActiveAssetId(asset.id);
     setDetailAsset(asset);
   }, []);
 
-  function changeView(next: ViewMode) {
-    setViewMode(next);
-    if (next === "single") {
-      const nextAsset = activeAsset ?? assets[0] ?? null;
-      if (nextAsset) focusAsset(nextAsset);
-      else {
-        setActiveAssetId(null);
-        setDetailAsset(null);
+  const changeView = useCallback(
+    (next: ViewMode) => {
+      if (next === "single" && workflowTool !== null) closeWorkflowTool(false);
+      setViewMode(next);
+      if (next === "single") {
+        const nextAsset = activeAsset ?? assets[0] ?? null;
+        if (nextAsset) focusAsset(nextAsset);
+        else {
+          setActiveAssetId(null);
+          setDetailAsset(null);
+        }
       }
-    }
-  }
+    },
+    [activeAsset, assets, closeWorkflowTool, focusAsset, workflowTool],
+  );
 
   function selectAsset(asset: AssetListItem, modifiers: SelectionModifiers = {}) {
     focusAsset(asset);
@@ -1331,6 +1557,23 @@ export default function App() {
 
   function toggleAssetSelection(asset: AssetListItem, modifiers: SelectionModifiers = {}) {
     toggleAssetSelectionById(asset.id, modifiers);
+  }
+
+  function toggleAssetSelectionOnly(asset: AssetListItem, modifiers: SelectionModifiers = {}) {
+    if (modifiers.shiftKey) {
+      const range = selectionRange(asset.id);
+      if (range) {
+        setSelectedAssetIds(range);
+        return;
+      }
+      setSelectedAssetIds([asset.id]);
+      setSelectionAnchorId(asset.id);
+      return;
+    }
+    setSelectionAnchorId(asset.id);
+    setSelectedAssetIds((current) =>
+      current.includes(asset.id) ? current.filter((id) => id !== asset.id) : [...current, asset.id],
+    );
   }
 
   function clearSelection() {
@@ -1503,17 +1746,18 @@ export default function App() {
         if (viewShortcut && !event.ctrlKey && !event.metaKey && !event.altKey && !settingsOpen) {
           event.preventDefault();
           if (viewShortcut[0] === "grid") {
-            setViewMode("grid");
+            changeView("grid");
           } else {
-            setViewMode("single");
-            const nextAsset = activeAsset ?? assets[0] ?? null;
-            setActiveAssetId(nextAsset?.id ?? null);
+            changeView("single");
           }
           return;
         }
       }
       if (event.key === "Escape") {
-        if (viewMode === "single") setViewMode("grid");
+        if (workflowTool !== null) {
+          event.preventDefault();
+          closeWorkflowTool(true);
+        } else if (viewMode === "single") setViewMode("grid");
         else clearSelection();
       } else if (event.key === "ArrowLeft" && viewMode === "single") {
         event.preventDefault();
@@ -1532,6 +1776,8 @@ export default function App() {
     activeAsset,
     appSettings,
     assets,
+    changeView,
+    closeWorkflowTool,
     editAssetColorLabel,
     editAssetRating,
     navigatePreview,
@@ -1540,6 +1786,7 @@ export default function App() {
     settingsOpen,
     toggleAssetColorLabelForSelection,
     viewMode,
+    workflowTool,
   ]);
 
   const showBatchEditor = batchEditorOpen && selectedAssetIds.length > 0;
@@ -1571,7 +1818,7 @@ export default function App() {
             <LibraryIcon width="17" height="17" />
           </span>
           <div>
-            <strong title={selectedLibrary?.sourcePath}>{libraryName}</strong>
+            <strong title={selectedLibrary?.sourcePath ?? browseRootLabel}>{libraryName}</strong>
             <small>PhotoOrganizer</small>
           </div>
         </div>
@@ -1584,8 +1831,24 @@ export default function App() {
               ? "正在扫描"
               : selectedLibrary
                 ? `最近扫描 ${formatDate(selectedLibrary.lastScanAt)}`
-                : "尚未建立图库"}
+                : activeCollection
+                  ? "当前收藏夹"
+                  : "尚未建立图库"}
           </span>
+          <BackgroundTaskStatus
+            key={scanProgress?.taskId ?? semanticProgress?.jobId ?? "background-tasks"}
+            scanProgress={scanProgress}
+            semanticProgress={semanticProgress}
+            scanRunning={scanRunning}
+            semanticRunning={semanticRunning}
+            scanTaskName={scanTaskName}
+            semanticTaskName={semanticTaskName}
+            cancellingScan={cancellingScan}
+            onCancelScan={() => void cancelScan()}
+            onDismissScan={() => setScanProgress(null)}
+            onPauseResumeSemantic={() => void pauseOrResumeSemantic()}
+            onCancelSemantic={() => void cancelSemantic()}
+          />
         </div>
         <div className="topbar-actions">
           {selectedAssetIds.length > 0 ? (
@@ -1603,10 +1866,40 @@ export default function App() {
               <button
                 className="tool-button"
                 type="button"
-                onClick={() => openWorkflowTool("collections")}
+                onClick={() =>
+                  setCollectionDialogRequest({
+                    kind: "add-assets",
+                    assetIds: [...selectedAssetIds],
+                  })
+                }
               >
-                加入集合
+                加入收藏
               </button>
+              {canMoveFromCurrentCollection && activeCollection ? (
+                <button
+                  className="tool-button"
+                  type="button"
+                  onClick={() =>
+                    setCollectionDialogRequest({
+                      kind: "move-assets",
+                      sourceCollectionId: activeCollection.id,
+                      assetIds: [...selectedAssetIds],
+                    })
+                  }
+                >
+                  移动到收藏夹
+                </button>
+              ) : null}
+              {canRemoveFromCurrentCollection ? (
+                <button
+                  className="tool-button"
+                  type="button"
+                  disabled={collectionOperationBusy}
+                  onClick={() => void removeSelectionFromCurrentCollection()}
+                >
+                  移出收藏
+                </button>
+              ) : null}
               <button
                 className="tool-button"
                 type="button"
@@ -1851,6 +2144,7 @@ export default function App() {
               collections={collections}
               favoriteSourceActive={filter.favoriteOnly}
               activeCollectionId={filter.collectionId}
+              browseRootActive={browseRootActive}
               libraryPanelRatio={sidebarLibraryRatio}
               onLibraryPanelRatioChange={setSidebarLibraryRatio}
               assetDropTargetLibraryId={assetDropTargetLibraryId}
@@ -1877,6 +2171,15 @@ export default function App() {
               onFilterChange={updateFilter}
               onSelectFavorites={selectFavoriteSource}
               onSelectCollection={selectCollectionSource}
+              onRenameCollection={(collection) =>
+                setCollectionDialogRequest({ kind: "rename", collection })
+              }
+              onMoveCollection={(collection) =>
+                setCollectionDialogRequest({ kind: "move-collection", collection })
+              }
+              onDeleteCollection={(collection, hasChildren) =>
+                setCollectionDialogRequest({ kind: "delete", collection, hasChildren })
+              }
             />
 
             <PanelResizeHandle
@@ -1888,22 +2191,6 @@ export default function App() {
             />
 
             <div className="center-column">
-              {scanProgress ? (
-                <ProgressPanel
-                  progress={scanProgress}
-                  cancelling={cancellingScan}
-                  onCancel={() => void cancelScan()}
-                  onDismiss={() => setScanProgress(null)}
-                />
-              ) : null}
-              {semanticProgress && semanticRunning ? (
-                <SemanticTaskBar
-                  progress={semanticProgress}
-                  onPauseResume={() => void pauseOrResumeSemantic()}
-                  onCancel={() => void cancelSemantic()}
-                />
-              ) : null}
-
               <main
                 className={`center-workspace${viewMode === "single" ? " is-single-preview" : ""}`}
                 onClick={(event) => {
@@ -1918,13 +2205,15 @@ export default function App() {
                     </button>
                   </div>
                 ) : null}
-                {selectedLibrary ? (
+                {browseRootActive ? (
                   <>
                     <div className="content-toolbar">
                       <div className="content-toolbar-summary">
                         <strong>{assetTotal.toLocaleString()} 张</strong>
                         <span>
-                          {activeFilterCount ? `已应用 ${activeFilterCount} 项筛选` : "全部图片"}
+                          {activeFilterCount
+                            ? browseRootLabel + " · " + activeFilterCount + " 项筛选"
+                            : browseRootLabel}
                         </span>
                         {selectedAssetIds.length > 0 ? (
                           <em className="selection-count">已选择 {selectedAssetIds.length} 张</em>
@@ -1933,11 +2222,9 @@ export default function App() {
                       <div className="content-toolbar-manual">
                         <ManualMarkFilterBar filter={filter} onFilterChange={updateFilter} />
                       </div>
-                      {viewMode === "grid" ? (
-                        <GridZoomControl value={gridColumns} onChange={setGridColumns} />
-                      ) : null}
                       <div className="content-toolbar-controls">
                         <button
+                          ref={aiSearchTriggerRef}
                           type="button"
                           className={
                             workflowTool === "search"
@@ -1968,7 +2255,7 @@ export default function App() {
                         </label>
                         <AnalysisStatusFilterBar
                           filter={filter}
-                          visible={selectedLibrary.semanticPendingCount > 0}
+                          visible={(selectedLibrary?.semanticPendingCount ?? 0) > 0}
                           onFilterChange={updateFilter}
                         />
                         {viewMode === "single" && activeAsset ? (
@@ -2004,6 +2291,7 @@ export default function App() {
                         controller={previewController}
                         selectedAssetIds={selectedAssetIds}
                         onSelect={selectPreview}
+                        onToggleSelection={toggleAssetSelectionOnly}
                       />
                     ) : (
                       <div className="grid-workspace-shell">
@@ -2014,7 +2302,7 @@ export default function App() {
                           onWheel={handleGridZoomWheel}
                           style={
                             {
-                              "--grid-column-count": gridColumns,
+                              "--grid-column-count": effectiveGridColumns,
                             } as CSSProperties
                           }
                         >
@@ -2022,6 +2310,7 @@ export default function App() {
                             <GridWorkspace
                               key={groupBy}
                               assets={assets}
+                              gridColumns={effectiveGridColumns}
                               active={activeAsset}
                               selectedAssetIds={selectedAssetIds}
                               groupBy={groupBy}
@@ -2064,9 +2353,8 @@ export default function App() {
                   <section className="welcome-state" aria-labelledby="welcome-state-title">
                     <div className="welcome-state-rule" aria-hidden="true" />
                     <div className="welcome-state-copy">
-                      <small>本地图库 · 只读索引</small>
-                      <h1 id="welcome-state-title">从一个文件夹开始</h1>
-                      <p>选择照片文件夹，建立缩略图索引后即可浏览、筛选和整理。</p>
+                      <LibraryIcon className="welcome-state-icon" width="20" height="20" />
+                      <h1 id="welcome-state-title">建立本地图片库</h1>
                       <div className="welcome-state-actions">
                         <button
                           className="primary-action"
@@ -2078,16 +2366,7 @@ export default function App() {
                         </button>
                         <span>JPEG · PNG · WebP</span>
                       </div>
-                    </div>
-                    <div className="welcome-state-notes" aria-label="图库特性">
-                      <div>
-                        <LibraryIcon width="17" height="17" />
-                        <span>本地处理</span>
-                      </div>
-                      <div>
-                        <span className="welcome-state-note-mark">◌</span>
-                        <span>不修改原图</span>
-                      </div>
+                      <small className="welcome-state-local-note">本地处理 · 不修改原图</small>
                     </div>
                   </section>
                 ) : null}
@@ -2132,7 +2411,7 @@ export default function App() {
                         editAssetColorLabelForSelection(assetId, colorLabel)
                       }
                       onOpenAsset={openWorkflowAsset}
-                      onBack={() => setWorkflowTool(null)}
+                      onBack={() => closeWorkflowTool(true)}
                       onFavoriteChange={(assetId, favorite) => {
                         setFavoriteAssetIds((current) => {
                           const next = new Set(current);
@@ -2189,6 +2468,17 @@ export default function App() {
           </>
         )}
       </div>
+      {collectionDialogRequest ? (
+        <CollectionActionDialog
+          request={collectionDialogRequest}
+          collections={collections}
+          busy={collectionOperationBusy}
+          onClose={() => {
+            if (!collectionOperationBusy) setCollectionDialogRequest(null);
+          }}
+          onSubmit={(submission) => void submitCollectionDialog(submission)}
+        />
+      ) : null}
       {pendingImportPath ? (
         <ImportLibraryDialog
           path={pendingImportPath}
@@ -2208,46 +2498,18 @@ export default function App() {
       {settingsOpen ? (
         <SettingsDialog
           settings={appSettings}
+          gpuCapabilities={gpuCapabilities}
           themeMode={themeMode}
           onChange={setAppSettings}
           onThemeChange={setThemeMode}
-          onReset={() => setAppSettings(normalizeAppSettings(DEFAULT_APP_SETTINGS))}
+          onReset={() => {
+            setAppSettings(normalizeAppSettings(DEFAULT_APP_SETTINGS));
+            setThemeMode("dark");
+          }}
           onClose={() => setSettingsOpen(false)}
         />
       ) : null}
     </div>
-  );
-}
-
-function GridZoomControl({
-  value,
-  onChange,
-}: {
-  value: number;
-  onChange: (value: number) => void;
-}) {
-  return (
-    <label className="grid-zoom-control">
-      <span>每行</span>
-      <input
-        className="grid-zoom-slider"
-        type="range"
-        min={GRID_COLUMNS_MIN}
-        max={GRID_COLUMNS_MAX}
-        step={GRID_COLUMNS_STEP}
-        list="grid-column-counts"
-        value={value}
-        aria-label="每行图片数"
-        aria-valuetext={`${value} 张/行`}
-        onChange={(event) => onChange(Number(event.target.value))}
-      />
-      <datalist id="grid-column-counts">
-        {GRID_COLUMN_VALUES.map((count) => (
-          <option value={count} label={`${count}`} key={count} />
-        ))}
-      </datalist>
-      <output>{value} 张</output>
-    </label>
   );
 }
 
@@ -2535,6 +2797,7 @@ function PanelResizeHandle({
 
 function GridWorkspace({
   assets,
+  gridColumns,
   active,
   selectedAssetIds,
   groupBy,
@@ -2550,6 +2813,7 @@ function GridWorkspace({
   onToggleFavorite,
 }: {
   assets: AssetListItem[];
+  gridColumns: number;
   active: AssetListItem | null;
   selectedAssetIds: number[];
   groupBy: AssetGroupBy;
@@ -2565,6 +2829,7 @@ function GridWorkspace({
   onToggleFavorite: (assetId: number) => void;
 }) {
   const [collapsedGroups, setCollapsedGroups] = useState<Set<string>>(new Set());
+  const thumbnailProfile = gridThumbnailProfileForColumns(gridColumns);
 
   if (groupBy === "none")
     return (
@@ -2579,6 +2844,7 @@ function GridWorkspace({
           <AssetCard
             key={asset.id}
             asset={asset}
+            thumbnailProfile={thumbnailProfile}
             active={active?.id === asset.id}
             selected={selectedAssetIds.includes(asset.id)}
             onStartDrag={onStartAssetDrag}
@@ -2644,6 +2910,7 @@ function GridWorkspace({
                   <AssetCard
                     key={asset.id}
                     asset={asset}
+                    thumbnailProfile={thumbnailProfile}
                     active={active?.id === asset.id}
                     selected={selectedAssetIds.includes(asset.id)}
                     onStartDrag={onStartAssetDrag}
@@ -2708,12 +2975,14 @@ function SinglePreview({
   controller,
   selectedAssetIds,
   onSelect,
+  onToggleSelection,
 }: {
   assets: AssetListItem[];
   selected: AssetListItem | null;
   controller: PreviewController;
   selectedAssetIds: number[];
   onSelect: (asset: AssetListItem) => void;
+  onToggleSelection: (asset: AssetListItem, modifiers?: SelectionModifiers) => void;
 }) {
   const filmstripRef = useRef<HTMLDivElement | null>(null);
   const activeAssetId = selected?.id ?? null;
@@ -2757,7 +3026,17 @@ function SinglePreview({
             ]
               .filter(Boolean)
               .join(" ")}
-            onClick={() => onSelect(asset)}
+            onClick={(event) => {
+              if (event.ctrlKey || event.metaKey || event.shiftKey) {
+                onToggleSelection(asset, {
+                  ctrlKey: event.ctrlKey,
+                  metaKey: event.metaKey,
+                  shiftKey: event.shiftKey,
+                });
+              } else {
+                onSelect(asset);
+              }
+            }}
             aria-label={asset.fileName}
             aria-current={selected?.id === asset.id ? "true" : undefined}
             aria-pressed={selectedAssetIds.includes(asset.id)}
@@ -2870,49 +3149,6 @@ function ZoomablePreview({
   );
 }
 
-function SemanticTaskBar({
-  progress,
-  onPauseResume,
-  onCancel,
-}: {
-  progress: SemanticProgress;
-  onPauseResume: () => void;
-  onCancel: () => void;
-}) {
-  const percent = progress.total > 0 ? Math.round((progress.processed / progress.total) * 100) : 0;
-  return (
-    <section className="semantic-taskbar">
-      <div>
-        <PlayIcon width="15" height="15" />
-        <span>
-          <strong>
-            {progress.status === "paused" ? "语义分析已暂停" : "正在进行真实语义分析"}
-          </strong>
-          <small>
-            {progress.processed} / {progress.total} · 本地计算 · 失败 {progress.failed}
-          </small>
-        </span>
-      </div>
-      <div className="task-progress">
-        <i style={{ width: `${percent}%` }} />
-      </div>
-      <div>
-        <button type="button" onClick={onPauseResume}>
-          {progress.status === "paused" ? (
-            <PlayIcon width="13" height="13" />
-          ) : (
-            <PauseIcon width="13" height="13" />
-          )}
-          {progress.status === "paused" ? "继续" : "暂停"}
-        </button>
-        <button type="button" onClick={onCancel}>
-          取消
-        </button>
-      </div>
-    </section>
-  );
-}
-
 function GridLoading() {
   return (
     <div className="grid-loading" aria-label="正在加载图库">
@@ -2992,23 +3228,6 @@ function buildFilterConditions(
 ): FilterCondition[] {
   const conditions: FilterCondition[] = [];
 
-  if (filter.favoriteOnly) {
-    conditions.push({
-      id: "favorite-source",
-      label: "来源",
-      value: "收藏",
-      remove: (current) => ({ ...current, favoriteOnly: false }),
-    });
-  }
-  if (filter.collectionId !== null) {
-    conditions.push({
-      id: "collection-source",
-      label: "集合",
-      value: `集合 #${filter.collectionId}`,
-      remove: (current) => ({ ...current, collectionId: null }),
-    });
-  }
-
   if (filter.search) {
     conditions.push({
       id: "search",
@@ -3027,16 +3246,7 @@ function buildFilterConditions(
     catalog,
   );
   appendStringFilterConditions(conditions, filter, "auxiliaryTags", "辅助标签", "tag", catalog);
-  appendStringFilterConditions(conditions, filter, "toneLabels", "影调", "tone", catalog);
   appendStringFilterConditions(conditions, filter, "colorCategories", "主色", "color", catalog);
-  appendStringFilterConditions(
-    conditions,
-    filter,
-    "saturationLevels",
-    "饱和度级别",
-    "saturation",
-    catalog,
-  );
 
   const ratingThreshold = filter.ratings.length > 0 ? Math.max(...filter.ratings) : null;
   if (ratingThreshold !== null) {
@@ -3166,16 +3376,25 @@ function formatHue(value: number) {
   return String(Math.round(normalizeHue(value)));
 }
 
+function isCollectionDescendant(
+  candidateId: number,
+  ancestorId: number,
+  collections: CollectionSummary[],
+) {
+  const byId = new Map(collections.map((collection) => [collection.id, collection]));
+  let current = byId.get(candidateId)?.parentCollectionId ?? null;
+  while (current !== null) {
+    if (current === ancestorId) return true;
+    current = byId.get(current)?.parentCollectionId ?? null;
+  }
+  return false;
+}
 function countActiveFilters(filter: AssetFilter) {
   return (
-    Number(filter.favoriteOnly) +
-    Number(filter.collectionId !== null) +
     Number(Boolean(filter.search)) +
     filter.primaryCategories.length +
     filter.auxiliaryTags.length +
-    filter.toneLabels.length +
     filter.colorCategories.length +
-    filter.saturationLevels.length +
     filter.ratings.length +
     filter.colorLabels.length +
     Number(filter.colorHueCenter !== null && filter.colorHueWidth !== null) +

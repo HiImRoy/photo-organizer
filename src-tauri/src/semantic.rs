@@ -6,7 +6,7 @@ use std::time::Instant;
 
 use image::imageops::FilterType;
 use ort::session::Session;
-use ort::session::builder::GraphOptimizationLevel;
+use ort::session::builder::{GraphOptimizationLevel, SessionBuilder};
 use ort::value::Tensor;
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
@@ -56,7 +56,9 @@ pub const MOBILECLIP_TEXT_SHA256: &str =
     "fc8d87978623385c17a46331ffb9cb5ab7fe8b61c513c094602b85f08edd0a0b";
 pub const MOBILECLIP_TOKENIZER_SHA256: &str =
     "72ed5c96db5729294468543e4bc75fce14ca63f58e37300290189ba1c1e52b85";
-pub const RUNTIME_SHA256: &str = "8a1aad8d59d02a5337d4e3f5bbd1158c3f7bf84fe3b3f0052f957dd3e75a91cb";
+pub const RUNTIME_SHA256: &str = "03bd80df147fcbbec55fea8bc6f7bdd02b84878992adb04f6ddca03cd5342fad";
+pub const RUNTIME_SHARED_SHA256: &str =
+    "534b5ebdd6d78aae96b33cfc9b44444e4b424645417f0b58faebae2c004d5982";
 pub const EMBEDDING_DIMENSIONS: usize = 512;
 
 const IMAGE_SIZE: usize = 224;
@@ -142,6 +144,96 @@ pub enum ExecutionBackend {
     Npu,
 }
 
+impl ExecutionBackend {
+    pub fn parse(value: Option<&str>) -> Self {
+        match value
+            .unwrap_or_default()
+            .trim()
+            .to_ascii_lowercase()
+            .as_str()
+        {
+            "direct_ml" | "directml" | "dml" => Self::DirectMl,
+            "cpu" => Self::Cpu,
+            _ => Self::Cpu,
+        }
+    }
+
+    pub const fn id(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::Cpu => "cpu",
+            Self::DirectMl => "direct_ml",
+            Self::Cuda => "cuda",
+            Self::CoreMl => "core_ml",
+            Self::Npu => "npu",
+        }
+    }
+
+    pub const fn is_gpu(self) -> bool {
+        matches!(self, Self::DirectMl)
+    }
+}
+
+fn model_backends() -> Vec<ExecutionBackend> {
+    vec![ExecutionBackend::Cpu, ExecutionBackend::DirectMl]
+}
+
+pub(crate) fn backend_matches(selected: ExecutionBackend, requested: ExecutionBackend) -> bool {
+    matches!(requested, ExecutionBackend::Auto) || selected == requested
+}
+
+pub(crate) fn build_session_builder(
+    model_name: &str,
+    backend: ExecutionBackend,
+) -> Result<SessionBuilder, SemanticError> {
+    let builder = Session::builder().map_err(|error| {
+        SemanticError::Inference(format!(
+            "could not create {model_name} ONNX session: {error}"
+        ))
+    })?;
+    let builder = builder
+        .with_optimization_level(GraphOptimizationLevel::Level3)
+        .map_err(|error| {
+            SemanticError::Inference(format!(
+                "could not optimize {model_name} ONNX graph: {error}"
+            ))
+        })?;
+
+    match backend {
+        ExecutionBackend::Auto | ExecutionBackend::Cpu => builder
+            .with_intra_threads(cpu_thread_count())
+            .map_err(|error| {
+                SemanticError::Inference(format!(
+                    "could not configure {model_name} CPU threads: {error}"
+                ))
+            }),
+        ExecutionBackend::DirectMl => {
+            #[cfg(not(windows))]
+            {
+                let _ = builder;
+                Err(SemanticError::BackendUnavailable(backend))
+            }
+            #[cfg(windows)]
+            {
+                builder
+                    .with_execution_providers([ort::ep::DirectML::default()
+                        .with_device_filter(ort::ep::directml::DeviceFilter::Gpu)
+                        .with_performance_preference(
+                            ort::ep::directml::PerformancePreference::HighPerformance,
+                        )
+                        .build()
+                        .error_on_failure()])
+                    .map_err(|error| {
+                        SemanticError::Inference(format!(
+                            "could not register DirectML for {model_name}: {error}"
+                        ))
+                    })
+            }
+        }
+        unsupported => Err(SemanticError::BackendUnavailable(unsupported)),
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct ModelMetadata {
@@ -164,7 +256,7 @@ pub fn default_topic_model_metadata() -> ModelMetadata {
         installed: true,
         model_size_bytes: None,
         model_sha256: Some(SIGLIP2_MODEL_SHA256.into()),
-        supported_backends: vec![ExecutionBackend::Cpu],
+        supported_backends: model_backends(),
     }
 }
 
@@ -221,6 +313,10 @@ pub struct SemanticLabelDescriptor {
 
 const CONTEXT_LABELS: [(&str, &str, f32); 2] =
     [("indoor", "室内", 0.55), ("outdoor", "室外", 0.55)];
+// 风景是一个由高置信“风光”题材证据派生出的主体层标签。它不由
+// PicoDet/YuNet 检测物体，而是作为语义层的可筛选结果保存，避免把
+// 场景模型伪装成目标检测模型。
+const DERIVED_SUBJECT_LABELS: [(&str, &str, f32); 1] = [("scenery", "风景", 0.18)];
 
 #[derive(Debug, thiserror::Error)]
 pub enum SemanticError {
@@ -277,6 +373,18 @@ pub fn semantic_catalog() -> Vec<SemanticLabelDescriptor> {
             taxonomy_version: TAXONOMY_VERSION.into(),
         }
     }));
+    catalog.extend(
+        DERIVED_SUBJECT_LABELS
+            .iter()
+            .map(|(id, display_name, threshold)| SemanticLabelDescriptor {
+                id: (*id).into(),
+                display_name: (*display_name).into(),
+                category_group: "subject".into(),
+                threshold: *threshold,
+                is_primary_category: false,
+                taxonomy_version: TAXONOMY_VERSION.into(),
+            }),
+    );
     catalog.extend(crate::subject::subject_catalog());
     catalog
 }
@@ -287,12 +395,12 @@ pub fn semantic_catalog() -> Vec<SemanticLabelDescriptor> {
 /// taxonomy refresh.
 pub fn canonical_label_id(label_id: &str) -> &str {
     match label_id {
-        "unknown" | "photo_documentary" => "photo_abstract",
+        "unknown" | "photo_documentary" | "photo_event" | "photo_document" => "photo_abstract",
+        "photo_food" | "photo_commercial" => "photo_still_life",
         "person" | "portrait" => "single_person",
         "group" => "multiple_people",
         "pet" => "animal",
         "photo_urban" => "photo_street",
-        "photo_event" => "photo_activity",
         "photo_transport" => "photo_vehicle",
         "photo_plant" => "photo_macro",
         _ => label_id,
@@ -307,11 +415,12 @@ pub fn known_display_name_for_label_id(label_id: &str) -> Option<&'static str> {
     let legacy_name = match label_id {
         "single_person" => Some("单人"),
         "multiple_people" => Some("多人"),
+        "scenery" => Some("风景"),
         "landscape" => Some("风景"),
         "architecture" => Some("建筑"),
         "product" => Some("产品"),
         "still_life" => Some("静物"),
-        "food" => Some("食品"),
+        "food" => Some("食物"),
         "animal" => Some("动物"),
         "screenshot" => Some("截图"),
         "document" => Some("文档"),
@@ -348,9 +457,8 @@ pub fn category_group_for_label_id(label_id: &str) -> Option<&'static str> {
         return category_group_for_label_id(canonical_id);
     }
     let legacy_group = match label_id {
-        "single_person" | "multiple_people" | "animal" | "vehicle" | "food" | "plant" => {
-            Some("subject")
-        }
+        "single_person" | "multiple_people" | "animal" | "vehicle" | "food" | "plant"
+        | "scenery" => Some("subject"),
         "landscape" | "architecture" | "product" | "still_life" | "screenshot" | "document"
         | "abstract" => Some("scene"),
         "flower" | "mountain" | "water" | "forest" => Some("subject"),
@@ -395,7 +503,7 @@ impl SemanticClassifier for UnavailableClassifier {
             installed: false,
             model_size_bytes: None,
             model_sha256: Some(MODEL_SHA256.into()),
-            supported_backends: vec![ExecutionBackend::Cpu],
+            supported_backends: model_backends(),
         }
     }
 
@@ -429,6 +537,7 @@ pub struct Places365Classifier {
     outdoor_by_leaf: Vec<bool>,
     model_size_bytes: u64,
     topic_classifier: Option<Box<dyn SemanticClassifier>>,
+    backend: ExecutionBackend,
 }
 
 impl std::fmt::Debug for Places365Classifier {
@@ -449,11 +558,12 @@ impl Places365Classifier {
         embedding_model_dir: &Path,
         runtime_path: &Path,
     ) -> Result<Self, SemanticError> {
-        Self::load_with_topic_model(
+        Self::load_with_topic_model_with_backend(
             model_dir,
             embedding_model_dir,
             runtime_path,
             DEFAULT_TOPIC_MODEL,
+            ExecutionBackend::Cpu,
         )
     }
 
@@ -462,6 +572,22 @@ impl Places365Classifier {
         topic_model_dir: &Path,
         runtime_path: &Path,
         topic_model: TopicModelKind,
+    ) -> Result<Self, SemanticError> {
+        Self::load_with_topic_model_with_backend(
+            model_dir,
+            topic_model_dir,
+            runtime_path,
+            topic_model,
+            ExecutionBackend::Cpu,
+        )
+    }
+
+    pub fn load_with_topic_model_with_backend(
+        model_dir: &Path,
+        topic_model_dir: &Path,
+        runtime_path: &Path,
+        topic_model: TopicModelKind,
+        backend: ExecutionBackend,
     ) -> Result<Self, SemanticError> {
         let model_path = model_dir.join(MODEL_FILE);
         let categories_path = model_dir.join(TOKENIZER_FILE);
@@ -472,19 +598,7 @@ impl Places365Classifier {
         verify_sha256(runtime_path, RUNTIME_SHA256)?;
         initialize_ort(runtime_path)?;
 
-        let builder = Session::builder().map_err(|error| {
-            SemanticError::Inference(format!("could not create ONNX session: {error}"))
-        })?;
-        let builder = builder
-            .with_optimization_level(GraphOptimizationLevel::Level3)
-            .map_err(|error| {
-                SemanticError::Inference(format!("could not optimize ONNX graph: {error}"))
-            })?;
-        let mut builder = builder
-            .with_intra_threads(cpu_thread_count())
-            .map_err(|error| {
-                SemanticError::Inference(format!("could not configure ONNX threads: {error}"))
-            })?;
+        let mut builder = build_session_builder("Places365", backend)?;
         let session = builder.commit_from_file(&model_path).map_err(|error| {
             SemanticError::Inference(format!("could not load Places365 ONNX graph: {error}"))
         })?;
@@ -512,8 +626,11 @@ impl Places365Classifier {
             .collect::<Result<Vec<_>, _>>()?;
 
         let topic_classifier =
-            match load_topic_classifier(topic_model, topic_model_dir, runtime_path) {
+            match load_topic_classifier(topic_model, topic_model_dir, runtime_path, backend) {
                 Ok(classifier) => Some(classifier),
+                Err(error) if backend.is_gpu() => {
+                    return Err(error);
+                }
                 Err(error) => {
                     log::warn!(
                         "{} topic adapter unavailable: {error}",
@@ -534,6 +651,7 @@ impl Places365Classifier {
                 .map_err(|error| SemanticError::Inference(error.to_string()))?
                 .len(),
             topic_classifier,
+            backend,
         })
     }
 
@@ -552,7 +670,7 @@ impl SemanticClassifier for Places365Classifier {
             installed: true,
             model_size_bytes: Some(self.model_size_bytes),
             model_sha256: Some(MODEL_SHA256.into()),
-            supported_backends: vec![ExecutionBackend::Cpu],
+            supported_backends: model_backends(),
         }
     }
 
@@ -576,7 +694,7 @@ impl SemanticClassifier for Places365Classifier {
                 .topic_classifier
                 .as_ref()
                 .map(|classifier| classifier.metadata()),
-            selected_backend: Some(ExecutionBackend::Cpu),
+            selected_backend: Some(self.backend),
         }
     }
 
@@ -599,7 +717,7 @@ impl SemanticClassifier for Places365Classifier {
         images: &[PathBuf],
         backend: ExecutionBackend,
     ) -> Result<Vec<SemanticAnalysisOutput>, SemanticError> {
-        if !matches!(backend, ExecutionBackend::Auto | ExecutionBackend::Cpu) {
+        if !backend_matches(self.backend, backend) {
             return Err(SemanticError::BackendUnavailable(backend));
         }
         if images.is_empty() {
@@ -636,7 +754,7 @@ impl SemanticClassifier for Places365Classifier {
         drop(session);
 
         let embedding_outputs = self.topic_classifier.as_ref().and_then(|classifier| {
-            match classifier.classify_batch(images, ExecutionBackend::Cpu) {
+            match classifier.classify_batch(images, self.backend) {
                 Ok(outputs) if outputs.len() == image_count => Some(outputs),
                 Ok(outputs) => {
                     log::warn!(
@@ -712,6 +830,7 @@ pub struct TinyClipClassifier {
     prompt_attention_mask: Vec<i64>,
     prompt_label_indexes: Vec<usize>,
     model_size_bytes: u64,
+    backend: ExecutionBackend,
 }
 
 impl std::fmt::Debug for TinyClipClassifier {
@@ -726,6 +845,14 @@ impl std::fmt::Debug for TinyClipClassifier {
 
 impl TinyClipClassifier {
     pub fn load(model_dir: &Path, runtime_path: &Path) -> Result<Self, SemanticError> {
+        Self::load_with_backend(model_dir, runtime_path, ExecutionBackend::Cpu)
+    }
+
+    pub fn load_with_backend(
+        model_dir: &Path,
+        runtime_path: &Path,
+        backend: ExecutionBackend,
+    ) -> Result<Self, SemanticError> {
         let model_path = model_dir.join(TINYCLIP_MODEL_FILE);
         let tokenizer_path = model_dir.join(TINYCLIP_TOKENIZER_FILE);
         verify_sha256(&model_path, TINYCLIP_MODEL_SHA256)?;
@@ -751,19 +878,7 @@ impl TinyClipClassifier {
             ..PaddingParams::default()
         }));
 
-        let builder = Session::builder().map_err(|error| {
-            SemanticError::Inference(format!("could not create ONNX session: {error}"))
-        })?;
-        let builder = builder
-            .with_optimization_level(GraphOptimizationLevel::Level3)
-            .map_err(|error| {
-                SemanticError::Inference(format!("could not optimize ONNX graph: {error}"))
-            })?;
-        let mut builder = builder
-            .with_intra_threads(cpu_thread_count())
-            .map_err(|error| {
-                SemanticError::Inference(format!("could not configure ONNX threads: {error}"))
-            })?;
+        let mut builder = build_session_builder("TinyCLIP", backend)?;
         let session = builder.commit_from_file(&model_path).map_err(|error| {
             SemanticError::Inference(format!("could not load ONNX graph: {error}"))
         })?;
@@ -780,6 +895,7 @@ impl TinyClipClassifier {
             model_size_bytes: std::fs::metadata(model_path)
                 .map_err(|error| SemanticError::Inference(error.to_string()))?
                 .len(),
+            backend,
         })
     }
 
@@ -810,7 +926,7 @@ impl SemanticClassifier for TinyClipClassifier {
             installed: true,
             model_size_bytes: Some(self.model_size_bytes),
             model_sha256: Some(TINYCLIP_MODEL_SHA256.into()),
-            supported_backends: vec![ExecutionBackend::Cpu],
+            supported_backends: model_backends(),
         }
     }
 
@@ -820,7 +936,7 @@ impl SemanticClassifier for TinyClipClassifier {
             message: "TinyCLIP INT8 已通过完整性校验，可用于题材候选和本地文本/相似搜索。".into(),
             model: self.metadata(),
             topic_model: Some(self.metadata()),
-            selected_backend: Some(ExecutionBackend::Cpu),
+            selected_backend: Some(self.backend),
         }
     }
 
@@ -877,7 +993,7 @@ impl SemanticClassifier for TinyClipClassifier {
         images: &[PathBuf],
         backend: ExecutionBackend,
     ) -> Result<Vec<SemanticAnalysisOutput>, SemanticError> {
-        if !matches!(backend, ExecutionBackend::Auto | ExecutionBackend::Cpu) {
+        if !backend_matches(self.backend, backend) {
             return Err(SemanticError::BackendUnavailable(backend));
         }
         if images.is_empty() {
@@ -1027,6 +1143,7 @@ pub struct OpenVocabularyClipClassifier {
     prompt_text_embeddings: Vec<f32>,
     embedding_dimensions: usize,
     model_size_bytes: u64,
+    backend: ExecutionBackend,
 }
 
 impl std::fmt::Debug for OpenVocabularyClipClassifier {
@@ -1045,6 +1162,15 @@ impl OpenVocabularyClipClassifier {
         topic_model: TopicModelKind,
         model_dir: &Path,
         runtime_path: &Path,
+    ) -> Result<Self, SemanticError> {
+        Self::load_with_backend(topic_model, model_dir, runtime_path, ExecutionBackend::Cpu)
+    }
+
+    pub fn load_with_backend(
+        topic_model: TopicModelKind,
+        model_dir: &Path,
+        runtime_path: &Path,
+        backend: ExecutionBackend,
     ) -> Result<Self, SemanticError> {
         let variant = match topic_model {
             TopicModelKind::Siglip2Base => OpenClipVariant::Siglip2Base,
@@ -1112,15 +1238,15 @@ impl OpenVocabularyClipClassifier {
         let graph = match variant {
             OpenClipVariant::Siglip2Base => {
                 let model_path = model_dir.join(SIGLIP2_MODEL_FILE);
-                let session = build_optimized_session(&model_path, "SigLIP 2")?;
+                let session = build_optimized_session(&model_path, "SigLIP 2", backend)?;
                 validate_siglip2_model_contract(&session)?;
                 OpenClipGraph::Joint(Mutex::new(session))
             }
             OpenClipVariant::MobileclipS0 => {
                 let vision_path = model_dir.join(MOBILECLIP_VISION_FILE);
                 let text_path = model_dir.join(MOBILECLIP_TEXT_FILE);
-                let vision = build_optimized_session(&vision_path, "MobileCLIP vision")?;
-                let text = build_optimized_session(&text_path, "MobileCLIP text")?;
+                let vision = build_optimized_session(&vision_path, "MobileCLIP vision", backend)?;
+                let text = build_optimized_session(&text_path, "MobileCLIP text", backend)?;
                 validate_mobileclip_vision_contract(&vision)?;
                 validate_mobileclip_text_contract(&text)?;
                 OpenClipGraph::Split {
@@ -1141,6 +1267,7 @@ impl OpenVocabularyClipClassifier {
             prompt_text_embeddings: Vec::new(),
             embedding_dimensions: variant.embedding_dimensions(),
             model_size_bytes,
+            backend,
         };
         classifier.prompt_text_embeddings = classifier.run_text_embeddings(
             &classifier.prompt_input_ids,
@@ -1299,7 +1426,7 @@ impl SemanticClassifier for OpenVocabularyClipClassifier {
             installed: true,
             model_size_bytes: Some(self.model_size_bytes),
             model_sha256: Some(model_sha256.into()),
-            supported_backends: vec![ExecutionBackend::Cpu],
+            supported_backends: model_backends(),
         }
     }
 
@@ -1313,7 +1440,7 @@ impl SemanticClassifier for OpenVocabularyClipClassifier {
             ),
             model: metadata.clone(),
             topic_model: Some(metadata),
-            selected_backend: Some(ExecutionBackend::Cpu),
+            selected_backend: Some(self.backend),
         }
     }
 
@@ -1342,7 +1469,7 @@ impl SemanticClassifier for OpenVocabularyClipClassifier {
         images: &[PathBuf],
         backend: ExecutionBackend,
     ) -> Result<Vec<SemanticAnalysisOutput>, SemanticError> {
-        if !matches!(backend, ExecutionBackend::Auto | ExecutionBackend::Cpu) {
+        if !backend_matches(self.backend, backend) {
             return Err(SemanticError::BackendUnavailable(backend));
         }
         if images.is_empty() {
@@ -1397,37 +1524,31 @@ fn load_topic_classifier(
     topic_model: TopicModelKind,
     model_dir: &Path,
     runtime_path: &Path,
+    backend: ExecutionBackend,
 ) -> Result<Box<dyn SemanticClassifier>, SemanticError> {
     match topic_model {
-        TopicModelKind::Tinyclip => {
-            Ok(Box::new(TinyClipClassifier::load(model_dir, runtime_path)?))
+        TopicModelKind::Tinyclip => Ok(Box::new(TinyClipClassifier::load_with_backend(
+            model_dir,
+            runtime_path,
+            backend,
+        )?)),
+        TopicModelKind::Siglip2Base | TopicModelKind::MobileclipS0 => {
+            Ok(Box::new(OpenVocabularyClipClassifier::load_with_backend(
+                topic_model,
+                model_dir,
+                runtime_path,
+                backend,
+            )?))
         }
-        TopicModelKind::Siglip2Base | TopicModelKind::MobileclipS0 => Ok(Box::new(
-            OpenVocabularyClipClassifier::load(topic_model, model_dir, runtime_path)?,
-        )),
     }
 }
 
-fn build_optimized_session(model_path: &Path, model_name: &str) -> Result<Session, SemanticError> {
-    let builder = Session::builder().map_err(|error| {
-        SemanticError::Inference(format!(
-            "could not create {model_name} ONNX session: {error}"
-        ))
-    })?;
-    let builder = builder
-        .with_optimization_level(GraphOptimizationLevel::Level3)
-        .map_err(|error| {
-            SemanticError::Inference(format!(
-                "could not optimize {model_name} ONNX graph: {error}"
-            ))
-        })?;
-    let mut builder = builder
-        .with_intra_threads(cpu_thread_count())
-        .map_err(|error| {
-            SemanticError::Inference(format!(
-                "could not configure {model_name} ONNX threads: {error}"
-            ))
-        })?;
+fn build_optimized_session(
+    model_path: &Path,
+    model_name: &str,
+    backend: ExecutionBackend,
+) -> Result<Session, SemanticError> {
+    let mut builder = build_session_builder(model_name, backend)?;
     builder.commit_from_file(model_path).map_err(|error| {
         SemanticError::Inference(format!("could not load {model_name} ONNX graph: {error}"))
     })
@@ -1720,9 +1841,8 @@ fn places365_cluster_to_topic(cluster_id: &str) -> Option<&'static str> {
         "photo_landscape" => Some("photo_landscape"),
         "photo_urban" => Some("photo_street"),
         "photo_architecture" => Some("photo_architecture"),
-        "photo_food" => Some("photo_food"),
-        "photo_commercial" => Some("photo_still_life"),
-        "photo_event" => Some("photo_activity"),
+        "photo_food" | "photo_commercial" => Some("photo_still_life"),
+        "photo_event" => None,
         "photo_transport" => Some("photo_vehicle"),
         "photo_plant" => Some("photo_macro"),
         // Industrial/work scenes are deliberately not a photographer-facing
@@ -1736,6 +1856,13 @@ fn places365_cluster_to_topic(cluster_id: &str) -> Option<&'static str> {
 }
 
 pub(crate) fn initialize_ort(runtime_path: &Path) -> Result<(), SemanticError> {
+    let shared_runtime = runtime_path
+        .parent()
+        .ok_or_else(|| {
+            SemanticError::Inference("ONNX Runtime path has no parent directory".into())
+        })?
+        .join("onnxruntime_providers_shared.dll");
+    verify_sha256(&shared_runtime, RUNTIME_SHARED_SHA256)?;
     let canonical = runtime_path.canonicalize().map_err(|error| {
         SemanticError::Inference(format!("could not locate ONNX Runtime: {error}"))
     })?;
@@ -2077,6 +2204,9 @@ pub struct BenchmarkReport {
     pub model: ModelMetadata,
     pub backend: ExecutionBackend,
     pub batch_size: usize,
+    pub warmup_sample_count: usize,
+    pub measured_batch_count: usize,
+    pub failed_batch_count: usize,
     pub sample_count: usize,
     pub failure_count: usize,
     pub mean_latency_ms: Option<f64>,
@@ -2097,6 +2227,11 @@ pub struct BenchmarkSamplePrediction {
     pub raw_similarities: Vec<SemanticSimilarity>,
 }
 
+#[derive(Debug, Clone, Copy, Default)]
+pub struct BenchmarkOptions {
+    pub warmup_batches: usize,
+}
+
 pub fn benchmark_classifier(
     classifier: &dyn SemanticClassifier,
     requested_model: impl Into<String>,
@@ -2104,19 +2239,64 @@ pub fn benchmark_classifier(
     backend: ExecutionBackend,
     batch_size: usize,
 ) -> BenchmarkReport {
+    benchmark_classifier_with_options(
+        classifier,
+        requested_model,
+        images,
+        backend,
+        batch_size,
+        BenchmarkOptions::default(),
+    )
+}
+
+pub fn benchmark_classifier_with_options(
+    classifier: &dyn SemanticClassifier,
+    requested_model: impl Into<String>,
+    images: &[PathBuf],
+    backend: ExecutionBackend,
+    batch_size: usize,
+    options: BenchmarkOptions,
+) -> BenchmarkReport {
     let requested_model = requested_model.into();
+    let backend = classifier.status().selected_backend.unwrap_or(backend);
     let metadata = classifier.metadata();
     let batch_size = batch_size.max(1);
     if !metadata.installed {
         return unavailable_benchmark(requested_model, metadata, backend, batch_size, images.len());
     }
 
+    let warmup_sample_count = options
+        .warmup_batches
+        .saturating_mul(batch_size)
+        .min(images.len());
+    let mut warmup_error = None;
+    let mut failed_batch_count = 0;
+    for batch in images[..warmup_sample_count].chunks(batch_size) {
+        match classifier.classify_batch(batch, backend) {
+            Ok(outputs) if outputs.len() == batch.len() => {}
+            Ok(outputs) => {
+                failed_batch_count += 1;
+                warmup_error.get_or_insert(format!(
+                    "warm-up returned {} results for {} images",
+                    outputs.len(),
+                    batch.len()
+                ));
+            }
+            Err(error) => {
+                failed_batch_count += 1;
+                warmup_error.get_or_insert(error.to_string());
+            }
+        }
+    }
+
     let overall_start = Instant::now();
     let mut batch_latencies = Vec::new();
     let mut failure_count = 0;
-    let mut first_error = None;
+    let mut measured_batch_count = 0;
+    let mut first_error = warmup_error;
     let mut sample_predictions = Vec::new();
     for batch in images.chunks(batch_size) {
+        measured_batch_count += 1;
         let start = Instant::now();
         match classifier.classify_batch(batch, backend) {
             Ok(results) if results.len() == batch.len() => {
@@ -2128,22 +2308,35 @@ pub fn benchmark_classifier(
                     });
                 }
             }
-            Ok(_) => failure_count += batch.len(),
+            Ok(outputs) => {
+                failure_count += batch.len();
+                failed_batch_count += 1;
+                first_error.get_or_insert(format!(
+                    "classifier returned {} outputs for {} inputs",
+                    outputs.len(),
+                    batch.len()
+                ));
+            }
             Err(error) => {
                 failure_count += batch.len();
-                first_error.get_or_insert_with(|| error.to_string());
+                failed_batch_count += 1;
+                first_error.get_or_insert(error.to_string());
             }
         }
         batch_latencies.push(start.elapsed().as_secs_f64() * 1000.0 / batch.len() as f64);
     }
     batch_latencies.sort_by(f64::total_cmp);
     let elapsed = overall_start.elapsed().as_secs_f64();
+    let has_errors = failure_count > 0 || first_error.is_some();
     BenchmarkReport {
-        schema_version: 2,
+        schema_version: 3,
         requested_model,
         model: metadata,
         backend,
         batch_size,
+        warmup_sample_count,
+        measured_batch_count,
+        failed_batch_count,
         sample_count: images.len(),
         failure_count,
         mean_latency_ms: (!batch_latencies.is_empty())
@@ -2153,10 +2346,10 @@ pub fn benchmark_classifier(
         throughput_per_second: (elapsed > 0.0).then_some(images.len() as f64 / elapsed),
         peak_memory_bytes: None,
         sample_predictions,
-        status: if failure_count == 0 {
-            "completed"
-        } else {
+        status: if has_errors {
             "completed_with_errors"
+        } else {
+            "completed"
         }
         .into(),
         error: first_error,
@@ -2171,11 +2364,14 @@ fn unavailable_benchmark(
     sample_count: usize,
 ) -> BenchmarkReport {
     BenchmarkReport {
-        schema_version: 2,
+        schema_version: 3,
         requested_model,
         model: metadata,
         backend,
         batch_size,
+        warmup_sample_count: 0,
+        measured_batch_count: 0,
+        failed_batch_count: 0,
         sample_count,
         failure_count: sample_count,
         mean_latency_ms: None,
@@ -2213,6 +2409,18 @@ pub fn discover_benchmark_images(root: &Path) -> Vec<PathBuf> {
                         "jpg" | "jpeg" | "png" | "webp"
                     )
                 })
+        })
+        .collect()
+}
+
+pub fn discover_benchmark_thumbnails(root: &Path) -> Vec<PathBuf> {
+    let expected_suffix = format!("-{}.jpg", crate::imaging::THUMBNAIL_SPEC);
+    discover_benchmark_images(root)
+        .into_iter()
+        .filter(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.ends_with(&expected_suffix))
         })
         .collect()
 }
@@ -2285,7 +2493,7 @@ mod tests {
         assert_eq!(ids.len(), catalog.len());
         assert_eq!(
             known_display_name_for_label_id("photo_landscape"),
-            Some("风光自然")
+            Some("风光")
         );
         assert_eq!(known_display_name_for_label_id("unknown"), Some("抽象艺术"));
         assert_eq!(
@@ -2294,6 +2502,10 @@ mod tests {
         );
         assert_eq!(known_display_name_for_label_id("person"), Some("单人"));
         assert_eq!(known_display_name_for_label_id("pet"), Some("动物"));
+        assert_eq!(known_display_name_for_label_id("scenery"), Some("风景"));
+        assert_eq!(known_display_name_for_label_id("food"), Some("食物"));
+        assert_eq!(canonical_label_id("photo_food"), "photo_still_life");
+        assert_eq!(canonical_label_id("photo_event"), "photo_abstract");
         assert_eq!(
             catalog
                 .iter()
@@ -2375,9 +2587,9 @@ mod tests {
     fn primary_label_uses_highest_accepted_similarity() {
         let mut scores = vec![0.10; topics::TOPIC_LABELS.len()];
         scores[topics::label_index("photo_landscape").unwrap()] = 0.21;
-        scores[topics::label_index("photo_food").unwrap()] = 0.30;
+        scores[topics::label_index("photo_still_life").unwrap()] = 0.30;
         let predictions = select_topic_predictions(&scores);
-        assert_eq!(predictions[0].label_id, "photo_food");
+        assert_eq!(predictions[0].label_id, "photo_still_life");
         assert!(predictions[0].is_primary);
         assert_eq!(
             predictions.iter().filter(|label| label.is_primary).count(),
@@ -2423,5 +2635,30 @@ mod tests {
         assert_eq!(report.status, "completed");
         assert_eq!(report.failure_count, 0);
         assert!(report.mean_latency_ms.is_some());
+    }
+
+    #[test]
+    fn benchmark_reports_warmup_and_measured_batches_separately() {
+        let images = vec![
+            PathBuf::from("a.jpg"),
+            PathBuf::from("b.png"),
+            PathBuf::from("c.webp"),
+        ];
+        let report = benchmark_classifier_with_options(
+            &FakeClassifier,
+            "fake-test-only",
+            &images,
+            ExecutionBackend::Cpu,
+            2,
+            BenchmarkOptions { warmup_batches: 1 },
+        );
+
+        assert_eq!(report.backend, ExecutionBackend::Cpu);
+        assert_eq!(report.warmup_sample_count, 2);
+        assert_eq!(report.measured_batch_count, 2);
+        assert_eq!(report.failed_batch_count, 0);
+        assert_eq!(report.failure_count, 0);
+        assert_eq!(report.sample_count, 3);
+        assert_eq!(report.status, "completed");
     }
 }

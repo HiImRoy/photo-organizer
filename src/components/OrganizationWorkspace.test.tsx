@@ -120,7 +120,8 @@ describe("OrganizationWorkspace", () => {
       />,
     );
 
-    expect(screen.getByText(/左侧决定按什么分组/)).toBeInTheDocument();
+    expect(screen.getByText("目录内容")).toBeInTheDocument();
+    expect(screen.getByText("缺失时")).toBeInTheDocument();
     const firstDimension = screen.getByRole("combobox", { name: "第 1 层目录维度" });
     const firstFallback = screen.getByRole("combobox", { name: "拍摄年份缺失时" });
     expect(within(firstDimension).getByRole("option", { name: "拍摄年份" })).toBeInTheDocument();
@@ -158,9 +159,9 @@ describe("OrganizationWorkspace", () => {
       />,
     );
 
-    expect(screen.getByText("只读整理预览")).toBeInTheDocument();
-    expect(screen.getByText("先生成一份整理预览")).toBeInTheDocument();
-    expect(screen.getByLabelText("整理流程")).toBeInTheDocument();
+    expect(screen.getByText("只读预览 · 不会修改源文件")).toBeInTheDocument();
+    expect(screen.getByText("尚未生成")).toBeInTheDocument();
+    expect(screen.getByRole("region", { name: "整理预览工作区" })).toBeInTheDocument();
     await user.type(screen.getByLabelText("目标根目录"), "D:\\整理预览");
     await user.click(screen.getByRole("button", { name: "生成整理预览" }));
 
@@ -175,6 +176,6 @@ describe("OrganizationWorkspace", () => {
     expect(screen.getByText("冲突")).toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "导出 JSON" }));
     expect(api.exportOrganizationManifest).toHaveBeenCalledWith(plan, "json");
-    expect(screen.getByText(/不会创建目录/)).toBeInTheDocument();
+    expect(screen.getByText("只读预览 · 不会修改源文件")).toBeInTheDocument();
   });
 });

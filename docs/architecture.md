@@ -23,7 +23,7 @@ Rust application core
 Application data directory             Tauri resources
   ├─ photo-organizer.sqlite3              ├─ model-int8.onnx
   ├─ thumbnails/                          ├─ tokenizer/config/licenses
-  ├─ previews/                             └─ onnxruntime.dll + notices
+  ├─ previews/                             └─ onnxruntime.dll + onnxruntime_providers_shared.dll + notices
   └─ logs/
 
 User-selected source directory: read-only during scan and analysis
@@ -41,7 +41,7 @@ User-selected source directory: read-only during scan and analysis
 - `workflow.rs`：收藏/集合、精确重复、本地文本与以图检索、相似聚类、人物隐私门禁，以及编辑预览/另存副本的安全执行器。
 - `tasks.rs`：扫描取消 token 与语义暂停/继续/取消控制器。
 - `ipc.rs`：唯一暴露给 UI 的命令；模型状态只报告实际启用的 provider。
-- 高清预览通过 `get_preview_data_url(asset_id, tier)` 受控读取：screen tier 以 EXIF 方向提取并缓存不超过约 2560px 的 JPEG，original tier 只为当前查看器临时读取原图；两者都不写入源目录。预览是查看行为，不得被复用为导入/分析的原图解码器。
+- 高清预览通过 `get_preview_data_url(asset_id, tier)` 受控读取：screen tier 以 EXIF 方向提取并缓存有界 JPEG，单图查看器上限约 2560px；2、4、6 张/行的网格仅对视口附近图片请求 1280、960、768px 档位。original tier 只为当前查看器临时读取原图；这些预览都不写入源目录，也不得被复用为导入或分析输入。
 - `remove_library(library_id)` 先取消该图库的活动任务，再用 SQLite 外键事务清理索引、分析、任务和计划，并只清理没有其他资产引用的应用 cache；前端移除父图库前会明确询问是否逐级移除嵌套子图库；它不调用源目录删除、移动或重命名。
 - `migrations/`：旧文件只增不改、随二进制嵌入的 SQLite schema；需要收敛旧数据时允许在新 migration 事务内重建目标表并调用 Rust 迁移助手。
 
@@ -51,7 +51,7 @@ User-selected source directory: read-only during scan and analysis
 2. 默认收藏使用 `system_key='default_favorites'`，其成员关系是真实爱心状态，`assets.is_favorite` 暂作为兼容镜像。普通 Collection 支持多对多关系和后续树形层级；旧 `asset_library_assignments` 只保留作迁移兼容，不再覆盖 Source 查询。
 3. 0053 的 AssetQuery v2 以 `root + includeDescendants + filter + sort + page` 统一承载 Source、All、默认收藏和普通 Collection；旧 `favoriteOnly`、`collectionId` 和 `libraryId` 通过 V1 兼容适配器转换。AssetFilter、计数、分页、色相范围/严格程度和数值筛选共享同一查询契约，不触发原图解码。
 4. 精确重复查询复用扫描生成的完整 BLAKE3，不重新读取源图；结果只用于审阅或生成虚拟“重复待处理”集合。
-5. 文本查询调用当前已装载题材模型的文本输出，默认是 SigLIP 2；题材候选保留为可审计证据，当前可观察场景主类由 Places365 映射证据决定，主体模型可在任务层补充人像、动物、车辆、食品和植物等题材；图片搜索和聚类只读取与当前模型、分析版本和源 fingerprint 一致的 `semantic_embeddings`。
+5. 文本查询调用当前已装载题材模型的文本输出，默认是 SigLIP 2；题材候选保留为可审计证据，当前可观察场景主类由 Places365 映射证据决定，主体模型可在任务层补充人像、动物、静物特写和植物等题材；风景作为高置信风光题材派生的主体标签保存；图片搜索和聚类只读取与当前模型、分析版本和源 fingerprint 一致的 `semantic_embeddings`。
 6. 相似聚类用向量主维度建立有界候选窗口，再做精确余弦与 complete-link 拆分；当前 5000 个 embedding 上限会明确报告截断。
 7. 编辑预览与导出都调用同一个 Rust `EditRecipe`。导出先持久化 `edit_export_plans`，确认时重验源 fingerprint 和目标边界（目标父目录先 canonicalize，避免 junction/symlink 绕过），并在写文件前记录 `file_operation_jobs/file_operations`；回滚同样先预览并重验生成副本哈希，只删除未变化的应用生成副本。
 8. 旧的人脸表和身份 clear-all 边界仍然独立保留；新的主体工作流只写 `subject_analysis_runs` / `subject_labels`，不写检测框、身份向量或聚类。
@@ -62,8 +62,8 @@ User-selected source directory: read-only during scan and analysis
 2. 扫描任务只读遍历 JPEG/PNG/WebP，生成 fingerprint、应用私有缩略图、EXIF 和传统特征；首次导入使用内嵌预览或 Windows WIC/有界格式后端直接得到不超过 `640×640` 的缩略图像素，有当前缓存时基础特征重算只解码缩略图，单文件失败不终止任务。
 3. UI 可在扫描时继续读取已提交资产。自然完成后才把本轮未见资产标为 missing；取消不会误标未遍历资产。
 4. 语义任务只选取基础分析已完成且当前 fingerprint/模型/分析版本没有有效结果的图片；题材候选、环境证据或主体结果缺失时，即使其它层已存在，也会重新进入同一任务。
-5. 单 worker 在 CPU 上以不超过 4 张的批次执行题材、环境与主体模型；所有模型都只能读取当前 `grid-640-v1` 缩略图。PicoDet 使用 320 输入并补传 `scale_factor`，YuNet 使用 640 输入并在 Rust 中解码 12 个多尺度输出。
-6. 摄影题材主标签和环境证据写入 `semantic_labels`/`semantic_evidence`，主体标签写入独立的 `subject_labels`；查询层将二者合并为显示和辅助标签，任务层只把通过明确映射的主体证据用于题材决策，不把主体标签本身写入主类别组。
+5. 单 worker 在 CPU 上以不超过 8 张、DirectML 按显存分级且最高 32 张的批次执行题材、环境与主体模型；运行时失败会在同一后端递归减半重试。所有模型都只能读取当前 `grid-640-v1` 缩略图。PicoDet 使用 320 输入并补传 `scale_factor`，YuNet 使用 640 输入并在 Rust 中解码 12 个多尺度输出。
+6. 摄影题材主标签和环境证据写入 `semantic_labels`/`semantic_evidence`，主体检测标签写入独立的 `subject_labels`；高置信风光题材派生的“风景”写入 `semantic_labels` 的非主类主体组，以保留正确的题材模型来源；查询层将二者合并为显示和辅助标签，任务层只把通过明确映射的主体证据用于题材决策，不把主体标签本身写入主类别组。
 7. 应用退出时已完成结果保持；重启把运行中的任务项恢复为 queued 并自动继续。用户暂停的任务保留 paused，可手动继续；取消将剩余资产还原为未分析。
 8. 图片 fingerprint 变化后旧标签、主体运行记录和 embedding 仍可审计，但查询通过 fingerprint 与版本约束排除；重新分析写入当前结果。
 
@@ -71,7 +71,7 @@ User-selected source directory: read-only during scan and analysis
 
 `Repository::list_assets` 构造参数化 SQLite `WHERE`，计数查询和分页查询共享同一条件：搜索、语义标签 any/all、影调、主色、亮度、饱和度、拍摄时间、原始目录和语义状态。排序、总数和分页均在数据库层完成，React 不对当前页做替代性过滤。
 
-主要语义标签分组只读取题材候选层的 `is_primary=1` 结果。当前活动题材为人像、风光自然、街拍纪实、建筑、静物产品、美食、动物、植物、运动、交通工具、文档截图、抽象艺术；每类使用多条提示词平均、独立阈值和候选间隔，拒识时在有效分类层归入抽象艺术。Places365 只提供环境与场景证据，工业证据不会直接生成题材。主体模型提供可与题材并存的 `单人`、`多人`、`动物`、`车辆`、`食品`、`植物`，其中单人和多人互斥，全部作为辅助标签。原始目录由图库根目录和完整相对路径祖先构成，父目录过滤覆盖所有后代。
+主要语义标签分组只读取题材候选层的 `is_primary=1` 结果。当前活动题材为人像、风光、街拍、建筑、静物特写、动物、植物、交通工具、抽象艺术；每类使用多条提示词平均、独立阈值和候选间隔，拒识时在有效分类层归入抽象艺术。Places365 只提供环境与场景证据，工业证据不会直接生成题材。主体层提供可与题材并存的 `单人`、`多人`、`动物`、`植物`、`食物`、`风景`，其中单人和多人互斥；风景由高置信风光题材派生。原始目录由图库根目录和完整相对路径祖先构成，父目录过滤覆盖所有后代。
 
 ## 安全与故障边界
 
@@ -82,6 +82,7 @@ User-selected source directory: read-only during scan and analysis
 - “从图库移除”只删除应用索引和 cache，源目录、原始图片和 EXIF/XMP 保持不变。
 - 环境/题材候选模型和主体模型分别报告状态；任一模型缺失、哈希失败或 session 初始化失败只禁用对应标签层，不产生占位标签，也不回退到原图、云端或身份识别。SigLIP 2 是唯一的题材模型，加载失败时明确显示不可用。
 - 扫描和语义任务使用独立注册器；语义保持单 worker 和有界批次，避免阻塞浏览和占满 CPU。
+- GPU S0 通过 Windows DXGI 枚举适配器；S1 使用 DirectML 运行库和 Provider 自检，只有 ready 状态才启用 GPU 开关。CPU 上限为 8；DirectML 按选定适配器专用显存分级，最高 32，运行时批次失败会在同一后端递归降批；模型会话失败自动回退 CPU。检测到独立 GPU 不等于 Provider 已初始化。
 - 测试只使用仓库夹具或临时目录，并对源文件做前后哈希验证。
 
 ## 架构变更规则

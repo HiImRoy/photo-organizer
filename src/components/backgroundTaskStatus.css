@@ -1,0 +1,49 @@
+/* Keep the compact task control content-sized so the progress track has no
+   unexplained flexible lead-in between the task label and the track. */
+.photo-app .task-status-anchor > .task-status-trigger {
+  display: flex;
+  grid-template-columns: none;
+}
+
+.photo-app .task-status-anchor > .task-status-copy {
+  width: max-content;
+  max-width: 42%;
+  flex: 0 1 auto;
+}
+
+.photo-app .task-status-anchor > .task-status-mini-track {
+  box-sizing: border-box;
+  width: 112px;
+  min-width: 112px;
+  flex: 1 0 112px;
+  background: color-mix(in srgb, var(--text-muted) 32%, var(--panel-inset));
+}
+
+.photo-app .task-status-anchor > .task-status-mini-track i {
+  margin: 0;
+}
+
+/* Keep both expanded progress variants flush with their track edges. */
+.photo-app .task-status-popover .progress-track,
+.photo-app .task-status-popover .task-progress {
+  width: 100%;
+  margin-inline: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+.photo-app .task-status-popover .progress-track span,
+.photo-app .task-status-popover .task-progress i {
+  display: block;
+  height: 100%;
+  margin: 0;
+  min-width: 0;
+}
+
+@media (max-width: 560px) {
+  .photo-app .task-status-anchor > .task-status-mini-track {
+    width: 96px;
+    min-width: 96px;
+    flex-basis: 96px;
+  }
+}

@@ -1,6 +1,7 @@
 pub mod classification;
 pub mod db;
 pub mod error;
+pub mod gpu;
 pub mod imaging;
 #[cfg(feature = "desktop")]
 pub mod ipc;
@@ -107,6 +108,7 @@ pub fn run() {
             ipc::remove_library,
             ipc::open_library_in_explorer,
             ipc::get_semantic_status,
+            ipc::get_gpu_capabilities,
             ipc::prepare_semantic_model,
             ipc::get_semantic_catalog,
             ipc::get_subject_status,
@@ -133,10 +135,14 @@ pub fn run() {
             ipc::list_collections,
             ipc::list_browse_nodes,
             ipc::create_collection,
+            ipc::rename_collection,
+            ipc::move_collection,
             ipc::delete_collection,
             ipc::get_collection,
             ipc::add_assets_to_collection,
+            ipc::add_assets_to_collections,
             ipc::remove_assets_from_collection,
+            ipc::move_assets_between_collections,
             ipc::list_duplicate_groups,
             ipc::search_local_images,
             ipc::find_similar_assets,

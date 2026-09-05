@@ -174,7 +174,7 @@ export function OrganizationWorkspace({
     setError(null);
     setMessage(null);
     if (!targetRoot.trim()) {
-      setError("请先选择或输入目标根目录；只读预览不会创建该目录。");
+      setError("请先选择或输入目标根目录。");
       return;
     }
     if (scope === "selected" && selectedAssetIds.length === 0) {
@@ -194,7 +194,7 @@ export function OrganizationWorkspace({
       const nextPlan = await previewOrganizationPlan(request);
       setPlan(nextPlan);
       setSelectedItem(nextPlan.items[0] ?? null);
-      setMessage("整理方案已重新生成。没有创建目标目录，也没有修改源文件。");
+      setMessage("整理预览已更新。");
     } catch (reason) {
       setError(messageFrom(reason));
     } finally {
@@ -248,8 +248,7 @@ export function OrganizationWorkspace({
     <section className="organization-workspace" aria-label="整理预览工作区">
       <div className="organization-safety-banner">
         <span className="safety-dot" aria-hidden="true" />
-        <strong>只读整理预览</strong>
-        <span>仅生成源路径 → 规划目标路径映射，不会创建目录、复制、移动、重命名或删除文件。</span>
+        <strong>只读预览 · 不会修改源文件</strong>
         <span className="organization-scope-chip" title={scopeDescription.label}>
           {scopeInput.kind === "selection" ? "显式选择" : "当前查询"} · {scopeDescription.count} 张
         </span>
@@ -271,11 +270,7 @@ export function OrganizationWorkspace({
       <div className="organization-columns">
         <aside className="organization-controls" aria-label="整理规则">
           <div className="organization-panel-heading">
-            <div>
-              <h2>整理方案</h2>
-              <small>范围 · 规则 · 命名</small>
-            </div>
-            <span className="read-only-chip">只读</span>
+            <h2>整理方案</h2>
           </div>
 
           <fieldset className="organization-fieldset">
@@ -315,7 +310,6 @@ export function OrganizationWorkspace({
                 选择
               </button>
             </div>
-            <small>目标目录位于源图库内部时会被阻止。</small>
           </div>
 
           <div className="organization-control-group">
@@ -323,12 +317,9 @@ export function OrganizationWorkspace({
               <label>目录维度顺序</label>
               <small>拖动或使用箭头</small>
             </div>
-            <div className="organization-level-guide" role="note">
-              <strong>这样理解</strong>
-              <span>
-                每一行是一层目录：左侧决定按什么分组，右侧决定这项信息缺失时怎么办；第 1
-                层在最外面。
-              </span>
+            <div className="organization-level-columns" aria-hidden="true">
+              <span>目录内容</span>
+              <span>缺失时</span>
             </div>
             <div className="organization-levels">
               {rules.levels.map((level, index) => {
@@ -599,23 +590,7 @@ export function OrganizationWorkspace({
             </>
           ) : (
             <div className="organization-empty">
-              <small className="organization-empty-kicker">只读规划工作区</small>
-              <strong>先生成一份整理预览</strong>
-              <span>把当前范围映射到目标目录，确认路径和命名后再决定下一步。</span>
-              <div className="organization-empty-steps" aria-label="整理流程">
-                <div>
-                  <b>1</b>
-                  <span>选择范围</span>
-                </div>
-                <div>
-                  <b>2</b>
-                  <span>设置规则</span>
-                </div>
-                <div>
-                  <b>3</b>
-                  <span>检查映射</span>
-                </div>
-              </div>
+              <strong>尚未生成</strong>
             </div>
           )}
         </main>
@@ -662,14 +637,9 @@ export function OrganizationWorkspace({
             </>
           ) : (
             <div className="organization-empty is-compact">
-              <strong>选择一条映射</strong>
-              <span>查看源路径、目标路径、模板变量和异常提示。</span>
+              <strong>选择映射后查看路径</strong>
             </div>
           )}
-          <div className="organization-detail-note">
-            <strong>安全边界</strong>
-            <span>原始路径、虚拟分类和规划目标路径始终分开。此版本没有执行按钮。</span>
-          </div>
         </aside>
       </div>
     </section>

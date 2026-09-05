@@ -2,6 +2,7 @@ import {
   emptyAssetFilter,
   type AssetFilter,
   type AssetQuery,
+  type AssetQueryRoot,
   type AssetQueryV1,
   type AssetScopeDescription,
   type AssetScopeInputV1,
@@ -54,24 +55,69 @@ export function createAssetQueryV1(
 }
 
 export function normalizeAssetQueryV1(query: AssetQueryV1): AssetQueryV1 {
+  const filter = normalizeAssetQueryFilterRoot(query.filter);
   return {
     ...query,
     version: 1,
     page: Math.max(1, Math.floor(query.page) || 1),
     pageSize: Math.min(500, Math.max(1, Math.floor(query.pageSize) || DEFAULT_ASSET_PAGE_SIZE)),
-    filter: { ...query.filter },
+    filter,
   };
 }
 
+function normalizeAssetQueryFilterRoot(filter: AssetFilter): AssetFilter {
+  if (filter.collectionId !== null) {
+    return { ...filter, favoriteOnly: false };
+  }
+  if (filter.favoriteOnly) {
+    return { ...filter, collectionId: null };
+  }
+  return { ...filter, favoriteOnly: false, collectionId: null };
+}
+
 export function updateAssetQueryFilter(query: AssetQueryV1, filter: AssetFilter): AssetQueryV1 {
-  return normalizeAssetQueryV1({ ...query, filter, page: 1 });
+  const root: AssetQueryRoot =
+    query.filter.collectionId !== null
+      ? { kind: "collection", collectionId: query.filter.collectionId }
+      : query.filter.favoriteOnly
+        ? { kind: "favorites" }
+        : query.libraryId === null
+          ? { kind: "all" }
+          : { kind: "source", libraryId: query.libraryId };
+  return updateAssetQueryBrowseRoot({ ...query, filter }, root);
 }
 
 export function updateAssetQueryLibrary(
   query: AssetQueryV1,
   libraryId: number | null,
 ): AssetQueryV1 {
-  return normalizeAssetQueryV1({ ...query, libraryId, page: 1 });
+  return normalizeAssetQueryV1({
+    ...query,
+    libraryId,
+    filter:
+      libraryId === null ? query.filter : { ...query.filter, favoriteOnly: false, collectionId: null },
+    page: 1,
+  });
+}
+
+/**
+ * Update the browse root as one operation. V1 keeps the legacy fields for
+ * compatibility, but only one physical or virtual root may be active at once.
+ */
+export function updateAssetQueryBrowseRoot(
+  query: AssetQueryV1,
+  root: AssetQueryRoot,
+): AssetQueryV1 {
+  return normalizeAssetQueryV1({
+    ...query,
+    libraryId: root.kind === "source" ? root.libraryId : null,
+    filter: {
+      ...query.filter,
+      favoriteOnly: root.kind === "favorites",
+      collectionId: root.kind === "collection" ? root.collectionId : null,
+    },
+    page: 1,
+  });
 }
 
 export function updateAssetQuerySort(

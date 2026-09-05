@@ -4,7 +4,6 @@
   "version": "0.1.0",
   "identifier": "com.photoorganizer.manual",
   "build": {
-    "beforeDevCommand": "npm run build",
     "devUrl": null,
     "frontendDist": "../dist"
   },

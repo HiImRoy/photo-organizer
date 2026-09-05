@@ -340,9 +340,13 @@ export function usePreviewController(
     setDragging(false);
   }
 
-  function onDoubleClick() {
+  function onDoubleClick(event: React.MouseEvent<HTMLDivElement>) {
     if (zoom === "fit") {
-      zoomAround(1);
+      const rect = event.currentTarget.getBoundingClientRect();
+      zoomAround(1, {
+        x: event.clientX - rect.left - rect.width / 2,
+        y: event.clientY - rect.top - rect.height / 2,
+      });
     } else {
       zoomAround("fit");
     }

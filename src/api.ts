@@ -7,7 +7,9 @@ import type {
   AssetPage,
   AssetQueryV1,
   BrowseNode,
+  CollectionDeleteMode,
   CollectionDetail,
+  CollectionMembershipMutation,
   CollectionSummary,
   ClassificationFieldDescriptor,
   DuplicateGroup,
@@ -16,6 +18,7 @@ import type {
   EditRecipe,
   EditRollbackPlan,
   FaceFeatureStatus,
+  GpuCapabilities,
   FolderSummary,
   LibrarySummary,
   LocalSearchResponse,
@@ -357,11 +360,31 @@ export async function fetchSemanticStatus(): Promise<SemanticRuntimeStatus> {
   return invoke<SemanticRuntimeStatus>("get_semantic_status");
 }
 
+export async function fetchGpuCapabilities(): Promise<GpuCapabilities> {
+  if (!desktopRuntime) {
+    return {
+      status: "unsupported_platform",
+      message: "浏览器预览不检测本地 GPU；分析使用 CPU。",
+      adapters: [],
+      selectedAdapterIndex: null,
+      dedicatedGpuAvailable: false,
+      recommendedAnalysisBatchSize: 8,
+      directml: {
+        id: "directml",
+        state: "not_configured",
+        message: "桌面版 DirectML Provider 尚未完成自检，当前分析使用 CPU。",
+      },
+    };
+  }
+  return invoke<GpuCapabilities>("get_gpu_capabilities");
+}
+
 export async function prepareSemanticModel(
   topicModel = "siglip2-base",
+  backend: "cpu" | "direct_ml" = "cpu",
 ): Promise<SemanticRuntimeStatus> {
   if (!desktopRuntime) throw new Error("模型准备仅在桌面应用中可用。");
-  return invoke<SemanticRuntimeStatus>("prepare_semantic_model", { topicModel });
+  return invoke<SemanticRuntimeStatus>("prepare_semantic_model", { topicModel, backend });
 }
 
 function browserSubjectStatus(): SubjectRuntimeStatus {
@@ -391,9 +414,11 @@ export async function fetchSubjectStatus(): Promise<SubjectRuntimeStatus> {
   return invoke<SubjectRuntimeStatus>("get_subject_status");
 }
 
-export async function prepareSubjectModel(): Promise<SubjectRuntimeStatus> {
+export async function prepareSubjectModel(
+  backend: "cpu" | "direct_ml" = "cpu",
+): Promise<SubjectRuntimeStatus> {
   if (!desktopRuntime) throw new Error("主体模型准备仅在桌面应用中可用。");
-  return invoke<SubjectRuntimeStatus>("prepare_subject_model");
+  return invoke<SubjectRuntimeStatus>("prepare_subject_model", { backend });
 }
 
 export async function clearSubjectData(): Promise<number> {
@@ -553,7 +578,7 @@ export async function createCollection(
   description = "",
   parentCollectionId: number | null = null,
 ): Promise<CollectionSummary> {
-  if (!desktopRuntime) throw new Error("集合仅在 PhotoOrganizer 桌面应用中可用。");
+  if (!desktopRuntime) throw new Error("收藏夹仅在 PhotoOrganizer 桌面应用中可用。");
   return invoke<CollectionSummary>("create_collection", {
     name,
     description,
@@ -561,13 +586,32 @@ export async function createCollection(
   });
 }
 
-export async function deleteCollection(collectionId: number): Promise<boolean> {
+export async function renameCollection(
+  collectionId: number,
+  name: string,
+): Promise<CollectionSummary> {
+  if (!desktopRuntime) throw new Error("收藏夹仅在 PhotoOrganizer 桌面应用中可用。");
+  return invoke<CollectionSummary>("rename_collection", { collectionId, name });
+}
+
+export async function moveCollection(
+  collectionId: number,
+  parentCollectionId: number | null,
+): Promise<CollectionSummary> {
+  if (!desktopRuntime) throw new Error("收藏夹仅在 PhotoOrganizer 桌面应用中可用。");
+  return invoke<CollectionSummary>("move_collection", { collectionId, parentCollectionId });
+}
+
+export async function deleteCollection(
+  collectionId: number,
+  mode: CollectionDeleteMode = "deleteSubtree",
+): Promise<boolean> {
   if (!desktopRuntime) return false;
-  return invoke<boolean>("delete_collection", { collectionId });
+  return invoke<boolean>("delete_collection", { collectionId, mode });
 }
 
 export async function fetchCollection(collectionId: number): Promise<CollectionDetail> {
-  if (!desktopRuntime) throw new Error("集合仅在 PhotoOrganizer 桌面应用中可用。");
+  if (!desktopRuntime) throw new Error("收藏夹仅在 PhotoOrganizer 桌面应用中可用。");
   return invoke<CollectionDetail>("get_collection", { collectionId });
 }
 
@@ -575,16 +619,40 @@ export async function addAssetsToCollection(
   collectionId: number,
   assetIds: number[],
 ): Promise<CollectionSummary> {
-  if (!desktopRuntime) throw new Error("集合仅在 PhotoOrganizer 桌面应用中可用。");
+  if (!desktopRuntime) throw new Error("收藏夹仅在 PhotoOrganizer 桌面应用中可用。");
   return invoke<CollectionSummary>("add_assets_to_collection", { collectionId, assetIds });
+}
+
+export async function addAssetsToCollections(
+  collectionIds: number[],
+  assetIds: number[],
+): Promise<CollectionSummary[]> {
+  if (!desktopRuntime) throw new Error("收藏夹仅在 PhotoOrganizer 桌面应用中可用。");
+  return invoke<CollectionSummary[]>("add_assets_to_collections", {
+    collectionIds,
+    assetIds,
+  });
 }
 
 export async function removeAssetsFromCollection(
   collectionId: number,
   assetIds: number[],
 ): Promise<CollectionSummary> {
-  if (!desktopRuntime) throw new Error("集合仅在 PhotoOrganizer 桌面应用中可用。");
+  if (!desktopRuntime) throw new Error("收藏夹仅在 PhotoOrganizer 桌面应用中可用。");
   return invoke<CollectionSummary>("remove_assets_from_collection", { collectionId, assetIds });
+}
+
+export async function moveAssetsBetweenCollections(
+  sourceCollectionId: number,
+  targetCollectionId: number,
+  assetIds: number[],
+): Promise<CollectionMembershipMutation> {
+  if (!desktopRuntime) throw new Error("收藏夹仅在 PhotoOrganizer 桌面应用中可用。");
+  return invoke<CollectionMembershipMutation>("move_assets_between_collections", {
+    sourceCollectionId,
+    targetCollectionId,
+    assetIds,
+  });
 }
 
 export async function fetchDuplicateGroups(

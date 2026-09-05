@@ -348,6 +348,34 @@ export interface ModelMetadata {
   supportedBackends: string[];
 }
 
+export interface GpuProviderStatus {
+  id: string;
+  state: string;
+  message: string;
+}
+
+export interface GpuAdapterInfo {
+  index: number;
+  name: string;
+  vendorId: number;
+  deviceId: number;
+  dedicatedVramBytes: number;
+  sharedSystemMemoryBytes: number;
+  isSoftware: boolean;
+  isDiscreteCandidate: boolean;
+}
+
+export interface GpuCapabilities {
+  status: string;
+  message: string;
+  adapters: GpuAdapterInfo[];
+  selectedAdapterIndex: number | null;
+  dedicatedGpuAvailable: boolean;
+  directml: GpuProviderStatus;
+  /** Conservative DirectML batch ceiling derived from the selected adapter's dedicated VRAM. */
+  recommendedAnalysisBatchSize: number;
+}
+
 export interface SemanticRuntimeStatus {
   status: string;
   message: string;
@@ -510,6 +538,13 @@ export interface CollectionSummary {
   collectionKind: "manual" | "system_favorites";
   systemKey: string | null;
   displayOrder: number;
+}
+
+export type CollectionDeleteMode = "deleteSubtree" | "promoteChildren";
+
+export interface CollectionMembershipMutation {
+  affectedAssetCount: number;
+  skippedAssetCount: number;
 }
 
 export type BrowseNode =
