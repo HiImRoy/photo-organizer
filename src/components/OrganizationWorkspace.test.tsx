@@ -1,6 +1,7 @@
-import { render, screen, within } from "@testing-library/react";
+import { StrictMode, type ComponentProps } from "react";
+import { act, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { OrganizationWorkspace } from "./OrganizationWorkspace";
 import { emptyAssetFilter, type LibrarySummary, type OrganizationPlan } from "../types";
@@ -101,7 +102,52 @@ const plan: OrganizationPlan = {
   },
 };
 
+type WorkspaceProps = ComponentProps<typeof OrganizationWorkspace>;
+
+const workspaceProps: WorkspaceProps = {
+  library,
+  selectedAssetIds: [22],
+  filteredCount: 1,
+  scopeInput: { kind: "selection", query: testQuery, assetIds: [22] },
+  scopeDescription: {
+    kind: "selection",
+    label: "已选择 1 张",
+    count: 1,
+    isExplicitSelection: true,
+  },
+  onClose: vi.fn(),
+};
+
+function renderWorkspace(overrides: Partial<WorkspaceProps> = {}) {
+  return render(<OrganizationWorkspace {...workspaceProps} {...overrides} />);
+}
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((nextResolve) => {
+    resolve = nextResolve;
+  });
+  return { promise, resolve };
+}
+
+const planTwo: OrganizationPlan = {
+  ...plan,
+  summary: {
+    ...plan.summary,
+    planId: "plan-2",
+    targetRoot: "D:\\第二次整理预览",
+  },
+  tree: {
+    ...plan.tree,
+    name: "第二次整理预览",
+  },
+};
+
 describe("OrganizationWorkspace", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
   it("explains directory dimensions and limits modification-time fallback to date levels", async () => {
     const user = userEvent.setup();
     render(
@@ -177,5 +223,214 @@ describe("OrganizationWorkspace", () => {
     await user.click(screen.getByRole("button", { name: "导出 JSON" }));
     expect(api.exportOrganizationManifest).toHaveBeenCalledWith(plan, "json");
     expect(screen.getByText("只读预览 · 不会修改源文件")).toBeInTheDocument();
+  });
+
+  it("re-arms the mounted guard after StrictMode effect replay", async () => {
+    const user = userEvent.setup();
+    api.previewOrganizationPlan.mockResolvedValue(plan);
+    render(
+      <StrictMode>
+        <OrganizationWorkspace {...workspaceProps} />
+      </StrictMode>,
+    );
+
+    await user.type(screen.getByLabelText("目标根目录"), "D:\\严格模式");
+    await user.click(screen.getByRole("button", { name: "生成整理预览" }));
+
+    expect(await screen.findByText("晚霞😀.jpg")).toBeInTheDocument();
+  });
+
+  it("hides an invalidated plan for every organization input change", async () => {
+    const user = userEvent.setup();
+    api.previewOrganizationPlan.mockResolvedValue(plan);
+    const view = renderWorkspace();
+    const target = screen.getByLabelText("目标根目录");
+
+    await user.type(target, "D:\\起始目标");
+    await user.click(screen.getByRole("button", { name: "生成整理预览" }));
+    expect(await screen.findByText("晚霞😀.jpg")).toBeInTheDocument();
+
+    const expectPlanInvalidated = () => {
+      expect(screen.getByText("尚未生成")).toBeInTheDocument();
+      expect(screen.queryByRole("button", { name: "导出 JSON" })).not.toBeInTheDocument();
+    };
+    const regenerate = async () => {
+      await user.click(screen.getByRole("button", { name: "生成整理预览" }));
+      expect(await screen.findByText("晚霞😀.jpg")).toBeInTheDocument();
+    };
+
+    await user.clear(target);
+    await user.type(target, "D:\\新目标");
+    expectPlanInvalidated();
+    await regenerate();
+
+    await user.selectOptions(screen.getByRole("combobox", { name: "第 1 层目录维度" }), "month");
+    expectPlanInvalidated();
+    await regenerate();
+
+    view.rerender(
+      <OrganizationWorkspace
+        {...workspaceProps}
+        selectedAssetIds={[23]}
+        scopeInput={{ kind: "selection", query: testQuery, assetIds: [23] }}
+      />,
+    );
+    expectPlanInvalidated();
+    await regenerate();
+
+    const filteredQuery = {
+      ...testQuery,
+      filter: { ...emptyAssetFilter, search: "海边" },
+    };
+    view.rerender(
+      <OrganizationWorkspace
+        {...workspaceProps}
+        selectedAssetIds={[23]}
+        scopeInput={{ kind: "selection", query: filteredQuery, assetIds: [23] }}
+      />,
+    );
+    expectPlanInvalidated();
+    await regenerate();
+
+    const secondLibrary: LibrarySummary = {
+      ...library,
+      id: 5,
+      rootPath: "D:\\fixtures\\另一个图库",
+      name: "另一个图库",
+      sourcePath: "D:\\fixtures\\另一个图库",
+      sourceIdentityKey: "d:/fixtures/另一个图库",
+    };
+    const secondLibraryQuery = { ...filteredQuery, libraryId: secondLibrary.id };
+    view.rerender(
+      <OrganizationWorkspace
+        {...workspaceProps}
+        library={secondLibrary}
+        selectedAssetIds={[23]}
+        scopeInput={{ kind: "selection", query: secondLibraryQuery, assetIds: [23] }}
+      />,
+    );
+    expectPlanInvalidated();
+    await regenerate();
+  });
+
+  it("ignores out-of-order previews and an older finally cannot clear newer busy", async () => {
+    const user = userEvent.setup();
+    const first = deferred<OrganizationPlan>();
+    const second = deferred<OrganizationPlan>();
+    api.previewOrganizationPlan
+      .mockReturnValueOnce(first.promise)
+      .mockReturnValueOnce(second.promise);
+    renderWorkspace();
+    const target = screen.getByLabelText("目标根目录");
+
+    await user.type(target, "D:\\第一次");
+    await user.click(screen.getByRole("button", { name: "生成整理预览" }));
+    await waitFor(() => expect(api.previewOrganizationPlan).toHaveBeenCalledTimes(1));
+
+    await user.clear(target);
+    await user.type(target, "D:\\第二次");
+    expect(screen.getByText("尚未生成")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "导出 JSON" })).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "生成整理预览" }));
+    await waitFor(() => expect(api.previewOrganizationPlan).toHaveBeenCalledTimes(2));
+
+    await act(async () => {
+      first.resolve(plan);
+      await Promise.resolve();
+    });
+    expect(screen.getByRole("button", { name: "正在生成…" })).toBeInTheDocument();
+    expect(screen.queryByText("晚霞😀.jpg")).not.toBeInTheDocument();
+
+    await act(async () => {
+      second.resolve(planTwo);
+      await Promise.resolve();
+    });
+    expect(await screen.findByText("晚霞😀.jpg")).toBeInTheDocument();
+    expect(screen.getByText("第二次整理预览")).toBeInTheDocument();
+  });
+
+  it("does not revive a previous plan when inputs change from A to B and back to A", async () => {
+    const user = userEvent.setup();
+    api.previewOrganizationPlan.mockResolvedValue(plan);
+    renderWorkspace();
+    const target = screen.getByLabelText("目标根目录");
+
+    await user.type(target, "D:\\A");
+    await user.click(screen.getByRole("button", { name: "生成整理预览" }));
+    expect(await screen.findByText("晚霞😀.jpg")).toBeInTheDocument();
+
+    await user.clear(target);
+    await user.type(target, "D:\\B");
+    expect(screen.getByText("尚未生成")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "导出 JSON" })).not.toBeInTheDocument();
+
+    await user.clear(target);
+    await user.type(target, "D:\\A");
+    expect(screen.getByText("尚未生成")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "导出 JSON" })).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "生成整理预览" }));
+
+    expect(await screen.findByText("晚霞😀.jpg")).toBeInTheDocument();
+    expect(api.previewOrganizationPlan).toHaveBeenCalledTimes(2);
+    expect(api.previewOrganizationPlan).toHaveBeenLastCalledWith(
+      expect.objectContaining({ targetRoot: "D:\\A" }),
+    );
+  });
+
+  it("ignores an export response after the plan inputs become stale", async () => {
+    const user = userEvent.setup();
+    const pendingExport = deferred<string>();
+    api.previewOrganizationPlan.mockResolvedValue(plan);
+    api.exportOrganizationManifest.mockReturnValue(pendingExport.promise);
+    renderWorkspace();
+    const target = screen.getByLabelText("目标根目录");
+
+    await user.type(target, "D:\\导出基准");
+    await user.click(screen.getByRole("button", { name: "生成整理预览" }));
+    expect(await screen.findByText("晚霞😀.jpg")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "导出 JSON" }));
+    expect(api.exportOrganizationManifest).toHaveBeenCalledWith(plan, "json");
+
+    await user.clear(target);
+    await user.type(target, "D:\\导出后变更");
+    expect(screen.queryByRole("button", { name: "导出 JSON" })).not.toBeInTheDocument();
+
+    await act(async () => {
+      pendingExport.resolve("D:\\过期.json");
+      await Promise.resolve();
+    });
+    expect(screen.queryByText(/已导出/)).not.toBeInTheDocument();
+  });
+
+  it("ignores preview and export completions after unmount", async () => {
+    const user = userEvent.setup();
+    const pendingPreview = deferred<OrganizationPlan>();
+    api.previewOrganizationPlan.mockReturnValueOnce(pendingPreview.promise);
+    const previewView = renderWorkspace();
+    const previewTarget = screen.getByLabelText("目标根目录");
+
+    await user.type(previewTarget, "D:\\卸载预览");
+    await user.click(screen.getByRole("button", { name: "生成整理预览" }));
+    await waitFor(() => expect(api.previewOrganizationPlan).toHaveBeenCalledTimes(1));
+    previewView.unmount();
+    await act(async () => {
+      pendingPreview.resolve(plan);
+      await Promise.resolve();
+    });
+
+    const pendingExport = deferred<string>();
+    api.previewOrganizationPlan.mockResolvedValueOnce(plan);
+    api.exportOrganizationManifest.mockReturnValueOnce(pendingExport.promise);
+    const exportView = renderWorkspace();
+    const exportTarget = screen.getByLabelText("目标根目录");
+    await user.type(exportTarget, "D:\\卸载导出");
+    await user.click(screen.getByRole("button", { name: "生成整理预览" }));
+    expect(await screen.findByText("晚霞😀.jpg")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "导出 JSON" }));
+    exportView.unmount();
+    await act(async () => {
+      pendingExport.resolve("D:\\卸载.json");
+      await Promise.resolve();
+    });
   });
 });

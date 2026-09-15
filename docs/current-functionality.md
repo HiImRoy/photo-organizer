@@ -116,7 +116,7 @@ http://localhost:1420/?visual-fixture=error
 - 设置页采用左侧栏目导航、右侧单页内容的工作区布局，按“显示”“处理”“快捷键”分开浏览；
 - 显示：深色/白天主题、启动默认预览模式、启动默认每行图片数；
 - 导入并行数：1–2 个缩略图处理 worker，默认 2；
-- 分析批大小：可配置 1–32 张缩略图，默认 4；CPU 有效上限为 8，DirectML ready 时按专用显存分级，最高 32，运行时失败会在同一后端递归降批；分析任务仍保持单任务 worker；
+- 分析批大小：可配置 1–32 张缩略图，默认 4；CPU 有效上限为 8，DirectML ready 时按专用显存分级，最高 32，运行时失败会在同一后端递归降批，必要时继续拆到逐图恢复；坏缩略图只记录对应图片的输入错误，不触发后端切换；分析任务仍保持单任务 worker；
 - GPU 加速开关：只有 DirectML Provider 完成初始化和自检后才可操作；失败时保持 CPU 可用并显示回退原因。
 - 快捷键按浏览、星级和色标分组；可输入单字符并立即保存，默认 `G` 多图预览、`F` 单图预览。
 
@@ -132,7 +132,7 @@ http://localhost:1420/?visual-fixture=error
 - 分析时间、来源 fingerprint；
 - 一级分类/辅助标签标记；主体标签没有一级分类属性。
 
-当前对用户开放的摄影题材为：人像、风光、街拍、建筑、静物特写、动物、植物、交通工具、抽象艺术；没有达到阈值或候选间隔不足的结果归入“抽象艺术”，不再单独显示“未知”。它们用于一级分组，单张图片只选择一个可靠主类别。旅行、商业项目等拍摄意图不从单张图片强行推断。Places365 结果作为环境/场景证据，不直接覆盖题材。主体标签为：单人、多人、动物、植物、食物、风景；主体标签允许与题材并存，其中单人和多人互斥。历史记录中的旧细分标签会在读取时归并到当前标签，但不再作为新的选择项或自动结果。
+当前对用户开放的摄影题材为：人像、风光、街拍、建筑、静物特写、动物、植物、交通工具、抽象艺术；没有达到阈值或候选间隔不足的结果保持无 primary/未分类，不自动归入“抽象艺术”；只有模型明确输出 `photo_abstract` 时才归入“抽象艺术”，不再单独显示“未知”。它们用于一级分组，单张图片只选择一个可靠主类别。旅行、商业项目等拍摄意图不从单张图片强行推断。Places365 结果作为环境/场景证据，不直接覆盖题材。主体标签为：单人、多人、动物、植物、食物、风景；主体标签允许与题材并存，其中单人和多人互斥。历史记录中的旧细分标签会在读取时归并到当前标签，但不再作为新的选择项或自动结果。
 
 摄影题材用于主分组和筛选；主体标签与手动标签一起作为辅助筛选。主体标签本身不写入主类别，但经过明确映射的主体证据可以帮助题材层识别人像、动物、静物特写和植物；“风景”只由高置信“风光”结果派生，不会因此改写环境证据。
 
@@ -308,6 +308,8 @@ http://localhost:1420/?visual-fixture=error
 
 语义任务使用单 worker，按同一份缩略图先后执行题材候选、环境与主体推理；单项失败后继续后续资产，某个模型失败不会伪造另一个模型的结果。应用重启时已完成结果保留，运行中的项目可恢复排队；暂停、取消、重跑和按当前模型/分析/分类法版本增量跳过都作用于各层结果。
 
+同一语义 job 的控制请求、worker 批次进度和最终 finish 使用同一顺序化 guard；终态单调，终态后的 pause/resume/cancel 不会重新打开任务。暂停、取消和 completed 的持久化与进度发布保持同一 job 顺序；持久化失败会发布 failed/error 终态并记录日志。
+
 ### 5.6 右侧“图片详情”面板
 
 | 控件           | 条件                                   | 行为                                                                         |
@@ -388,6 +390,13 @@ http://localhost:1420/?visual-fixture=error
 - 错误消息使用 `role="alert"`，任务状态使用可读文本。
 - 面板、搜索框、排序、筛选、图片网格和胶片栏提供语义化 aria-label。
 
+### 6.1 全局快捷键的上下文规则
+
+- 全局 keydown 先尊重 event.defaultPrevented 和输入法合成状态；文本输入、可编辑元素、交互控件和打开的弹窗不会被图库全局导航快捷键抢占。
+- Enter、ArrowLeft 和 ArrowRight 只有在图库相应上下文中生效；搜索框内 Enter 保持搜索输入行为，单图预览中的搜索框不会切换图片。
+- 评级与色标快捷键只接受无 Ctrl、Meta、Alt 修饰的裸按键；原有 Ctrl/Meta+, 设置快捷键保持不变。正常点击取得焦点的图片卡片仍保留数字评级和视图快捷键。
+- Escape 只关闭当前顶层弹层；filter 弹层会消费 Escape，不再继续清除选择或退出预览。SettingsDialog 打开时设置初始焦点、圈定 Tab/Shift+Tab，并在关闭后恢复触发器焦点。
+
 ## 7. 当前安全边界与未开放功能
 
 ### 已实现的安全措施
@@ -412,6 +421,12 @@ http://localhost:1420/?visual-fixture=error
 文件复制、操作日志、撤销和恢复的数据表边界已经预留，但前端没有执行命令，不能把整理预览当成实际整理完成。
 
 ## 8. 开发预览与验证
+
+### 8.1 2026-09-14 交互与后台任务验收记录
+
+- 键盘/后台任务前端阶段验证：App 与 BackgroundTaskStatus 合并阶段 69 项 tests、typecheck 和 lint 通过；最终全量 110 项见下。Playwright 浏览器四项原问题及 filter Escape 传播复验通过。证据见 output/playwright/interaction-audit/interaction-audit-report.md。
+- 第二组语义任务修复：Rust 全量 131 passed、0 failed，计数为 127 + 0 + 0 + 1 + 3 + 0；cargo check 和 cargo fmt -- --check 通过。控制、worker 批次尾和终态按同 job 顺序化，终态 late control 与 registry 缺失取消均有确定性单测。
+- 第三组 Organization 与 stale fetch：request snapshot 已覆盖 libraryId、targetRoot、scope、filter、selectedAssetIds、rules；即时失效、A-B-A 不复活、StrictMode/卸载 guard、preview/export 版本目标回归 8/8 通过，semantic revision regression 1/1 通过。前端全量 npm test 为 14 files、110 tests 全部通过，typecheck、lint、build、App/Organization 四文件 prettier --check、全仓 git diff --check 均通过；scripts/manual-build-start.ps1 -CheckOnly exit 0。Node 22.12.0 低于建议 22.13 版本并给出 warning，但 build 成功。
 
 启动浏览器预览：
 

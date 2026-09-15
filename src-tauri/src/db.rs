@@ -106,6 +106,10 @@ pub struct LibraryRemovalResult {
     pub removed_cache_entries: Vec<(i64, String, Option<PathBuf>)>,
 }
 
+pub(crate) fn is_terminal_semantic_job_status(status: &str) -> bool {
+    matches!(status, "completed" | "cancelled" | "failed")
+}
+
 struct FullAssetPage {
     items: Vec<AssetListItem>,
     total: i64,
@@ -309,6 +313,11 @@ impl Repository {
         connection.pragma_update(None, "journal_mode", "WAL")?;
         connection.pragma_update(None, "synchronous", "NORMAL")?;
         Ok(connection)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn open_for_tests(&self) -> AppResult<Connection> {
+        self.open()
     }
 
     pub fn recover_interrupted_jobs(&self) -> AppResult<()> {
@@ -2338,12 +2347,19 @@ impl Repository {
     }
 
     pub fn set_semantic_job_status(&self, job_id: &str, status: &str) -> AppResult<()> {
+        let _ = self.set_semantic_job_status_if_active(job_id, status)?;
+        Ok(())
+    }
+
+    pub fn set_semantic_job_status_if_active(&self, job_id: &str, status: &str) -> AppResult<bool> {
         let connection = self.open()?;
-        connection.execute(
-            "UPDATE analysis_jobs SET status=?2, updated_at=?3 WHERE id=?1",
+        let changed = connection.execute(
+            "UPDATE analysis_jobs SET status=?2, updated_at=?3
+             WHERE id=?1 AND job_type='semantic_classification'
+               AND status NOT IN ('completed', 'cancelled', 'failed')",
             params![job_id, status, now()],
         )?;
-        Ok(())
+        Ok(changed > 0)
     }
 
     pub fn mark_semantic_item_running(&self, job_id: &str, asset_id: i64) -> AppResult<()> {
@@ -2700,25 +2716,35 @@ impl Repository {
     }
 
     pub fn update_semantic_job_progress(&self, progress: &SemanticProgress) -> AppResult<()> {
+        let _ = self.update_semantic_job_progress_if_active(progress)?;
+        Ok(())
+    }
+
+    pub fn update_semantic_job_progress_if_active(
+        &self,
+        progress: &SemanticProgress,
+    ) -> AppResult<bool> {
         let connection = self.open()?;
-        connection.execute(
+        let changed = connection.execute(
             "UPDATE analysis_jobs SET status=?2, progress_current=?3, progress_total=?4,
                 completed_count=?5, failed_count=?6, skipped_count=?7,
-                execution_backend=?8, error_message=?9, updated_at=?10 WHERE id=?1",
+                execution_backend=?8, error_message=?9, updated_at=?10
+             WHERE id=?1 AND job_type='semantic_classification'
+               AND (status NOT IN ('completed', 'cancelled', 'failed') OR status=?2)",
             params![
-                progress.job_id,
-                progress.status,
+                &progress.job_id,
+                &progress.status,
                 as_i64(progress.processed),
                 as_i64(progress.total),
                 as_i64(progress.completed),
                 as_i64(progress.failed),
                 as_i64(progress.skipped),
-                progress.execution_backend,
-                progress.error,
+                &progress.execution_backend,
+                &progress.error,
                 now(),
             ],
         )?;
-        Ok(())
+        Ok(changed > 0)
     }
 
     pub fn latest_semantic_progress(&self, library_id: i64) -> AppResult<Option<SemanticProgress>> {
@@ -2823,8 +2849,29 @@ impl Repository {
     }
 
     pub fn cancel_semantic_job(&self, job_id: &str) -> AppResult<()> {
+        let _ = self.cancel_semantic_job_if_active(job_id)?;
+        Ok(())
+    }
+
+    pub fn cancel_semantic_job_if_active(&self, job_id: &str) -> AppResult<bool> {
         let mut connection = self.open()?;
         let transaction = connection.transaction()?;
+        let status: Option<String> = transaction
+            .query_row(
+                "SELECT status FROM analysis_jobs
+                 WHERE id=?1 AND job_type='semantic_classification'",
+                [job_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let Some(status) = status else {
+            transaction.commit()?;
+            return Ok(false);
+        };
+        if is_terminal_semantic_job_status(&status) {
+            transaction.commit()?;
+            return Ok(false);
+        }
         let timestamp = now();
         transaction.execute(
             "UPDATE assets SET semantic_status='not_analyzed', semantic_error=NULL
@@ -2840,12 +2887,14 @@ impl Repository {
              WHERE job_id=?1 AND status IN('queued', 'running')",
             params![job_id, timestamp],
         )?;
-        transaction.execute(
-            "UPDATE analysis_jobs SET status='cancelled', updated_at=?2 WHERE id=?1",
+        let changed = transaction.execute(
+            "UPDATE analysis_jobs SET status='cancelled', updated_at=?2 WHERE id=?1
+             AND job_type='semantic_classification'
+             AND status NOT IN ('completed', 'cancelled', 'failed')",
             params![job_id, timestamp],
         )?;
         transaction.commit()?;
-        Ok(())
+        Ok(changed > 0)
     }
 
     pub fn get_asset_detail(&self, asset_id: i64) -> AppResult<AssetDetail> {
@@ -3340,24 +3389,13 @@ fn asset_filter_sql(query: &AssetQuery) -> (String, Vec<Value>) {
         let expression = effective_scalar_expression(
             FIELD_PRIMARY_CATEGORY,
             &format!(
-                "CASE WHEN a.semantic_status='completed' AND NOT EXISTS(
-                         SELECT 1 FROM semantic_labels current_scene
-                         WHERE current_scene.asset_id=a.id
-                           AND current_scene.source_fingerprint=a.fingerprint
-                           AND current_scene.is_manual=0 AND current_scene.is_primary=1
-                           AND current_scene.model_name={model_name}
-                           AND current_scene.model_version={model_version}
-                           AND current_scene.analysis_version={analysis_version}
-                           AND current_scene.taxonomy_version={taxonomy_version}
-                       ) THEN 'photo_abstract'
-                       ELSE (SELECT sl.label FROM semantic_labels sl
-                             WHERE sl.asset_id=a.id AND sl.source_fingerprint=a.fingerprint
-                               AND sl.is_manual=0 AND sl.is_primary=1
-                               AND sl.model_name={model_name} AND sl.model_version={model_version}
-                               AND sl.analysis_version={analysis_version}
-                               AND sl.taxonomy_version={taxonomy_version}
-                             ORDER BY sl.similarity DESC, sl.label ASC LIMIT 1)
-                  END",
+                "(SELECT sl.label FROM semantic_labels sl
+                  WHERE sl.asset_id=a.id AND sl.source_fingerprint=a.fingerprint
+                    AND sl.is_manual=0 AND sl.is_primary=1
+                    AND sl.model_name={model_name} AND sl.model_version={model_version}
+                    AND sl.analysis_version={analysis_version}
+                    AND sl.taxonomy_version={taxonomy_version}
+                  ORDER BY sl.similarity DESC, sl.label ASC LIMIT 1)",
                 model_name = active_model_name,
                 model_version = active_model_version,
                 analysis_version = active_analysis_version,
@@ -3993,7 +4031,7 @@ fn resolve_effective_classification(
     semantic_labels: &[SemanticLabelResult],
     manual: ManualClassification,
 ) -> EffectiveClassification {
-    let mut auto = AutoClassification {
+    let auto = AutoClassification {
         primary_category: semantic_labels
             .iter()
             .find(|label| label.is_primary)
@@ -4007,15 +4045,6 @@ fn resolve_effective_classification(
         dominant_color_categories: dominant_color_categories_for_asset(asset),
         saturation_level: asset.saturation_label.clone(),
     };
-    if auto.primary_category.is_none()
-        && asset.semantic_status == "completed"
-        && asset.semantic_error.is_none()
-    {
-        // A rejected/low-confidence topic is intentionally not stored as a
-        // model label. It is still grouped under the photographer-facing
-        // abstract bucket so the UI never exposes a redundant "未知" class.
-        auto.primary_category = Some("photo_abstract".to_owned());
-    }
     resolve_classification(revision, auto, manual)
 }
 
@@ -5418,6 +5447,61 @@ mod tests {
     }
 
     #[test]
+    fn siglip2_v3_job_requeues_assets_with_only_v2_results() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let repository = Repository::new(temp.path().join("database.sqlite3"));
+        repository.initialize().expect("initialize");
+        let (library_id, asset_id) = seed_classifiable_asset(&repository, "siglip2-v3-requeue");
+        let legacy_analysis_version = "photo-organizer-semantic-topic-candidates-siglip2-v2";
+        let thumbnail_path = temp.path().join("asset-grid-640-v1.jpg");
+        std::fs::write(&thumbnail_path, b"thumbnail fixture").expect("write thumbnail fixture");
+
+        let connection = repository.open().expect("open database");
+        connection
+            .execute(
+                "UPDATE semantic_labels SET analysis_version=?1 WHERE asset_id=?2",
+                params![legacy_analysis_version, asset_id],
+            )
+            .expect("downgrade seeded result to v2");
+        connection
+            .execute(
+                "INSERT INTO thumbnails(
+                    asset_id, cache_path, spec, source_modified_at, source_size, status, updated_at
+                 ) SELECT ?1, ?2, ?3, modified_at, file_size, 'ready', ?4
+                 FROM assets WHERE id=?1",
+                params![
+                    asset_id,
+                    thumbnail_path.to_string_lossy().into_owned(),
+                    crate::imaging::THUMBNAIL_SPEC,
+                    now()
+                ],
+            )
+            .expect("insert current thumbnail");
+        drop(connection);
+
+        let candidates = repository
+            .create_semantic_job("siglip2-v3-requeue-job", library_id, false, None)
+            .expect("create v3 job");
+
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].id, asset_id);
+        assert_eq!(candidates[0].analysis_version, SIGLIP2_ANALYSIS_VERSION);
+        assert_eq!(candidates[0].model_name, SIGLIP2_MODEL_NAME);
+        assert_eq!(candidates[0].model_version, SIGLIP2_MODEL_VERSION);
+        assert_eq!(candidates[0].analysis_path, thumbnail_path);
+        let connection = repository.open().expect("reopen database");
+        let job_version: String = connection
+            .query_row(
+                "SELECT analysis_version FROM analysis_jobs
+                 WHERE id='siglip2-v3-requeue-job'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("read v3 job version");
+        assert_eq!(job_version, SIGLIP2_ANALYSIS_VERSION);
+    }
+
+    #[test]
     fn subject_labels_are_non_primary_and_filterable() {
         let temp = tempfile::tempdir().expect("temp dir");
         let repository = Repository::new(temp.path().join("database.sqlite3"));
@@ -6464,7 +6548,7 @@ mod tests {
     }
 
     #[test]
-    fn completed_without_current_scene_is_virtual_abstract_and_filterable() {
+    fn completed_without_current_scene_stays_unclassified_and_is_not_filterable() {
         let temp = tempfile::tempdir().expect("temp dir");
         let repository = Repository::new(temp.path().join("database.sqlite3"));
         repository.initialize().expect("initialize");
@@ -6498,11 +6582,11 @@ mod tests {
             .expect("seed stale taxonomy label");
         let detail = repository
             .get_asset_detail(asset_id)
-            .expect("load virtual abstract detail");
+            .expect("load unclassified detail");
         assert!(detail.asset.semantic_labels.is_empty());
         assert_eq!(
             detail.asset.classification.primary_category.auto.as_deref(),
-            Some("photo_abstract")
+            None
         );
         assert_eq!(
             detail
@@ -6511,7 +6595,7 @@ mod tests {
                 .primary_category
                 .effective
                 .as_deref(),
-            Some("photo_abstract")
+            None
         );
 
         let abstract_filter = repository
@@ -6526,16 +6610,65 @@ mod tests {
                     ..AssetFilter::default()
                 },
             )
-            .expect("filter virtual abstract");
-        assert_eq!(abstract_filter.total, 1);
+            .expect("filter unclassified asset");
+        assert_eq!(abstract_filter.total, 0);
         let groups = repository
             .list_semantic_groups(library_id)
-            .expect("list virtual abstract group");
-        assert!(groups.iter().any(|group| {
-            group.label_id == "photo_abstract"
-                && group.category_group == "scene"
-                && group.asset_count == 1
-        }));
+            .expect("list semantic groups");
+        assert!(
+            !groups
+                .iter()
+                .any(|group| group.label_id == "photo_abstract")
+        );
+    }
+
+    #[test]
+    fn real_photo_abstract_model_prediction_remains_primary_and_filterable() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let repository = Repository::new(temp.path().join("database.sqlite3"));
+        repository.initialize().expect("initialize");
+        let (library_id, asset_id) = seed_classifiable_asset(&repository, "real-abstract");
+        let connection = repository.open().expect("open database");
+        connection
+            .execute(
+                "UPDATE semantic_labels
+                 SET label='photo_abstract', display_name='抽象艺术'
+                 WHERE asset_id=?1 AND is_primary=1",
+                [asset_id],
+            )
+            .expect("seed real abstract prediction");
+        drop(connection);
+
+        let detail = repository
+            .get_asset_detail(asset_id)
+            .expect("load real abstract detail");
+        assert_eq!(
+            detail.asset.classification.primary_category.auto.as_deref(),
+            Some("photo_abstract")
+        );
+        assert_eq!(
+            detail
+                .asset
+                .classification
+                .primary_category
+                .effective
+                .as_deref(),
+            Some("photo_abstract")
+        );
+        let filtered = repository
+            .list_assets(
+                library_id,
+                AssetSortField::FileName,
+                SortDirection::Asc,
+                1,
+                100,
+                &AssetFilter {
+                    primary_categories: vec!["photo_abstract".into()],
+                    ..AssetFilter::default()
+                },
+            )
+            .expect("filter real abstract prediction");
+        assert_eq!(filtered.total, 1);
     }
 
     #[test]

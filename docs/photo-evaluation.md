@@ -22,11 +22,11 @@ evaluation-data/
    └─ interior-001.jpg
 ```
 
-支持的扩展名为 JPEG、PNG 和 WebP；可在标签目录内继续建立来源或场景子目录。顶层标签必须来自当前 semantic catalog，或使用评测专用的 `unknown` 拒识标签；未知目录名会让评估失败，而不是静默跳过。根目录中的散落文件不会参与评估。阈值校准只针对 `scene` 题材标签，环境/主体标签可以作为困难样本的辅助标注，但不会被错误当作题材模型输出。
+支持的扩展名为 JPEG、PNG 和 WebP；可在标签目录内继续建立来源或场景子目录。顶层标签必须来自当前 semantic catalog，或使用评测专用的 `unknown` 拒识标签；未知目录名会让评估失败，而不是静默跳过。根目录中的散落文件不会参与评估。阈值校准只针对 `scene` 题材标签，环境/主体标签可以作为困难样本的辅助标注，但不会被错误当作题材模型输出。运行时没有达到阈值时保持无 primary；评测工具仅在报告中把空预测映射为 `unknown`，不等同于运行时自动生成 `photo_abstract`。
 
 ## 运行
 
-正式质量评估使用 release 优化和真实本地语义运行时 CPU 后端；默认评估 SigLIP 2 题材候选。报告应明确区分 Places365 场景题材、当前题材模型候选证据和主体融合结果：
+正式质量评估使用 release 优化和真实本地语义运行时 CPU 后端；默认评估 SigLIP 2 题材候选。报告应明确区分 SigLIP 2 产生的摄影题材主预测、Places365 提供的环境/场景上下文与 raw leaf evidence，以及主体融合结果：
 
 ```powershell
 cargo run --release --manifest-path src-tauri/Cargo.toml --no-default-features --bin semantic-evaluate -- --data evaluation-data --output benchmark-output/photo-evaluation.json --model siglip2-base --batch-size 4 --calibrate --backend cpu
@@ -43,7 +43,7 @@ JSON 报告包含：
 - 每类标注图片数、预测数、true positive 数、precision 和 recall；
 - Top-1 与 Top-3：按当前题材 taxonomy 的原始候选相似度排序，任一真实题材标签命中即计为成功；
 - 多标签 micro/macro precision 和 recall：使用达到当前阈值的标签集合，`unknown` 不参与多标签分母；
-- `unknown` 比例：最终阈值结果回退为 unknown 的图片比例；
+- `unknown` 比例：评测工具将运行时无 primary 的空预测映射为评测专用 `unknown` 后的图片比例；它不表示运行时生成了 `photo_abstract`；
 - 类别混淆：每个真实标签到原始相似度 Top-1 的计数；
 - 每张图片的真实标签、阈值后标签、完整原始相似度、延迟和错误；主体标签需单独统计，不和题材主类混为一组；
 - 模型加载时间、推理总耗时、端到端耗时；

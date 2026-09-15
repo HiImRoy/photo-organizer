@@ -30,7 +30,9 @@ use crate::semantic::{
 };
 use crate::semantic_tasks::{SEMANTIC_BATCH_SIZE, spawn_semantic_job};
 use crate::subject::{SubjectClassifier, SubjectModel, SubjectRuntimeStatus};
-use crate::tasks::{SemanticTaskRegistry, SourceScanGuard, SourceScanRegistry, TaskRegistry};
+use crate::tasks::{
+    SemanticControlSignal, SemanticTaskRegistry, SourceScanGuard, SourceScanRegistry, TaskRegistry,
+};
 use crate::workflow;
 use crate::workflow::{
     BrowseNode, CollectionDeleteMode, CollectionDetail, CollectionMembershipMutation,
@@ -648,8 +650,7 @@ pub fn remove_library(library_id: i64, state: State<'_, AppState>) -> Result<boo
             state.tasks.cancel(&job_id);
             let _ = state.repository.cancel_scan(&job_id, library_id);
         } else {
-            state.semantic_tasks.cancel(&job_id);
-            let _ = state.repository.cancel_semantic_job(&job_id);
+            let _ = request_semantic_cancel(&state.repository, &state.semantic_tasks, &job_id);
         }
     }
     let result = state
@@ -977,13 +978,26 @@ pub fn pause_semantic_analysis(
     job_id: String,
     state: State<'_, AppState>,
 ) -> Result<SemanticTaskResponse, String> {
-    let accepted = state.semantic_tasks.pause(&job_id);
-    if accepted {
-        state
-            .repository
-            .set_semantic_job_status(&job_id, "paused")
-            .map_err(ipc_error)?;
-    }
+    let accepted = if let Some(control) = state.semantic_tasks.control(&job_id) {
+        control
+            .with_job_lock(|job| -> AppResult<bool> {
+                if job.is_terminal()
+                    || matches!(control.current_signal(), SemanticControlSignal::Cancel)
+                {
+                    return Ok(false);
+                }
+                if !state
+                    .repository
+                    .set_semantic_job_status_if_active(&job_id, "paused")?
+                {
+                    return Ok(false);
+                }
+                Ok(control.pause_locked())
+            })
+            .map_err(ipc_error)?
+    } else {
+        false
+    };
     Ok(SemanticTaskResponse { job_id, accepted })
 }
 
@@ -993,14 +1007,32 @@ pub fn resume_semantic_analysis(
     app: tauri::AppHandle,
     state: State<'_, AppState>,
 ) -> Result<SemanticTaskResponse, String> {
-    if state.semantic_tasks.resume(&job_id) {
-        state
-            .repository
-            .set_semantic_job_status(&job_id, "running")
+    if let Some(control) = state.semantic_tasks.control(&job_id) {
+        let accepted = control
+            .with_job_lock(|job| -> AppResult<bool> {
+                if job.is_terminal()
+                    || matches!(control.current_signal(), SemanticControlSignal::Cancel)
+                {
+                    return Ok(false);
+                }
+                if !state
+                    .repository
+                    .set_semantic_job_status_if_active(&job_id, "running")?
+                {
+                    return Ok(false);
+                }
+                Ok(control.resume_locked())
+            })
             .map_err(ipc_error)?;
+        if accepted {
+            return Ok(SemanticTaskResponse {
+                job_id,
+                accepted: true,
+            });
+        }
         return Ok(SemanticTaskResponse {
             job_id,
-            accepted: true,
+            accepted: false,
         });
     }
     let progress = state
@@ -1045,27 +1077,29 @@ pub fn cancel_semantic_analysis(
     job_id: String,
     state: State<'_, AppState>,
 ) -> Result<SemanticTaskResponse, String> {
-    let accepted = if state.semantic_tasks.cancel(&job_id) {
-        state
-            .repository
-            .set_semantic_job_status(&job_id, "cancelling")
-            .map_err(ipc_error)?;
-        true
-    } else if state
-        .repository
-        .semantic_progress_by_job(&job_id)
-        .map_err(ipc_error)?
-        .is_some()
-    {
-        state
-            .repository
-            .cancel_semantic_job(&job_id)
-            .map_err(ipc_error)?;
-        true
-    } else {
-        false
-    };
+    let accepted = request_semantic_cancel(&state.repository, &state.semantic_tasks, &job_id)
+        .map_err(ipc_error)?;
     Ok(SemanticTaskResponse { job_id, accepted })
+}
+
+fn request_semantic_cancel(
+    repository: &Repository,
+    registry: &SemanticTaskRegistry,
+    job_id: &str,
+) -> AppResult<bool> {
+    let Some(control) = registry.control(job_id) else {
+        return repository.cancel_semantic_job_if_active(job_id);
+    };
+
+    control.with_job_lock(|job| {
+        if job.is_terminal() {
+            return Ok(false);
+        }
+        if !repository.set_semantic_job_status_if_active(job_id, "cancelling")? {
+            return Ok(false);
+        }
+        Ok(control.cancel_locked())
+    })
 }
 
 #[tauri::command]
@@ -1682,4 +1716,44 @@ fn canonical_or_absolute(path: &Path) -> AppResult<PathBuf> {
 
 fn ipc_error(error: impl std::fmt::Display) -> String {
     error.to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rusqlite::params;
+
+    #[test]
+    fn persisted_terminal_semantic_job_rejects_registry_absent_cancel() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let repository = Repository::new(temp.path().join("database.sqlite3"));
+        repository.initialize().expect("initialize");
+        repository
+            .open_for_tests()
+            .expect("open database")
+            .execute(
+                "INSERT INTO analysis_jobs(
+                    id, job_type, status, progress_current, progress_total, created_at, updated_at
+                 ) VALUES(?1, 'semantic_classification', 'completed', 1, 1, ?2, ?2)",
+                params!["persisted-terminal", "2026-09-14T00:00:00Z"],
+            )
+            .expect("insert terminal semantic job");
+
+        let registry = SemanticTaskRegistry::default();
+        assert!(
+            !request_semantic_cancel(&repository, &registry, "persisted-terminal")
+                .expect("cancel terminal semantic job")
+        );
+
+        let status: String = repository
+            .open_for_tests()
+            .expect("reopen database")
+            .query_row(
+                "SELECT status FROM analysis_jobs WHERE id=?1",
+                ["persisted-terminal"],
+                |row| row.get(0),
+            )
+            .expect("read terminal semantic status");
+        assert_eq!(status, "completed");
+    }
 }

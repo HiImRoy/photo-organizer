@@ -14,6 +14,7 @@ interface BackgroundTaskStatusProps {
   onDismissScan: () => void;
   onPauseResumeSemantic: () => void;
   onCancelSemantic: () => void;
+  semanticControlBusy?: boolean;
   scanTaskName?: string | null;
   semanticTaskName?: string | null;
 }
@@ -45,6 +46,7 @@ function executionBackendLabel(backend: string | null): string {
 }
 function semanticLabel(progress: SemanticProgress): string {
   if (progress.status === "paused") return "分析已暂停";
+  if (progress.status === "interrupted") return "分析已中断";
   if (progress.status === "cancelling") return "正在停止分析";
   if (progress.status === "completed") return "分析完成";
   if (progress.status === "failed") return "分析失败";
@@ -79,14 +81,16 @@ function SemanticTaskDetails({
   taskName,
   onPauseResume,
   onCancel,
+  controlBusy,
 }: {
   progress: SemanticProgress;
   taskName: string;
   onPauseResume: () => void;
   onCancel: () => void;
+  controlBusy: boolean;
 }) {
   const percent = semanticProgressRatio(progress);
-  const paused = progress.status === "paused";
+  const resumable = progress.status === "paused" || progress.status === "interrupted";
   const backendLabel = executionBackendLabel(progress.executionBackend);
 
   return (
@@ -108,11 +112,19 @@ function SemanticTaskDetails({
         <i style={{ width: `${percent}%` }} />
       </div>
       <div className="task-detail-actions">
-        <button type="button" onClick={onPauseResume} disabled={progress.status === "cancelling"}>
-          {paused ? <PlayIcon width="13" height="13" /> : <PauseIcon width="13" height="13" />}
-          {paused ? "继续" : "暂停"}
+        <button
+          type="button"
+          onClick={onPauseResume}
+          disabled={controlBusy || progress.status === "cancelling"}
+        >
+          {resumable ? <PlayIcon width="13" height="13" /> : <PauseIcon width="13" height="13" />}
+          {resumable ? "继续" : "暂停"}
         </button>
-        <button type="button" onClick={onCancel} disabled={progress.status === "cancelling"}>
+        <button
+          type="button"
+          onClick={onCancel}
+          disabled={controlBusy || progress.status === "cancelling"}
+        >
           取消
         </button>
       </div>
@@ -130,6 +142,7 @@ export function BackgroundTaskStatus({
   onDismissScan,
   onPauseResumeSemantic,
   onCancelSemantic,
+  semanticControlBusy = false,
   scanTaskName,
   semanticTaskName,
 }: BackgroundTaskStatusProps) {
@@ -237,6 +250,7 @@ export function BackgroundTaskStatus({
                 taskName={resolvedSemanticTaskName}
                 onPauseResume={onPauseResumeSemantic}
                 onCancel={onCancelSemantic}
+                controlBusy={semanticControlBusy}
               />
             ) : null}
           </div>

@@ -36,7 +36,7 @@ pub const TINYCLIP_TOKENIZER_SHA256: &str =
     "6d9109cc838977f3ca94a379eec36aecc7c807e1785cd729660ca2fc0171fb35";
 pub const SIGLIP2_MODEL_NAME: &str = "SigLIP2-Base-Patch16-224";
 pub const SIGLIP2_MODEL_VERSION: &str = "onnx-int8-2026-08-11";
-pub const SIGLIP2_ANALYSIS_VERSION: &str = "photo-organizer-semantic-topic-candidates-siglip2-v2";
+pub const SIGLIP2_ANALYSIS_VERSION: &str = "photo-organizer-semantic-topic-candidates-siglip2-v3";
 pub const SIGLIP2_MODEL_FILE: &str = "model_int8.onnx";
 pub const SIGLIP2_TOKENIZER_FILE: &str = "tokenizer.json";
 pub const SIGLIP2_MODEL_SHA256: &str =
@@ -66,8 +66,6 @@ const PLACES365_IMAGE_SIZE: usize = 224;
 const TOKEN_LENGTH: usize = 77;
 const PAD_TOKEN_ID: u32 = 49_407;
 const MAX_LABELS: usize = 8;
-const PLACES365_TOPIC_MIN_SCORE: f32 = 0.24;
-const PLACES365_TOPIC_MIN_MARGIN: f32 = 0.045;
 const IMAGE_MEAN: [f32; 3] = [0.481_454_66, 0.457_827_5, 0.408_210_73];
 const IMAGE_STD: [f32; 3] = [0.268_629_54, 0.261_302_6, 0.275_777_1];
 const PLACES365_IMAGE_MEAN: [f32; 3] = [0.485, 0.456, 0.406];
@@ -326,6 +324,8 @@ pub enum SemanticError {
     BackendUnavailable(ExecutionBackend),
     #[error("semantic model integrity check failed: {0}")]
     Integrity(String),
+    #[error("semantic input is invalid: {0}")]
+    InvalidInput(String),
     #[error("semantic inference failed: {0}")]
     Inference(String),
 }
@@ -775,24 +775,10 @@ impl SemanticClassifier for Places365Classifier {
             let topic_output = embedding_outputs
                 .as_ref()
                 .and_then(|outputs| outputs.get(image_index));
-            let mut predictions =
-                select_places365_topic(&probabilities, &self.leaf_cluster_indexes)
-                    .into_iter()
-                    .collect::<Vec<_>>();
-            if let Some((label_id, score)) =
-                select_places365_environment(&probabilities, &self.outdoor_by_leaf)
-            {
-                predictions.push(SemanticPrediction {
-                    label_id: label_id.into(),
-                    display_name: known_display_name_for_label_id(label_id)
-                        .unwrap_or("环境")
-                        .into(),
-                    category_group: "context".into(),
-                    similarity: score,
-                    threshold: 0.55,
-                    is_primary: false,
-                });
-            }
+            let predictions = merge_topic_and_environment_predictions(
+                topic_output,
+                select_places365_environment(&probabilities, &self.outdoor_by_leaf),
+            );
             let mut raw_similarities = topic_output
                 .map(|output| output.raw_similarities.clone())
                 .unwrap_or_default();
@@ -1690,9 +1676,9 @@ fn preprocess_places365_images(images: &[PathBuf]) -> Result<Vec<f32>, SemanticE
         Vec::with_capacity(images.len() * 3 * PLACES365_IMAGE_SIZE * PLACES365_IMAGE_SIZE);
     for path in images {
         let image = crate::imaging::load_analysis_thumbnail(path)
-            .map_err(|error| SemanticError::Inference(format!("{}: {error}", path.display())))?;
+            .map_err(|error| SemanticError::InvalidInput(format!("{}: {error}", path.display())))?;
         if image.width() == 0 || image.height() == 0 {
-            return Err(SemanticError::Inference(format!(
+            return Err(SemanticError::InvalidInput(format!(
                 "image has zero dimensions: {}",
                 path.display()
             )));
@@ -1790,69 +1776,29 @@ fn places365_raw_similarities(
         .collect()
 }
 
-fn select_places365_topic(
-    probabilities: &[f32],
-    leaf_cluster_indexes: &[usize],
-) -> Option<SemanticPrediction> {
-    let mut scores = vec![0.0_f32; topics::TOPIC_LABELS.len()];
-    for (index, probability) in probabilities.iter().enumerate() {
-        let Some(cluster_index) = leaf_cluster_indexes.get(index) else {
-            continue;
-        };
-        let Some(cluster) = places365::SCENE_CLUSTERS.get(*cluster_index) else {
-            continue;
-        };
-        let Some(topic_id) = places365_cluster_to_topic(cluster.id) else {
-            continue;
-        };
-        let Some(topic_index) = topics::label_index(topic_id) else {
-            continue;
-        };
-        scores[topic_index] += probability;
+fn merge_topic_and_environment_predictions(
+    topic_output: Option<&SemanticAnalysisOutput>,
+    environment: Option<(&'static str, f32)>,
+) -> Vec<SemanticPrediction> {
+    // The topic adapter is the only source allowed to produce a photographer
+    // facing primary. Places365 contributes context only; its leaf-level
+    // evidence is retained separately in raw_similarities below.
+    let mut predictions = topic_output
+        .map(|output| output.predictions.clone())
+        .unwrap_or_default();
+    if let Some((label_id, score)) = environment {
+        predictions.push(SemanticPrediction {
+            label_id: label_id.into(),
+            display_name: known_display_name_for_label_id(label_id)
+                .unwrap_or("环境")
+                .into(),
+            category_group: "context".into(),
+            similarity: score,
+            threshold: 0.55,
+            is_primary: false,
+        });
     }
-
-    let mut ranked = scores
-        .iter()
-        .enumerate()
-        .filter_map(|(index, score)| {
-            topics::TOPIC_LABELS
-                .get(index)
-                .map(|label| (index, *score, label))
-        })
-        .collect::<Vec<_>>();
-    ranked.sort_by(|left, right| right.1.total_cmp(&left.1).then(left.0.cmp(&right.0)));
-    let (_, score, label) = ranked.first().copied()?;
-    let second_score = ranked.get(1).map(|(_, score, _)| *score).unwrap_or(0.0);
-    if score < PLACES365_TOPIC_MIN_SCORE || score - second_score < PLACES365_TOPIC_MIN_MARGIN {
-        return None;
-    }
-    Some(SemanticPrediction {
-        label_id: label.id.into(),
-        display_name: label.display_name.into(),
-        category_group: "scene".into(),
-        similarity: score,
-        threshold: label.threshold,
-        is_primary: true,
-    })
-}
-
-fn places365_cluster_to_topic(cluster_id: &str) -> Option<&'static str> {
-    match cluster_id {
-        "photo_landscape" => Some("photo_landscape"),
-        "photo_urban" => Some("photo_street"),
-        "photo_architecture" => Some("photo_architecture"),
-        "photo_food" | "photo_commercial" => Some("photo_still_life"),
-        "photo_event" => None,
-        "photo_transport" => Some("photo_vehicle"),
-        "photo_plant" => Some("photo_macro"),
-        // Industrial/work scenes are deliberately not a photographer-facing
-        // topic; leave that Places365 evidence unassigned.
-        "photo_documentary" => None,
-        // Residential/public indoor and travel are useful evidence, but are
-        // intentionally not forced into a photographer-facing topic.
-        "photo_indoor" | "photo_travel" => None,
-        _ => None,
-    }
+    predictions
 }
 
 pub(crate) fn initialize_ort(runtime_path: &Path) -> Result<(), SemanticError> {
@@ -1863,6 +1809,20 @@ pub(crate) fn initialize_ort(runtime_path: &Path) -> Result<(), SemanticError> {
         })?
         .join("onnxruntime_providers_shared.dll");
     verify_sha256(&shared_runtime, RUNTIME_SHARED_SHA256)?;
+    let shared_runtime = shared_runtime.canonicalize().map_err(|error| {
+        SemanticError::Inference(format!(
+            "could not locate ONNX Runtime shared provider: {error}"
+        ))
+    })?;
+    // `ort`'s dynamic loader only loads the main runtime DLL. DirectML and
+    // other provider helpers are resolved by filename later, so preload the
+    // verified sibling explicitly to keep the provider/runtime pair bound to
+    // the same application-owned resource directory.
+    ort::util::preload_dylib(&shared_runtime).map_err(|error| {
+        SemanticError::Inference(format!(
+            "could not preload ONNX Runtime shared provider: {error}"
+        ))
+    })?;
     let canonical = runtime_path.canonicalize().map_err(|error| {
         SemanticError::Inference(format!("could not locate ONNX Runtime: {error}"))
     })?;
@@ -2028,10 +1988,10 @@ fn preprocess_images(images: &[PathBuf]) -> Result<Vec<f32>, SemanticError> {
     let mut values = Vec::with_capacity(images.len() * 3 * IMAGE_SIZE * IMAGE_SIZE);
     for path in images {
         let image = crate::imaging::load_analysis_thumbnail(path)
-            .map_err(|error| SemanticError::Inference(format!("{}: {error}", path.display())))?;
+            .map_err(|error| SemanticError::InvalidInput(format!("{}: {error}", path.display())))?;
         let shortest = image.width().min(image.height());
         if shortest == 0 {
-            return Err(SemanticError::Inference(format!(
+            return Err(SemanticError::InvalidInput(format!(
                 "image has zero dimensions: {}",
                 path.display()
             )));
@@ -2074,9 +2034,9 @@ fn preprocess_open_clip_images(
         Vec::with_capacity(images.len() * 3 * variant.image_size() * variant.image_size());
     for path in images {
         let image = crate::imaging::load_analysis_thumbnail(path)
-            .map_err(|error| SemanticError::Inference(format!("{}: {error}", path.display())))?;
+            .map_err(|error| SemanticError::InvalidInput(format!("{}: {error}", path.display())))?;
         if image.width() == 0 || image.height() == 0 {
-            return Err(SemanticError::Inference(format!(
+            return Err(SemanticError::InvalidInput(format!(
                 "image has zero dimensions: {}",
                 path.display()
             )));
@@ -2584,6 +2544,33 @@ mod tests {
     }
 
     #[test]
+    fn bundled_runtime_dependencies_match_the_declared_contract() {
+        let runtime_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("resources")
+            .join("runtime")
+            .join("onnxruntime.dll");
+        let shared_runtime = runtime_path
+            .parent()
+            .expect("bundled runtime must have a parent directory")
+            .join("onnxruntime_providers_shared.dll");
+
+        verify_sha256(&runtime_path, RUNTIME_SHA256).expect("bundled runtime hash");
+        verify_sha256(&shared_runtime, RUNTIME_SHARED_SHA256)
+            .expect("bundled shared provider hash");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn bundled_runtime_initializes_with_the_verified_shared_provider() {
+        let runtime_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("resources")
+            .join("runtime")
+            .join("onnxruntime.dll");
+
+        initialize_ort(&runtime_path).expect("bundled ONNX Runtime should initialize");
+    }
+
+    #[test]
     fn primary_label_uses_highest_accepted_similarity() {
         let mut scores = vec![0.10; topics::TOPIC_LABELS.len()];
         scores[topics::label_index("photo_landscape").unwrap()] = 0.21;
@@ -2607,19 +2594,54 @@ mod tests {
     }
 
     #[test]
-    fn places365_evidence_maps_to_a_photography_topic() {
-        let landscape_cluster = places365::SCENE_CLUSTERS
-            .iter()
-            .position(|cluster| cluster.id == "photo_landscape")
-            .unwrap();
-        let street_cluster = places365::SCENE_CLUSTERS
-            .iter()
-            .position(|cluster| cluster.id == "photo_urban")
-            .unwrap();
-        let prediction =
-            select_places365_topic(&[0.42, 0.08], &[landscape_cluster, street_cluster]).unwrap();
-        assert_eq!(prediction.label_id, "photo_landscape");
-        assert!(prediction.is_primary);
+    fn broken_thumbnail_is_reported_as_invalid_input() {
+        let error = preprocess_images(&[PathBuf::from("test-data/missing-grid-640-v1.jpg")])
+            .expect_err("missing thumbnail must fail");
+
+        assert!(matches!(error, SemanticError::InvalidInput(_)));
+    }
+
+    #[test]
+    fn topic_predictions_are_primary_and_places365_environment_is_context_only() {
+        let topic_output = SemanticAnalysisOutput {
+            predictions: vec![SemanticPrediction {
+                label_id: "photo_portrait".into(),
+                display_name: "人像".into(),
+                category_group: "scene".into(),
+                similarity: 0.78,
+                threshold: 0.22,
+                is_primary: true,
+            }],
+            embedding: Vec::new(),
+            raw_similarities: Vec::new(),
+        };
+
+        let predictions =
+            merge_topic_and_environment_predictions(Some(&topic_output), Some(("outdoor", 0.91)));
+
+        assert_eq!(
+            predictions
+                .iter()
+                .filter(|prediction| prediction.is_primary)
+                .map(|prediction| prediction.label_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["photo_portrait"]
+        );
+        assert_eq!(
+            predictions
+                .iter()
+                .find(|prediction| prediction.label_id == "outdoor")
+                .map(|prediction| (prediction.category_group.as_str(), prediction.is_primary)),
+            Some(("context", false))
+        );
+    }
+
+    #[test]
+    fn missing_topic_classifier_does_not_create_a_primary_from_places365() {
+        let predictions = merge_topic_and_environment_predictions(None, Some(("indoor", 0.88)));
+
+        assert!(predictions.iter().all(|prediction| !prediction.is_primary));
+        assert_eq!(predictions[0].label_id, "indoor");
     }
 
     #[test]

@@ -4,7 +4,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import App from "./App";
 import { emptyEffectiveClassification } from "./types";
-import type { AssetListItem, LibrarySummary, ScanProgress } from "./types";
+import type { AssetListItem, LibrarySummary, ScanProgress, SemanticProgress } from "./types";
 
 const api = vi.hoisted(() => ({
   chooseLibraryFolder: vi.fn(),
@@ -201,12 +201,14 @@ const thirdAsset: AssetListItem = {
 };
 
 let progressListener: ((progress: ScanProgress) => void) | undefined;
+let semanticProgressListener: ((progress: SemanticProgress) => void) | undefined;
 
 beforeEach(() => {
   vi.clearAllMocks();
   window.localStorage.removeItem("photo-organizer-theme");
   window.localStorage.removeItem("photo-organizer-settings");
   progressListener = undefined;
+  semanticProgressListener = undefined;
   api.chooseLibraryFolder.mockResolvedValue(null);
   api.fetchLibraries.mockResolvedValue([]);
   api.fetchAssets.mockResolvedValue({ items: [], total: 0, page: 1, pageSize: 200 });
@@ -359,7 +361,12 @@ beforeEach(() => {
       return vi.fn();
     },
   );
-  api.subscribeSemanticProgress.mockResolvedValue(vi.fn());
+  api.subscribeSemanticProgress.mockImplementation(
+    async (listener: (progress: SemanticProgress) => void) => {
+      semanticProgressListener = listener;
+      return vi.fn();
+    },
+  );
 });
 
 it("suppresses the browser context menu outside editable controls", () => {
@@ -536,6 +543,200 @@ describe("PhotoOrganizer application shell", () => {
     expect(await screen.findByText("准备图库")).toBeInTheDocument();
   });
 
+  it("does not reset a scan terminal event received before start resolves", async () => {
+    const user = userEvent.setup();
+    api.chooseLibraryFolder.mockResolvedValue("C:\\fixtures\\scan");
+    let resolveStart: ((value: { taskId: string }) => void) | undefined;
+    api.startLibraryScan.mockImplementationOnce(
+      () =>
+        new Promise<{ taskId: string }>((resolve) => {
+          resolveStart = resolve;
+        }),
+    );
+    render(<App />);
+
+    await screen.findByRole("heading", { name: "建立本地图片库" });
+    await user.click(screen.getAllByRole("button", { name: "选择照片文件夹" })[0]);
+    await user.click(screen.getByRole("button", { name: "开始导入" }));
+    await waitFor(() => expect(api.startLibraryScan).toHaveBeenCalledOnce());
+
+    act(() => {
+      progressListener?.({
+        taskId: "task-1",
+        libraryId: 7,
+        status: "failed",
+        stage: "processing",
+        discovered: 2,
+        processed: 1,
+        succeeded: 0,
+        failed: 1,
+        skipped: 0,
+        missing: 0,
+        currentPath: "C:\\fixtures\\scan\\one.png",
+        error: "fixture failure",
+      });
+    });
+    await user.click(screen.getByRole("button", { name: "查看后台任务" }));
+    expect(await screen.findByText("当前图库 · 导入失败")).toBeInTheDocument();
+
+    expect(resolveStart).toBeDefined();
+    await act(async () => {
+      resolveStart?.({ taskId: "task-1" });
+      await Promise.resolve();
+    });
+    expect(screen.getByText("当前图库 · 导入失败")).toBeInTheDocument();
+    expect(screen.queryByText("当前图库 · 导入中")).not.toBeInTheDocument();
+
+    act(() => {
+      progressListener?.({
+        taskId: "task-2",
+        libraryId: 7,
+        status: "failed",
+        stage: "processing",
+        discovered: 3,
+        processed: 2,
+        succeeded: 1,
+        failed: 1,
+        skipped: 0,
+        missing: 0,
+        currentPath: "C:\\fixtures\\scan\\two.png",
+        error: "new fixture failure",
+      });
+    });
+    expect(screen.getByText("当前图库 · 导入失败")).toBeInTheDocument();
+    act(() => {
+      progressListener?.({
+        taskId: "task-1",
+        libraryId: 7,
+        status: "running",
+        stage: "processing",
+        discovered: 4,
+        processed: 3,
+        succeeded: 3,
+        failed: 0,
+        skipped: 0,
+        missing: 0,
+        currentPath: "C:\\fixtures\\scan\\late.png",
+        error: null,
+      });
+    });
+    expect(screen.getByText("当前图库 · 导入失败")).toBeInTheDocument();
+    expect(screen.queryByText("当前图库 · 导入中")).not.toBeInTheDocument();
+  });
+
+  it("does not reset a semantic terminal event received before start resolves", async () => {
+    const user = userEvent.setup();
+    api.fetchLibraries.mockResolvedValue([library]);
+    api.fetchSemanticStatus.mockResolvedValue({
+      status: "ready",
+      message: "ready",
+      model: { name: "SigLIP2-Base-Patch16-224", version: "test" },
+      selectedBackend: "cpu",
+    });
+    let resolveStart: ((value: { jobId: string }) => void) | undefined;
+    api.startSemanticAnalysis.mockImplementationOnce(
+      () =>
+        new Promise<{ jobId: string }>((resolve) => {
+          resolveStart = resolve;
+        }),
+    );
+    render(<App />);
+
+    const analyzeButton = await screen.findByRole("button", { name: "分析" });
+    await user.click(analyzeButton);
+    await waitFor(() => expect(api.startSemanticAnalysis).toHaveBeenCalledOnce());
+
+    act(() => {
+      semanticProgressListener?.({
+        jobId: "semantic-1",
+        libraryId: 7,
+        status: "completed",
+        total: 2,
+        processed: 2,
+        completed: 2,
+        failed: 0,
+        skipped: 0,
+        currentAssetId: null,
+        currentPath: null,
+        executionBackend: "cpu",
+        modelName: "SigLIP2",
+        modelVersion: "test",
+        error: null,
+      });
+    });
+    await waitFor(() =>
+      expect(screen.queryByRole("button", { name: "查看后台任务" })).not.toBeInTheDocument(),
+    );
+
+    expect(resolveStart).toBeDefined();
+    await act(async () => {
+      resolveStart?.({ jobId: "semantic-1" });
+      await Promise.resolve();
+    });
+    expect(screen.queryByRole("button", { name: "查看后台任务" })).not.toBeInTheDocument();
+
+    act(() => {
+      semanticProgressListener?.({
+        jobId: "semantic-2",
+        libraryId: 7,
+        status: "running",
+        total: 2,
+        processed: 0,
+        completed: 0,
+        failed: 0,
+        skipped: 0,
+        currentAssetId: null,
+        currentPath: null,
+        executionBackend: "cpu",
+        modelName: "SigLIP2",
+        modelVersion: "test",
+        error: null,
+      });
+    });
+    expect(await screen.findByRole("button", { name: "查看后台任务" })).toBeInTheDocument();
+
+    act(() => {
+      semanticProgressListener?.({
+        jobId: "semantic-2",
+        libraryId: 7,
+        status: "completed",
+        total: 2,
+        processed: 2,
+        completed: 2,
+        failed: 0,
+        skipped: 0,
+        currentAssetId: null,
+        currentPath: null,
+        executionBackend: "cpu",
+        modelName: "SigLIP2",
+        modelVersion: "test",
+        error: null,
+      });
+    });
+    await waitFor(() =>
+      expect(screen.queryByRole("button", { name: "查看后台任务" })).not.toBeInTheDocument(),
+    );
+    act(() => {
+      semanticProgressListener?.({
+        jobId: "semantic-1",
+        libraryId: 7,
+        status: "running",
+        total: 2,
+        processed: 1,
+        completed: 1,
+        failed: 0,
+        skipped: 0,
+        currentAssetId: 12,
+        currentPath: "C:\\fixtures\\late.png",
+        executionBackend: "cpu",
+        modelName: "SigLIP2",
+        modelVersion: "test",
+        error: null,
+      });
+    });
+    expect(screen.queryByRole("button", { name: "查看后台任务" })).not.toBeInTheDocument();
+  });
+
   it("can exclude child-folder images while importing a folder", async () => {
     const user = userEvent.setup();
     api.chooseLibraryFolder.mockResolvedValue("C:\\fixtures\\root-only");
@@ -647,6 +848,7 @@ describe("PhotoOrganizer application shell", () => {
   });
 
   it("switches between grid and single preview with the view shortcuts", async () => {
+    const user = userEvent.setup();
     const viewAsset = { ...asset, id: 712 };
     const viewSecondAsset = { ...secondAsset, id: 713 };
     api.fetchLibraries.mockResolvedValue([library]);
@@ -658,13 +860,17 @@ describe("PhotoOrganizer application shell", () => {
     });
     render(<App />);
 
-    await screen.findByRole("button", { name: viewAsset.fileName });
+    const assetCard = await screen.findByRole("button", { name: viewAsset.fileName });
     const gridButton = screen.getByRole("button", { name: "网格视图" });
     const singleButton = screen.getByRole("button", { name: "单图预览" });
     expect(gridButton).toHaveClass("is-active");
     expect(singleButton).not.toHaveClass("is-active");
 
-    fireEvent.keyDown(window, { key: "f" });
+    await user.click(assetCard);
+    fireEvent.keyDown(assetCard, { key: "3" });
+    await waitFor(() => expect(api.updateAssetRating).toHaveBeenCalledWith(viewAsset.id, 3));
+
+    fireEvent.keyDown(assetCard, { key: "f" });
     await waitFor(() => expect(document.querySelector(".single-workspace")).not.toBeNull());
     expect(singleButton).toHaveClass("is-active");
     expect(gridButton).not.toHaveClass("is-active");
@@ -673,6 +879,142 @@ describe("PhotoOrganizer application shell", () => {
     await waitFor(() => expect(screen.getByLabelText("图片网格")).toBeInTheDocument());
     expect(gridButton).toHaveClass("is-active");
     expect(singleButton).not.toHaveClass("is-active");
+  });
+
+  it("opens single preview when a focused gallery card receives Enter", async () => {
+    const user = userEvent.setup();
+    const enterAsset = { ...asset, id: 912 };
+    const enterSecondAsset = { ...secondAsset, id: 913 };
+    api.fetchLibraries.mockResolvedValue([library]);
+    api.fetchAssets.mockResolvedValue({
+      items: [enterAsset, enterSecondAsset],
+      total: 2,
+      page: 1,
+      pageSize: 200,
+    });
+    render(<App />);
+
+    const assetCard = await screen.findByRole("button", { name: enterAsset.fileName });
+    await user.click(assetCard);
+    const enterEvent = new KeyboardEvent("keydown", {
+      bubbles: true,
+      cancelable: true,
+      key: "Enter",
+    });
+    assetCard.dispatchEvent(enterEvent);
+
+    expect(enterEvent.defaultPrevented).toBe(true);
+    await waitFor(() => expect(document.querySelector(".single-workspace")).not.toBeNull());
+  });
+
+  it("keeps text editing and modified/composing keydowns out of global shortcuts", async () => {
+    const user = userEvent.setup();
+    const textAsset = { ...asset, id: 812 };
+    const textSecondAsset = { ...secondAsset, id: 813 };
+    api.fetchLibraries.mockResolvedValue([library]);
+    api.fetchAssets.mockResolvedValue({
+      items: [textAsset, textSecondAsset],
+      total: 2,
+      page: 1,
+      pageSize: 200,
+    });
+    render(<App />);
+
+    const assetCard = await screen.findByRole("button", { name: textAsset.fileName });
+    await user.click(assetCard);
+    const searchInput = screen.getByRole("textbox", { name: "搜索图片" });
+
+    fireEvent.keyDown(searchInput, { key: "Enter" });
+    expect(document.querySelector(".single-workspace")).toBeNull();
+
+    api.updateAssetRating.mockClear();
+    for (const modifier of ["ctrlKey", "metaKey", "altKey"] as const) {
+      fireEvent.keyDown(assetCard, { key: "3", [modifier]: true });
+    }
+    const preventedEvent = new KeyboardEvent("keydown", {
+      bubbles: true,
+      cancelable: true,
+      key: "3",
+    });
+    preventedEvent.preventDefault();
+    window.dispatchEvent(preventedEvent);
+    window.dispatchEvent(
+      new KeyboardEvent("keydown", {
+        bubbles: true,
+        cancelable: true,
+        isComposing: true,
+        key: "3",
+      }),
+    );
+    expect(api.updateAssetRating).not.toHaveBeenCalled();
+
+    fireEvent.keyDown(window, { key: "f" });
+    await waitFor(() =>
+      expect(screen.getByRole("heading", { name: textAsset.fileName })).toBeInTheDocument(),
+    );
+    searchInput.focus();
+    fireEvent.keyDown(searchInput, { key: "ArrowRight" });
+    expect(screen.getByRole("heading", { name: textAsset.fileName })).toBeInTheDocument();
+  });
+
+  it("keeps the settings layer above gallery shortcuts and restores its trigger focus", async () => {
+    const user = userEvent.setup();
+    const settingsAsset = { ...asset, id: 822 };
+    api.fetchLibraries.mockResolvedValue([library]);
+    api.fetchAssets.mockResolvedValue({
+      items: [settingsAsset],
+      total: 1,
+      page: 1,
+      pageSize: 200,
+    });
+    render(<App />);
+
+    const trigger = await screen.findByRole("button", { name: "打开设置" });
+    await user.click(trigger);
+    const dialog = screen.getByRole("dialog", { name: "设置" });
+    await waitFor(() => expect(dialog.contains(document.activeElement)).toBe(true));
+
+    api.updateAssetRating.mockClear();
+    document.body.focus();
+    fireEvent.keyDown(window, { key: "3" });
+    expect(api.updateAssetRating).not.toHaveBeenCalled();
+
+    fireEvent.keyDown(window, { key: "Escape" });
+    await waitFor(() =>
+      expect(screen.queryByRole("dialog", { name: "设置" })).not.toBeInTheDocument(),
+    );
+    expect(trigger).toHaveFocus();
+  });
+
+  it("consumes filter Escape without clearing selection or leaving the gallery", async () => {
+    const user = userEvent.setup();
+    const filterAsset = { ...asset, id: 832 };
+    const filterSecondAsset = { ...secondAsset, id: 833 };
+    api.fetchLibraries.mockResolvedValue([library]);
+    api.fetchAssets.mockResolvedValue({
+      items: [filterAsset, filterSecondAsset],
+      total: 2,
+      page: 1,
+      pageSize: 200,
+    });
+    render(<App />);
+
+    const assetCard = await screen.findByRole("button", { name: filterAsset.fileName });
+    await user.click(assetCard);
+    await user.click(screen.getByRole("button", { name: "选择 " + filterAsset.fileName }));
+    await user.click(screen.getByRole("button", { name: "筛选" }));
+    const filterDialog = screen.getByRole("dialog", { name: "当前条件" });
+    const escape = new KeyboardEvent("keydown", {
+      bubbles: true,
+      cancelable: true,
+      key: "Escape",
+    });
+    act(() => filterDialog.dispatchEvent(escape));
+
+    expect(escape.defaultPrevented).toBe(true);
+    expect(screen.queryByRole("dialog", { name: "当前条件" })).not.toBeInTheDocument();
+    expect(screen.getByText("已选择 1 张")).toBeInTheDocument();
+    expect(screen.getByLabelText("图片网格")).toBeInTheDocument();
   });
 
   it("restores a library, renders the grid, and opens details", async () => {
@@ -1666,6 +2008,167 @@ describe("PhotoOrganizer application shell", () => {
     );
     await user.click(screen.getByRole("button", { name: "取消扫描" }));
     expect(api.cancelLibraryScan).toHaveBeenCalledWith("task-1");
+  });
+
+  it("resets scan cancellation when the backend declines the request", async () => {
+    const user = userEvent.setup();
+    api.chooseLibraryFolder.mockResolvedValue("C:\\fixtures\\scan");
+    api.cancelLibraryScan.mockResolvedValueOnce({ taskId: "task-1", accepted: false });
+    render(<App />);
+    await screen.findByRole("heading", { name: "建立本地图片库" });
+
+    act(() => {
+      progressListener?.({
+        taskId: "task-1",
+        libraryId: 7,
+        status: "running",
+        stage: "processing",
+        discovered: 2,
+        processed: 1,
+        succeeded: 1,
+        failed: 0,
+        skipped: 0,
+        missing: 0,
+        currentPath: "C:\\fixtures\\scan\\one.png",
+        error: null,
+      });
+    });
+
+    await user.click(await screen.findByRole("button", { name: "查看后台任务" }));
+    await user.click(screen.getByRole("button", { name: "取消扫描" }));
+    await waitFor(() => expect(screen.getByRole("button", { name: "取消扫描" })).toBeEnabled());
+    expect(screen.getByRole("alert")).toHaveTextContent("扫描任务已经结束，无法再次取消。");
+  });
+
+  it("serializes semantic controls and ignores a late response after terminal progress", async () => {
+    const user = userEvent.setup();
+    render(<App />);
+    await waitFor(() => expect(semanticProgressListener).toBeDefined());
+
+    const runningProgress: SemanticProgress = {
+      jobId: "semantic-1",
+      libraryId: 7,
+      status: "running",
+      total: 2,
+      processed: 0,
+      completed: 0,
+      failed: 0,
+      skipped: 0,
+      currentAssetId: null,
+      currentPath: null,
+      executionBackend: "cpu",
+      modelName: "SigLIP2",
+      modelVersion: "test",
+      error: null,
+    };
+    act(() => {
+      semanticProgressListener?.(runningProgress);
+    });
+
+    const taskTrigger = await screen.findByRole("button", { name: "查看后台任务" });
+    await user.click(taskTrigger);
+    let resolvePause: ((value: { jobId: string; accepted: boolean }) => void) | undefined;
+    api.pauseSemanticAnalysis.mockImplementationOnce(
+      () =>
+        new Promise<{ jobId: string; accepted: boolean }>((resolve) => {
+          resolvePause = resolve;
+        }),
+    );
+
+    const pauseButton = screen.getByRole("button", { name: "暂停" });
+    await user.click(pauseButton);
+    expect(api.pauseSemanticAnalysis).toHaveBeenCalledOnce();
+    expect(pauseButton).toBeDisabled();
+    await user.click(pauseButton);
+    expect(api.pauseSemanticAnalysis).toHaveBeenCalledOnce();
+
+    act(() => {
+      semanticProgressListener?.({
+        ...runningProgress,
+        status: "completed",
+        processed: 2,
+        completed: 2,
+      });
+    });
+    await waitFor(() =>
+      expect(screen.queryByRole("button", { name: "查看后台任务" })).not.toBeInTheDocument(),
+    );
+
+    expect(resolvePause).toBeDefined();
+    await act(async () => {
+      resolvePause?.({ jobId: "semantic-1", accepted: true });
+      await Promise.resolve();
+    });
+    expect(screen.queryByRole("button", { name: "查看后台任务" })).not.toBeInTheDocument();
+  });
+
+  it("keeps an accepted pause when an older semantic fetch returns running", async () => {
+    const user = userEvent.setup();
+    api.fetchLibraries.mockResolvedValue([library]);
+    let resolveStaleFetch: ((progress: SemanticProgress | null) => void) | undefined;
+    api.fetchSemanticProgress.mockResolvedValueOnce(null).mockImplementationOnce(
+      () =>
+        new Promise<SemanticProgress | null>((resolve) => {
+          resolveStaleFetch = resolve;
+        }),
+    );
+    render(<App />);
+    await waitFor(() => expect(api.fetchSemanticProgress).toHaveBeenCalledTimes(1));
+    await waitFor(() => {
+      expect(progressListener).toBeDefined();
+      expect(semanticProgressListener).toBeDefined();
+    });
+
+    const runningProgress: SemanticProgress = {
+      jobId: "semantic-1",
+      libraryId: 7,
+      status: "running",
+      total: 2,
+      processed: 0,
+      completed: 0,
+      failed: 0,
+      skipped: 0,
+      currentAssetId: null,
+      currentPath: null,
+      executionBackend: "cpu",
+      modelName: "SigLIP2",
+      modelVersion: "test",
+      error: null,
+    };
+    act(() => {
+      semanticProgressListener?.(runningProgress);
+    });
+
+    act(() => {
+      progressListener?.({
+        taskId: "task-refresh",
+        libraryId: 7,
+        status: "completed",
+        stage: "completed",
+        discovered: 0,
+        processed: 0,
+        succeeded: 0,
+        failed: 0,
+        skipped: 0,
+        missing: 0,
+        currentPath: null,
+        error: null,
+      });
+    });
+    await waitFor(() => expect(api.fetchSemanticProgress).toHaveBeenCalledTimes(2));
+    expect(resolveStaleFetch).toBeDefined();
+
+    await user.click(await screen.findByRole("button", { name: "查看后台任务" }));
+    api.pauseSemanticAnalysis.mockResolvedValueOnce({ jobId: "semantic-1", accepted: true });
+    await user.click(screen.getByRole("button", { name: "暂停" }));
+    await waitFor(() => expect(screen.getByRole("button", { name: "继续" })).toBeInTheDocument());
+
+    await act(async () => {
+      resolveStaleFetch?.(runningProgress);
+      await Promise.resolve();
+    });
+    expect(screen.getByRole("button", { name: "继续" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "暂停" })).not.toBeInTheDocument();
   });
 
   it("moves a library to the root through drag and drop", async () => {

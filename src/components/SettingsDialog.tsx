@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import {
   analysisBatchLimit,
@@ -62,9 +62,55 @@ export function SettingsDialog({
   onReset: () => void;
   onClose: () => void;
 }) {
+  const dialogRef = useRef<HTMLElement | null>(null);
   const [activeSection, setActiveSection] = useState<SettingsSectionId>("display");
   const gpuProviderReady = gpuCapabilities?.directml.state === "ready";
   const batchLimit = analysisBatchLimit(gpuCapabilities, settings.gpuAccelerationEnabled);
+
+  useEffect(() => {
+    const dialog = dialogRef.current;
+    if (!dialog) return undefined;
+    const previousFocus =
+      document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    const focusableElements = () =>
+      Array.from(
+        dialog.querySelectorAll<HTMLElement>(
+          'button:not(:disabled), input:not(:disabled), select:not(:disabled), textarea:not(:disabled), [tabindex]:not([tabindex="-1"])',
+        ),
+      ).filter((element) => !element.hasAttribute("hidden"));
+    const initialFocus =
+      dialog.querySelector<HTMLElement>(
+        "input:not(:disabled), select:not(:disabled), textarea:not(:disabled)",
+      ) ?? focusableElements()[0];
+    const focusFrame = window.requestAnimationFrame(() => initialFocus?.focus());
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.defaultPrevented || event.isComposing) return;
+      if (event.key === "Escape") {
+        event.preventDefault();
+        event.stopPropagation();
+        onClose();
+        return;
+      }
+      if (event.key !== "Tab") return;
+      const focusable = focusableElements();
+      if (focusable.length === 0) return;
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+      if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault();
+        first.focus();
+      }
+    };
+    dialog.addEventListener("keydown", handleKeyDown);
+    return () => {
+      window.cancelAnimationFrame(focusFrame);
+      dialog.removeEventListener("keydown", handleKeyDown);
+      previousFocus?.focus();
+    };
+  }, [onClose]);
 
   return (
     <div
@@ -75,6 +121,7 @@ export function SettingsDialog({
       }}
     >
       <section
+        ref={dialogRef}
         className="settings-dialog"
         role="dialog"
         aria-modal="true"

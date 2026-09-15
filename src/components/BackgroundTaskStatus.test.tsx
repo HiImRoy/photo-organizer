@@ -40,18 +40,22 @@ const semanticProgress: SemanticProgress = {
 
 function renderTaskStatus(overrides: Partial<ComponentProps<typeof BackgroundTaskStatus>> = {}) {
   return render(
-    <BackgroundTaskStatus
-      scanProgress={null}
-      semanticProgress={null}
-      scanRunning={false}
-      semanticRunning={false}
-      cancellingScan={false}
-      onCancelScan={vi.fn()}
-      onDismissScan={vi.fn()}
-      onPauseResumeSemantic={vi.fn()}
-      onCancelSemantic={vi.fn()}
-      {...overrides}
-    />,
+    <div className="photo-app">
+      <div className="library-stat">
+        <BackgroundTaskStatus
+          scanProgress={null}
+          semanticProgress={null}
+          scanRunning={false}
+          semanticRunning={false}
+          cancellingScan={false}
+          onCancelScan={vi.fn()}
+          onDismissScan={vi.fn()}
+          onPauseResumeSemantic={vi.fn()}
+          onCancelSemantic={vi.fn()}
+          {...overrides}
+        />
+      </div>
+    </div>,
   );
 }
 
@@ -97,6 +101,36 @@ describe("BackgroundTaskStatus", () => {
     expect(onPauseResumeSemantic).toHaveBeenCalledOnce();
   });
 
+  it("disables semantic controls while one control request is pending", async () => {
+    const user = userEvent.setup();
+    renderTaskStatus({
+      semanticProgress,
+      semanticRunning: true,
+      semanticControlBusy: true,
+    });
+
+    await user.click(screen.getByRole("button", { name: "查看后台任务" }));
+    expect(screen.getByRole("button", { name: "暂停" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "取消" })).toBeDisabled();
+  });
+
+  it("keeps interrupted semantic jobs resumable", async () => {
+    const user = userEvent.setup();
+    const onPauseResumeSemantic = vi.fn();
+    renderTaskStatus({
+      semanticProgress: { ...semanticProgress, status: "interrupted" },
+      semanticRunning: true,
+      onPauseResumeSemantic,
+    });
+
+    await user.click(screen.getByRole("button", { name: "查看后台任务" }));
+    expect(screen.getByText("分析已中断")).toBeInTheDocument();
+    const resumeButton = screen.getByRole("button", { name: "继续" });
+    expect(resumeButton).toBeEnabled();
+    await user.click(resumeButton);
+    expect(onPauseResumeSemantic).toHaveBeenCalledOnce();
+  });
+
   it("shows the actual semantic execution backend", async () => {
     const user = userEvent.setup();
     renderTaskStatus({
@@ -127,5 +161,40 @@ describe("BackgroundTaskStatus", () => {
     await user.click(trigger);
     expect(screen.getByText("【2023】")).toBeInTheDocument();
     expect(screen.getByText("默认收藏")).toBeInTheDocument();
+  });
+
+  it("keeps the compact fill flush with its track inside the library stat", () => {
+    renderTaskStatus({
+      scanProgress: { ...scanProgress, discovered: 0, processed: 0 },
+      scanRunning: true,
+    });
+
+    const trigger = screen.getByRole("button", { name: "查看后台任务" });
+    const track = trigger.querySelector<HTMLElement>(".task-status-mini-track");
+    const fill = track?.querySelector<HTMLElement>("i");
+    expect(track).not.toBeNull();
+    expect(fill).not.toBeNull();
+    expect(track?.parentElement).toBe(trigger);
+    expect(fill?.parentElement).toBe(track);
+    expect(fill).toHaveStyle({ width: "0%" });
+  });
+
+  it("renders an 87 percent scan progress in the compact status", async () => {
+    const user = userEvent.setup();
+    renderTaskStatus({
+      scanProgress: { ...scanProgress, discovered: 100, processed: 87 },
+      scanRunning: true,
+    });
+
+    const trigger = screen.getByRole("button", { name: "查看后台任务" });
+    expect(trigger).toHaveTextContent("87%");
+    const fill = trigger.querySelector<HTMLElement>(".task-status-mini-track i");
+    expect(fill).toHaveStyle({ width: "87%" });
+
+    await user.click(trigger);
+    expect(screen.getByRole("progressbar", { name: "扫描进度" })).toHaveAttribute(
+      "aria-valuenow",
+      "87",
+    );
   });
 });

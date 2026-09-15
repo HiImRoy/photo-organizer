@@ -168,7 +168,121 @@ impl SubjectClassifier for UnavailableSubjectClassifier {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum SubjectBackendState {
+    Active(ExecutionBackend),
+    SwitchingToCpu { reason: String },
+    CpuFallback { reason: String },
+    Failed { reason: String },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SubjectFallbackDecision {
+    RetryCpu,
+    AlreadyAttempted,
+    NotRequired,
+}
+
+fn begin_subject_cpu_fallback(
+    state: &mut SubjectBackendState,
+    error: &SemanticError,
+) -> SubjectFallbackDecision {
+    if !matches!(error, SemanticError::Inference(_)) {
+        return SubjectFallbackDecision::NotRequired;
+    }
+    match state {
+        SubjectBackendState::Active(ExecutionBackend::DirectMl) => {
+            *state = SubjectBackendState::SwitchingToCpu {
+                reason: error.to_string(),
+            };
+            SubjectFallbackDecision::RetryCpu
+        }
+        SubjectBackendState::Active(_) => SubjectFallbackDecision::NotRequired,
+        SubjectBackendState::SwitchingToCpu { .. }
+        | SubjectBackendState::CpuFallback { .. }
+        | SubjectBackendState::Failed { .. } => SubjectFallbackDecision::AlreadyAttempted,
+    }
+}
+
+fn run_subject_batch_with_fallback<T, DirectMl, RebuildCpu, Cpu>(
+    backend_state: &Mutex<SubjectBackendState>,
+    active_backend: ExecutionBackend,
+    directml_batch: DirectMl,
+    rebuild_cpu_sessions: RebuildCpu,
+    cpu_batch: Cpu,
+) -> Result<T, SemanticError>
+where
+    DirectMl: FnOnce() -> Result<T, SemanticError>,
+    RebuildCpu: FnOnce() -> Result<(), SemanticError>,
+    Cpu: FnOnce() -> Result<T, SemanticError>,
+{
+    match directml_batch() {
+        Ok(results) => Ok(results),
+        Err(error) if active_backend == ExecutionBackend::DirectMl => {
+            let reason = error.to_string();
+            let decision = {
+                let mut state = backend_state.lock();
+                begin_subject_cpu_fallback(&mut state, &error)
+            };
+            if decision != SubjectFallbackDecision::RetryCpu {
+                return Err(error);
+            }
+            if let Err(fallback_error) = rebuild_cpu_sessions() {
+                let combined =
+                    format!("DirectML 主体模型执行失败：{reason}；CPU 回退失败：{fallback_error}");
+                *backend_state.lock() = SubjectBackendState::Failed {
+                    reason: combined.clone(),
+                };
+                log::error!(
+                    "DirectML subject inference failed and CPU fallback could not be \
+                     initialized; DirectML will not be retried: {combined}"
+                );
+                return Err(SemanticError::Inference(combined));
+            }
+            *backend_state.lock() = SubjectBackendState::CpuFallback {
+                reason: reason.clone(),
+            };
+            log::warn!(
+                "DirectML subject inference failed ({reason}); switched to CPU once; \
+                 subsequent thumbnails will not retry DirectML"
+            );
+            match cpu_batch() {
+                Ok(results) => Ok(results),
+                Err(cpu_error) => {
+                    let combined = format!(
+                        "DirectML 主体模型执行失败：{reason}；CPU 回退重试失败：{cpu_error}"
+                    );
+                    // Keep CPU fallback active. The task layer will split
+                    // this failed batch and retry individual thumbnails;
+                    // one problematic image must not poison the model for
+                    // all remaining assets.
+                    *backend_state.lock() = SubjectBackendState::CpuFallback { reason };
+                    log::warn!(
+                        "CPU subject fallback batch failed; keeping CPU fallback for \
+                         per-thumbnail recovery: {combined}"
+                    );
+                    Err(SemanticError::Inference(combined))
+                }
+            }
+        }
+        Err(error) => Err(error),
+    }
+}
+
+impl SubjectBackendState {
+    fn selected_backend(&self) -> ExecutionBackend {
+        match self {
+            Self::Active(backend) if *backend != ExecutionBackend::Auto => *backend,
+            Self::Active(_)
+            | Self::SwitchingToCpu { .. }
+            | Self::CpuFallback { .. }
+            | Self::Failed { .. } => ExecutionBackend::Cpu,
+        }
+    }
+}
+
 pub struct SubjectModel {
+    inference_lock: Mutex<()>,
     detector: Mutex<Session>,
     detector_input_name: String,
     scale_factor_input_name: String,
@@ -178,7 +292,9 @@ pub struct SubjectModel {
     face_output_names: Option<Vec<String>>,
     model_size_bytes: u64,
     face_model_size_bytes: Option<u64>,
-    backend: ExecutionBackend,
+    detector_model_path: PathBuf,
+    face_model_path: Option<PathBuf>,
+    backend_state: Mutex<SubjectBackendState>,
 }
 
 impl std::fmt::Debug for SubjectModel {
@@ -213,7 +329,7 @@ impl SubjectModel {
     ) -> Result<Self, SemanticError> {
         let model_path = model_dir.join(MODEL_FILE);
         let labels_path = model_dir.join(LABELS_FILE);
-        crate::semantic::verify_sha256(&model_path, MODEL_SHA256)?;
+        verify_subject_model_resources(&model_path, None)?;
         crate::semantic::verify_sha256(runtime_path, crate::semantic::RUNTIME_SHA256)?;
         let labels = load_coco_labels(&labels_path)?;
         if labels.len() != COCO_LABEL_COUNT {
@@ -253,10 +369,12 @@ impl SubjectModel {
                 }
             };
 
-        let model_size_bytes = std::fs::metadata(model_path)
+        let model_size_bytes = std::fs::metadata(&model_path)
             .map_err(|error| SemanticError::Inference(error.to_string()))?
             .len();
+        let face_model_path = face_detector.as_ref().map(|_| face_model_path.clone());
         Ok(Self {
+            inference_lock: Mutex::new(()),
             detector: Mutex::new(detector),
             detector_input_name,
             scale_factor_input_name,
@@ -266,7 +384,9 @@ impl SubjectModel {
             face_output_names,
             model_size_bytes,
             face_model_size_bytes,
-            backend,
+            detector_model_path: model_path,
+            face_model_path,
+            backend_state: Mutex::new(SubjectBackendState::Active(backend)),
         })
     }
 
@@ -276,51 +396,70 @@ impl SubjectModel {
             self.detector_output_name.clone(),
         )
     }
-}
 
-impl SubjectClassifier for SubjectModel {
-    fn metadata(&self) -> ModelMetadata {
-        model_metadata(true, Some(self.model_size_bytes))
-    }
-
-    fn face_metadata(&self) -> ModelMetadata {
-        face_model_metadata(self.face_detector.is_some(), self.face_model_size_bytes)
-    }
-
-    fn status(&self) -> SubjectRuntimeStatus {
-        let (status, message) = if self.face_detector.is_some() {
-            (
-                "ready",
-                "PicoDet 主体检测与 YuNet 人像辅助模型均已就绪；结果仅基于缩略图。",
-            )
-        } else {
-            (
-                "partial",
-                "PicoDet 主体检测已就绪；YuNet 人像辅助模型不可用，人像标签将暂不生成。",
-            )
-        };
-        SubjectRuntimeStatus {
-            status: status.into(),
-            message: message.into(),
-            model: self.metadata(),
-            face_model: self.face_metadata(),
-            selected_backend: Some(self.backend),
+    fn backend_for_request(
+        &self,
+        requested: ExecutionBackend,
+    ) -> Result<ExecutionBackend, SemanticError> {
+        let state = self.backend_state.lock();
+        match &*state {
+            SubjectBackendState::Active(active) => {
+                if crate::semantic::backend_matches(*active, requested) {
+                    Ok(*active)
+                } else {
+                    Err(SemanticError::BackendUnavailable(requested))
+                }
+            }
+            SubjectBackendState::CpuFallback { .. } => {
+                if matches!(
+                    requested,
+                    ExecutionBackend::Auto | ExecutionBackend::Cpu | ExecutionBackend::DirectMl
+                ) {
+                    Ok(ExecutionBackend::Cpu)
+                } else {
+                    Err(SemanticError::BackendUnavailable(requested))
+                }
+            }
+            SubjectBackendState::SwitchingToCpu { .. } => Err(SemanticError::Inference(
+                "主体模型正在执行 DirectML 到 CPU 的一次性回退".into(),
+            )),
+            SubjectBackendState::Failed { reason } => Err(SemanticError::Inference(reason.clone())),
         }
     }
 
-    fn classify_batch(
+    fn rebuild_cpu_sessions(&self) -> Result<(), SemanticError> {
+        verify_subject_model_resources(&self.detector_model_path, self.face_model_path.as_deref())?;
+        let cpu_detector =
+            create_session(&self.detector_model_path, "PicoDet", ExecutionBackend::Cpu)?;
+        validate_picodet_contract(&cpu_detector)?;
+
+        let cpu_face_detector = self
+            .face_model_path
+            .as_ref()
+            .map(|path| {
+                create_session(path, "YuNet", ExecutionBackend::Cpu).and_then(|session| {
+                    validate_yunet_contract(&session)?;
+                    Ok(session)
+                })
+            })
+            .transpose()?;
+
+        *self.detector.lock() = cpu_detector;
+        if let (Some(face_detector), Some(cpu_face_detector)) =
+            (&self.face_detector, cpu_face_detector)
+        {
+            *face_detector.lock() = cpu_face_detector;
+        }
+        Ok(())
+    }
+
+    fn classify_batch_once(
         &self,
         images: &[PathBuf],
-        backend: ExecutionBackend,
     ) -> Result<Vec<SubjectAnalysisOutput>, SemanticError> {
-        if !crate::semantic::backend_matches(self.backend, backend) {
-            return Err(SemanticError::BackendUnavailable(backend));
-        }
         let mut results = Vec::with_capacity(images.len());
         for path in images {
-            let rgb = crate::imaging::load_analysis_thumbnail(path).map_err(|error| {
-                SemanticError::Inference(format!("{}: {error}", path.display()))
-            })?;
+            let rgb = load_subject_thumbnail(path)?;
             let pico_pixels = preprocess_pico(&rgb);
             let detections = {
                 let input = Tensor::from_array((
@@ -337,7 +476,9 @@ impl SubjectClassifier for SubjectModel {
                         self.detector_input_name.as_str() => input,
                         self.scale_factor_input_name.as_str() => scale_factor,
                     })
-                    .map_err(crate::semantic::inference_error)?;
+                    .map_err(|error| {
+                        SemanticError::Inference(format!("PicoDet 执行失败：{error}"))
+                    })?;
                 let output = outputs
                     .get(self.detector_output_name.as_str())
                     .ok_or_else(|| {
@@ -367,7 +508,9 @@ impl SubjectClassifier for SubjectModel {
                     let mut detector = face_detector.lock();
                     let outputs = detector
                         .run(ort::inputs! { input_name.as_str() => input })
-                        .map_err(crate::semantic::inference_error)?;
+                        .map_err(|error| {
+                            SemanticError::Inference(format!("YuNet 执行失败：{error}"))
+                        })?;
                     let mut blobs = Vec::with_capacity(output_names.len());
                     for output_name in output_names {
                         let output = outputs.get(output_name.as_str()).ok_or_else(|| {
@@ -388,6 +531,96 @@ impl SubjectClassifier for SubjectModel {
         }
         Ok(results)
     }
+}
+
+impl SubjectClassifier for SubjectModel {
+    fn metadata(&self) -> ModelMetadata {
+        model_metadata(true, Some(self.model_size_bytes))
+    }
+
+    fn face_metadata(&self) -> ModelMetadata {
+        face_model_metadata(self.face_detector.is_some(), self.face_model_size_bytes)
+    }
+
+    fn status(&self) -> SubjectRuntimeStatus {
+        let (base_status, base_message) = if self.face_detector.is_some() {
+            (
+                "ready",
+                "PicoDet 主体检测与 YuNet 人像辅助模型均已就绪；结果仅基于缩略图。",
+            )
+        } else {
+            (
+                "partial",
+                "PicoDet 主体检测已就绪；YuNet 人像辅助模型不可用，人像标签将暂不生成。",
+            )
+        };
+        let backend_state = self.backend_state.lock().clone();
+        let (status, message) = match &backend_state {
+            SubjectBackendState::Active(_) => (base_status, base_message.to_owned()),
+            SubjectBackendState::SwitchingToCpu { reason } => (
+                base_status,
+                format!("{base_message} DirectML 执行失败，正在一次性回退 CPU：{reason}"),
+            ),
+            SubjectBackendState::CpuFallback { reason } => (
+                base_status,
+                format!(
+                    "{base_message} DirectML 执行失败（{reason}），已一次性回退 CPU；后续图片不再重试 DirectML。"
+                ),
+            ),
+            SubjectBackendState::Failed { reason } => (
+                "error",
+                format!(
+                    "主体模型不可用：DirectML 执行失败且 CPU 回退失败；已停止重复尝试。{reason}"
+                ),
+            ),
+        };
+        SubjectRuntimeStatus {
+            status: status.into(),
+            message,
+            model: self.metadata(),
+            face_model: self.face_metadata(),
+            selected_backend: Some(backend_state.selected_backend()),
+        }
+    }
+
+    fn classify_batch(
+        &self,
+        images: &[PathBuf],
+        backend: ExecutionBackend,
+    ) -> Result<Vec<SubjectAnalysisOutput>, SemanticError> {
+        if images.is_empty() {
+            return Ok(Vec::new());
+        }
+        // Keep the state transition and the CPU session rebuild serialized with
+        // inference. A second caller must wait for the first DirectML failure
+        // to finish switching instead of observing SwitchingToCpu and failing
+        // its own batch.
+        let _inference_guard = self.inference_lock.lock();
+        let active_backend = self.backend_for_request(backend)?;
+        run_subject_batch_with_fallback(
+            &self.backend_state,
+            active_backend,
+            || self.classify_batch_once(images),
+            || self.rebuild_cpu_sessions(),
+            || self.classify_batch_once(images),
+        )
+    }
+}
+
+fn verify_subject_model_resources(
+    detector_model_path: &Path,
+    face_model_path: Option<&Path>,
+) -> Result<(), SemanticError> {
+    crate::semantic::verify_sha256(detector_model_path, MODEL_SHA256)?;
+    if let Some(face_model_path) = face_model_path {
+        crate::semantic::verify_sha256(face_model_path, FACE_MODEL_SHA256)?;
+    }
+    Ok(())
+}
+
+fn load_subject_thumbnail(path: &Path) -> Result<image::RgbImage, SemanticError> {
+    crate::imaging::load_analysis_thumbnail(path)
+        .map_err(|error| SemanticError::InvalidInput(format!("{}: {error}", path.display())))
 }
 
 fn model_metadata(installed: bool, size: Option<u64>) -> ModelMetadata {
@@ -702,6 +935,150 @@ mod tests {
                 .iter()
                 .all(|label| label.display_name.chars().any(|c| c >= '\u{4e00}'))
         );
+    }
+
+    #[test]
+    fn directml_failure_transitions_to_cpu_once() {
+        let mut state = SubjectBackendState::Active(ExecutionBackend::DirectMl);
+        let error = SemanticError::Inference("Squeeze_4 failed with 0x80070057".into());
+        let decision = begin_subject_cpu_fallback(&mut state, &error);
+
+        assert_eq!(decision, SubjectFallbackDecision::RetryCpu);
+        assert!(matches!(
+            state,
+            SubjectBackendState::SwitchingToCpu { ref reason }
+                if reason.contains("Squeeze_4") && reason.contains("0x80070057")
+        ));
+        let second_error = SemanticError::Inference("second DirectML failure".into());
+        assert_eq!(
+            begin_subject_cpu_fallback(&mut state, &second_error),
+            SubjectFallbackDecision::AlreadyAttempted
+        );
+        state = SubjectBackendState::CpuFallback {
+            reason: "Squeeze_4 failed with 0x80070057".into(),
+        };
+        let third_error = SemanticError::Inference("third DirectML failure".into());
+        assert_eq!(
+            begin_subject_cpu_fallback(&mut state, &third_error),
+            SubjectFallbackDecision::AlreadyAttempted
+        );
+    }
+
+    #[test]
+    fn cpu_execution_does_not_request_a_directml_fallback() {
+        let mut state = SubjectBackendState::Active(ExecutionBackend::Cpu);
+        let error = SemanticError::Inference("CPU inference failure".into());
+
+        assert_eq!(
+            begin_subject_cpu_fallback(&mut state, &error),
+            SubjectFallbackDecision::NotRequired
+        );
+        assert_eq!(state, SubjectBackendState::Active(ExecutionBackend::Cpu));
+    }
+
+    #[test]
+    fn invalid_thumbnail_does_not_request_a_directml_fallback() {
+        let mut state = SubjectBackendState::Active(ExecutionBackend::DirectMl);
+        let error = SemanticError::InvalidInput("bad grid thumbnail".into());
+
+        assert_eq!(
+            begin_subject_cpu_fallback(&mut state, &error),
+            SubjectFallbackDecision::NotRequired
+        );
+        assert_eq!(
+            state,
+            SubjectBackendState::Active(ExecutionBackend::DirectMl)
+        );
+    }
+
+    #[test]
+    fn broken_subject_thumbnail_is_reported_as_invalid_input() {
+        let error = load_subject_thumbnail(Path::new("test-data/missing-subject-grid-640-v1.jpg"))
+            .expect_err("missing subject thumbnail must fail");
+
+        assert!(matches!(error, SemanticError::InvalidInput(_)));
+    }
+
+    #[test]
+    fn cpu_batch_retry_failure_keeps_fallback_for_next_thumbnail() {
+        let state = Mutex::new(SubjectBackendState::Active(ExecutionBackend::DirectMl));
+        let result: Result<(), SemanticError> = run_subject_batch_with_fallback(
+            &state,
+            ExecutionBackend::DirectMl,
+            || Err(SemanticError::Inference("DirectML batch failure".into())),
+            || Ok(()),
+            || Err(SemanticError::Inference("CPU batch retry failure".into())),
+        );
+
+        assert!(matches!(
+            result,
+            Err(SemanticError::Inference(message))
+                if message.contains("CPU batch retry failure")
+        ));
+        assert!(matches!(
+            &*state.lock(),
+            SubjectBackendState::CpuFallback { reason }
+                if reason.contains("DirectML batch failure")
+        ));
+
+        let recovered = run_subject_batch_with_fallback(
+            &state,
+            ExecutionBackend::Cpu,
+            || Ok::<_, SemanticError>("single thumbnail recovered"),
+            || Ok::<(), SemanticError>(()),
+            || Ok::<_, SemanticError>("unused CPU closure"),
+        )
+        .expect("next thumbnail should be allowed to recover on CPU");
+        assert_eq!(recovered, "single thumbnail recovered");
+    }
+
+    #[test]
+    fn concurrent_fallback_requests_have_one_state_transition() {
+        let state = std::sync::Arc::new(Mutex::new(SubjectBackendState::Active(
+            ExecutionBackend::DirectMl,
+        )));
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let mut handles = Vec::new();
+        for index in 0..2 {
+            let state = std::sync::Arc::clone(&state);
+            let barrier = std::sync::Arc::clone(&barrier);
+            handles.push(std::thread::spawn(move || {
+                barrier.wait();
+                let error = SemanticError::Inference(format!("concurrent failure {index}"));
+                let mut state = state.lock();
+                begin_subject_cpu_fallback(&mut state, &error)
+            }));
+        }
+
+        let decisions = handles
+            .into_iter()
+            .map(|handle| handle.join().expect("fallback transition thread"))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            decisions
+                .iter()
+                .filter(|decision| **decision == SubjectFallbackDecision::RetryCpu)
+                .count(),
+            1
+        );
+        assert_eq!(
+            decisions
+                .iter()
+                .filter(|decision| **decision == SubjectFallbackDecision::AlreadyAttempted)
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn cpu_fallback_rechecks_subject_model_hashes() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let detector_path = temp.path().join(MODEL_FILE);
+        std::fs::write(&detector_path, b"changed model").expect("write invalid model fixture");
+
+        let error = verify_subject_model_resources(&detector_path, None)
+            .expect_err("changed model must fail integrity validation");
+        assert!(matches!(error, SemanticError::Integrity(_)));
     }
 
     #[test]

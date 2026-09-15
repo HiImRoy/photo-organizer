@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import {
   chooseOrganizationTargetFolder,
@@ -20,6 +20,7 @@ import type {
   AssetScopeInputV1,
   OrganizationScope,
 } from "../types";
+import "./organizationWorkspace.css";
 
 const levelOptions: Array<{
   value: OrganizationLevelKind;
@@ -131,6 +132,29 @@ const defaultRules: OrganizationRules = {
   conflictStrategy: "sequence",
 };
 
+type OrganizationPlanSnapshot = {
+  key: string;
+  plan: OrganizationPlan;
+};
+
+function organizationSnapshotKey(
+  libraryId: number,
+  targetRoot: string,
+  scope: OrganizationScope,
+  scopeInput: AssetScopeInputV1,
+  selectedAssetIds: number[],
+  rules: OrganizationRules,
+) {
+  return JSON.stringify({
+    libraryId,
+    targetRoot: targetRoot.trim(),
+    scope,
+    filter: scopeInput.query.filter,
+    selectedAssetIds,
+    rules,
+  });
+}
+
 interface OrganizationWorkspaceProps {
   library: LibrarySummary;
   selectedAssetIds: number[];
@@ -153,52 +177,115 @@ export function OrganizationWorkspace({
     scopeInput.kind === "selection" ? "selected" : "filtered",
   );
   const [rules, setRules] = useState<OrganizationRules>(defaultRules);
-  const [plan, setPlan] = useState<OrganizationPlan | null>(null);
-  const [selectedItem, setSelectedItem] = useState<OrganizationPlanItem | null>(null);
+  const [planSnapshot, setPlanSnapshot] = useState<OrganizationPlanSnapshot | null>(null);
+  const [selectedItemState, setSelectedItem] = useState<OrganizationPlanItem | null>(null);
   const [dragIndex, setDragIndex] = useState<number | null>(null);
-  const [busy, setBusy] = useState(false);
+  const [busyRequestKey, setBusyRequestKey] = useState<string | null>(null);
   const [message, setMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+
+  const currentSnapshotKey = organizationSnapshotKey(
+    library.id,
+    targetRoot,
+    scope,
+    scopeInput,
+    selectedAssetIds,
+    rules,
+  );
+  const plan = planSnapshot?.key === currentSnapshotKey ? planSnapshot.plan : null;
+  const selectedItem = plan ? selectedItemState : null;
+  const busy = busyRequestKey === currentSnapshotKey;
+  const mountedRef = useRef(true);
+  const currentSnapshotKeyRef = useRef(currentSnapshotKey);
+  const planSnapshotRef = useRef(planSnapshot);
+  const previousSnapshotKeyRef = useRef(currentSnapshotKey);
+  const planRequestVersionRef = useRef(0);
+  const exportRequestVersionRef = useRef(0);
+
+  useEffect(() => {
+    currentSnapshotKeyRef.current = currentSnapshotKey;
+    planSnapshotRef.current = planSnapshot;
+  }, [currentSnapshotKey, planSnapshot]);
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      planRequestVersionRef.current += 1;
+      exportRequestVersionRef.current += 1;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (previousSnapshotKeyRef.current === currentSnapshotKey) return;
+    previousSnapshotKeyRef.current = currentSnapshotKey;
+    planRequestVersionRef.current += 1;
+    exportRequestVersionRef.current += 1;
+    setPlanSnapshot(null);
+    setBusyRequestKey(null);
+    setMessage(null);
+    setError(null);
+  }, [currentSnapshotKey]);
 
   async function chooseTarget() {
     setError(null);
     try {
       const path = await chooseOrganizationTargetFolder();
-      if (path) setTargetRoot(path);
+      if (mountedRef.current && path) setTargetRoot(path);
     } catch (reason) {
-      setError(messageFrom(reason));
+      if (mountedRef.current) setError(messageFrom(reason));
     }
   }
 
   async function generatePlan() {
+    const requestVersion = planRequestVersionRef.current + 1;
+    planRequestVersionRef.current = requestVersion;
+    const requestSnapshotKey = currentSnapshotKey;
     setError(null);
     setMessage(null);
     if (!targetRoot.trim()) {
+      setBusyRequestKey(null);
       setError("请先选择或输入目标根目录。");
       return;
     }
     if (scope === "selected" && selectedAssetIds.length === 0) {
+      setBusyRequestKey(null);
       setError("当前没有选中的图片，无法生成“用户选中”范围的预览。");
       return;
     }
-    setBusy(true);
+    setBusyRequestKey(requestSnapshotKey);
+    const request: OrganizationPlanRequest = {
+      libraryId: library.id,
+      targetRoot: targetRoot.trim(),
+      scope,
+      filter: scopeInput.query.filter,
+      selectedAssetIds,
+      rules,
+    };
     try {
-      const request: OrganizationPlanRequest = {
-        libraryId: library.id,
-        targetRoot: targetRoot.trim(),
-        scope,
-        filter: scopeInput.query.filter,
-        selectedAssetIds,
-        rules,
-      };
       const nextPlan = await previewOrganizationPlan(request);
-      setPlan(nextPlan);
+      if (
+        !mountedRef.current ||
+        requestVersion !== planRequestVersionRef.current ||
+        currentSnapshotKeyRef.current !== requestSnapshotKey
+      ) {
+        return;
+      }
+      setPlanSnapshot({ key: requestSnapshotKey, plan: nextPlan });
       setSelectedItem(nextPlan.items[0] ?? null);
       setMessage("整理预览已更新。");
     } catch (reason) {
-      setError(messageFrom(reason));
+      if (
+        mountedRef.current &&
+        requestVersion === planRequestVersionRef.current &&
+        currentSnapshotKeyRef.current === requestSnapshotKey
+      ) {
+        setError(messageFrom(reason));
+      }
     } finally {
-      setBusy(false);
+      if (mountedRef.current && requestVersion === planRequestVersionRef.current) {
+        setBusyRequestKey(null);
+      }
     }
   }
 
@@ -234,13 +321,33 @@ export function OrganizationWorkspace({
   }
 
   async function exportPlan(format: "json" | "csv") {
-    if (!plan) return;
+    const requestPlan = plan;
+    const requestSnapshotKey = currentSnapshotKey;
+    if (!requestPlan) return;
+    const requestVersion = exportRequestVersionRef.current + 1;
+    exportRequestVersionRef.current = requestVersion;
     setError(null);
     try {
-      const path = await exportOrganizationManifest(plan, format);
-      if (path) setMessage(`已导出 ${format.toUpperCase()} 只读清单：${path}`);
+      const path = await exportOrganizationManifest(requestPlan, format);
+      if (
+        mountedRef.current &&
+        requestVersion === exportRequestVersionRef.current &&
+        currentSnapshotKeyRef.current === requestSnapshotKey &&
+        planSnapshotRef.current?.key === requestSnapshotKey &&
+        planSnapshotRef.current?.plan === requestPlan
+      ) {
+        if (path) setMessage(`已导出 ${format.toUpperCase()} 只读清单：${path}`);
+      }
     } catch (reason) {
-      setError(messageFrom(reason));
+      if (
+        mountedRef.current &&
+        requestVersion === exportRequestVersionRef.current &&
+        currentSnapshotKeyRef.current === requestSnapshotKey &&
+        planSnapshotRef.current?.key === requestSnapshotKey &&
+        planSnapshotRef.current?.plan === requestPlan
+      ) {
+        setError(messageFrom(reason));
+      }
     }
   }
 
@@ -397,8 +504,7 @@ export function OrganizationWorkspace({
                       </button>
                     </div>
                     <small className="organization-level-note">
-                      {levelOption.description}（如 {levelOption.example}） · 缺失时
-                      {fallbackOption.label}
+                      {levelOption.description} · {fallbackOption.label}
                     </small>
                   </div>
                 );
@@ -429,7 +535,8 @@ export function OrganizationWorkspace({
               }
             />
             <small>
-              变量：capture_time、camera、lens、original_name、semantic、tone、dominant_color、saturation、sequence、short_hash。
+              可用变量：capture_time · camera · lens · original_name · semantic · tone ·
+              dominant_color · saturation · sequence · short_hash
             </small>
           </div>
 
@@ -452,7 +559,7 @@ export function OrganizationWorkspace({
                   </option>
                 ))}
               </select>
-              <small>同时用于命名模板和语义、影调、颜色等目录字段；修改时间只替代拍摄时间。</small>
+              <small>修改时间仅替代拍摄时间。</small>
             </label>
             <label>
               重名策略
@@ -546,7 +653,7 @@ export function OrganizationWorkspace({
               </div>
               {plan.summary.targetAvailableBytes === null ? (
                 <div className="organization-space-note">
-                  目标卷可用空间未探测；没有创建探测文件，预计空间仅为源文件大小合计。
+                  未探测目标卷空间；预计空间按源文件大小合计。
                 </div>
               ) : null}
               <div className="organization-tree">

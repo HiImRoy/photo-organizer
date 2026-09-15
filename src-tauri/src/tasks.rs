@@ -51,6 +51,7 @@ impl Drop for SourceScanGuard {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SemanticControlSignal {
     Continue,
+    Paused,
     Cancel,
 }
 
@@ -61,8 +62,24 @@ struct SemanticControlState {
 }
 
 #[derive(Debug, Default)]
+pub(crate) struct SemanticTaskJobState {
+    terminal: bool,
+}
+
+impl SemanticTaskJobState {
+    pub(crate) fn is_terminal(&self) -> bool {
+        self.terminal
+    }
+
+    pub(crate) fn mark_terminal(&mut self) {
+        self.terminal = true;
+    }
+}
+
+#[derive(Debug, Default)]
 pub struct SemanticTaskControl {
     state: Mutex<SemanticControlState>,
+    job: Mutex<SemanticTaskJobState>,
     wake: Condvar,
 }
 
@@ -72,28 +89,83 @@ impl SemanticTaskControl {
         while state.paused && !state.cancelled {
             self.wake.wait(&mut state);
         }
-        if state.cancelled {
-            SemanticControlSignal::Cancel
-        } else {
-            SemanticControlSignal::Continue
-        }
+        control_signal(&state)
     }
 
-    fn pause(&self) {
-        self.state.lock().paused = true;
+    pub fn current_signal(&self) -> SemanticControlSignal {
+        control_signal(&self.state.lock())
     }
 
-    fn resume(&self) {
+    pub(crate) fn with_job_lock<T>(
+        &self,
+        operation: impl FnOnce(&mut SemanticTaskJobState) -> T,
+    ) -> T {
+        let mut job = self.job.lock();
+        operation(&mut job)
+    }
+
+    pub(crate) fn pause_locked(&self) -> bool {
         let mut state = self.state.lock();
+        if state.cancelled {
+            return false;
+        }
+        state.paused = true;
+        true
+    }
+
+    pub(crate) fn resume_locked(&self) -> bool {
+        let mut state = self.state.lock();
+        if state.cancelled {
+            return false;
+        }
         state.paused = false;
         self.wake.notify_all();
+        true
     }
 
-    fn cancel(&self) {
+    pub(crate) fn cancel_locked(&self) -> bool {
         let mut state = self.state.lock();
         state.cancelled = true;
         state.paused = false;
         self.wake.notify_all();
+        true
+    }
+
+    fn pause_serialized(&self) -> bool {
+        self.with_job_lock(|job| {
+            if job.is_terminal() {
+                return false;
+            }
+            self.pause_locked()
+        })
+    }
+
+    fn resume_serialized(&self) -> bool {
+        self.with_job_lock(|job| {
+            if job.is_terminal() {
+                return false;
+            }
+            self.resume_locked()
+        })
+    }
+
+    fn cancel_serialized(&self) -> bool {
+        self.with_job_lock(|job| {
+            if job.is_terminal() {
+                return false;
+            }
+            self.cancel_locked()
+        })
+    }
+}
+
+fn control_signal(state: &SemanticControlState) -> SemanticControlSignal {
+    if state.cancelled {
+        SemanticControlSignal::Cancel
+    } else if state.paused {
+        SemanticControlSignal::Paused
+    } else {
+        SemanticControlSignal::Continue
     }
 }
 
@@ -113,37 +185,23 @@ impl SemanticTaskRegistry {
         Some(control)
     }
 
+    pub fn control(&self, job_id: &str) -> Option<Arc<SemanticTaskControl>> {
+        self.controls.lock().get(job_id).cloned()
+    }
+
     pub fn pause(&self, job_id: &str) -> bool {
-        self.controls
-            .lock()
-            .get(job_id)
-            .cloned()
-            .is_some_and(|control| {
-                control.pause();
-                true
-            })
+        self.control(job_id)
+            .is_some_and(|control| control.pause_serialized())
     }
 
     pub fn resume(&self, job_id: &str) -> bool {
-        self.controls
-            .lock()
-            .get(job_id)
-            .cloned()
-            .is_some_and(|control| {
-                control.resume();
-                true
-            })
+        self.control(job_id)
+            .is_some_and(|control| control.resume_serialized())
     }
 
     pub fn cancel(&self, job_id: &str) -> bool {
-        self.controls
-            .lock()
-            .get(job_id)
-            .cloned()
-            .is_some_and(|control| {
-                control.cancel();
-                true
-            })
+        self.control(job_id)
+            .is_some_and(|control| control.cancel_serialized())
     }
 
     pub fn remove(&self, job_id: &str) {
@@ -212,6 +270,7 @@ mod tests {
         let registry = SemanticTaskRegistry::default();
         let control = registry.insert("semantic-one").expect("new control");
         assert!(registry.pause("semantic-one"));
+        assert_eq!(control.current_signal(), SemanticControlSignal::Paused);
         assert!(registry.resume("semantic-one"));
         assert_eq!(
             control.wait_until_runnable(),
@@ -221,5 +280,17 @@ mod tests {
         assert_eq!(control.wait_until_runnable(), SemanticControlSignal::Cancel);
         registry.remove("semantic-one");
         assert!(!registry.cancel("semantic-one"));
+    }
+
+    #[test]
+    fn semantic_task_controls_reject_late_controls_after_terminal() {
+        let registry = SemanticTaskRegistry::default();
+        let control = registry.insert("semantic-terminal").expect("new control");
+        control.with_job_lock(|job| job.mark_terminal());
+
+        assert!(!registry.pause("semantic-terminal"));
+        assert!(!registry.resume("semantic-terminal"));
+        assert!(!registry.cancel("semantic-terminal"));
+        assert_eq!(control.current_signal(), SemanticControlSignal::Continue);
     }
 }

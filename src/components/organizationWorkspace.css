@@ -1,0 +1,812 @@
+/*
+ * OrganizationWorkspace is a dense planning surface: the left rail sets
+ * rules, the center rail proves the result, and the right rail checks one
+ * mapping. Keep the override local so the rest of the photo workspace keeps
+ * its own rhythm.
+ */
+.photo-app .organization-workspace {
+  --organization-control-height: var(--control-height-compact);
+  min-width: 0;
+  min-height: 0;
+  color: var(--text-secondary);
+  background: var(--canvas) !important;
+}
+
+.photo-app .organization-workspace .organization-safety-banner {
+  display: flex;
+  min-height: 44px;
+  align-items: center;
+  gap: 8px;
+  padding: 6px clamp(12px, 2vw, 20px);
+  color: var(--text-muted);
+  border-bottom: 1px solid var(--line-subtle);
+  background: var(--panel) !important;
+  font-size: 10px;
+}
+
+.photo-app .organization-workspace .organization-safety-banner > .safety-dot {
+  flex: 0 0 auto;
+}
+
+.photo-app .organization-workspace .organization-safety-banner > strong {
+  flex: 0 0 auto;
+  color: var(--text-high);
+  font-size: 11px;
+  letter-spacing: 0;
+  white-space: nowrap;
+}
+
+.photo-app .organization-workspace .organization-scope-chip {
+  min-width: 0;
+  max-width: min(34vw, 280px);
+  overflow: hidden;
+  padding: 5px 9px;
+  color: var(--accent-strong);
+  border: 1px solid var(--line-visible);
+  border-radius: var(--control-radius);
+  background: var(--accent-soft);
+  font-size: 10px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.photo-app .organization-workspace .organization-safety-banner > button {
+  flex: 0 0 auto;
+  margin-left: auto;
+}
+
+.photo-app .organization-workspace .organization-message {
+  min-height: 32px;
+  padding: 7px clamp(12px, 2vw, 20px);
+  font-size: 10px;
+  line-height: 1.35;
+}
+
+.photo-app .organization-workspace .organization-columns {
+  min-width: 0;
+  grid-template-columns: minmax(272px, 304px) minmax(0, 1fr) minmax(240px, 284px);
+  background: var(--canvas);
+}
+
+.photo-app .organization-workspace .organization-controls,
+.photo-app .organization-workspace .organization-detail {
+  min-width: 0;
+  min-height: 0;
+  padding: 14px clamp(12px, 1.6vw, 18px);
+  background: var(--panel) !important;
+}
+
+.photo-app .organization-workspace .organization-controls {
+  border-right: 1px solid var(--line-subtle);
+}
+
+.photo-app .organization-workspace .organization-detail {
+  border-left: 1px solid var(--line-subtle);
+}
+
+.photo-app .organization-workspace .organization-preview {
+  min-width: 0;
+  min-height: 0;
+  background: var(--canvas) !important;
+}
+
+.photo-app .organization-workspace .organization-panel-heading,
+.photo-app .organization-workspace .organization-preview-heading {
+  min-width: 0;
+  min-height: 42px;
+  align-items: flex-start;
+  padding: 0 0 10px;
+  border-bottom: 1px solid var(--line-subtle);
+}
+
+.photo-app .organization-workspace .organization-panel-heading {
+  margin-bottom: 14px;
+}
+
+.photo-app .organization-workspace .organization-panel-heading h2,
+.photo-app .organization-workspace .organization-preview-heading h2 {
+  margin: 0;
+  color: var(--text-high);
+  font-size: 14px;
+  font-weight: 650;
+  letter-spacing: 0;
+  line-height: 1.25;
+}
+
+.photo-app .organization-workspace .organization-preview-heading {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  padding: 14px clamp(14px, 2vw, 20px) 10px;
+  background: color-mix(in srgb, var(--canvas) 94%, transparent);
+  backdrop-filter: blur(8px);
+}
+
+.photo-app .organization-workspace .organization-detail > .organization-preview-heading {
+  padding-inline: 0;
+}
+
+.photo-app .organization-workspace .organization-fieldset {
+  display: grid;
+  gap: 3px;
+  margin: 0 0 14px;
+  padding: 0 0 12px;
+  border: 0 !important;
+  border-bottom: 1px solid var(--line-subtle);
+  background: transparent !important;
+}
+
+.photo-app .organization-workspace .organization-fieldset legend {
+  width: 100%;
+  margin-bottom: 6px;
+  padding: 0;
+  color: var(--text-high);
+  font-size: 11px;
+  font-weight: 650;
+}
+
+.photo-app .organization-workspace .organization-fieldset label {
+  min-height: 30px;
+  align-items: center;
+  padding: 0 8px;
+  gap: 8px;
+  color: var(--text-secondary);
+  border-radius: var(--control-radius);
+  font-size: 10px;
+}
+
+.photo-app .organization-workspace .organization-fieldset label:hover,
+.photo-app .organization-workspace .organization-fieldset label:has(input:checked) {
+  color: var(--text-high);
+  background: var(--panel-raised);
+}
+
+.photo-app .organization-workspace .organization-fieldset label:has(input:checked) {
+  box-shadow: inset 2px 0 var(--accent);
+}
+
+.photo-app .organization-workspace .organization-fieldset input {
+  width: 14px;
+  height: 14px;
+  margin: 0;
+  accent-color: var(--accent);
+}
+
+.photo-app .organization-workspace .organization-fieldset label span {
+  margin-left: auto;
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.photo-app .organization-workspace .organization-control-group {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+  margin-bottom: 14px;
+  padding-bottom: 14px;
+  border-bottom: 1px solid var(--line-subtle);
+}
+
+.photo-app .organization-workspace .organization-control-group > label,
+.photo-app .organization-workspace .organization-label-row label,
+.photo-app .organization-workspace .organization-rule-row label {
+  min-width: 0;
+  color: var(--text-high);
+  font-size: 10px;
+  font-weight: 600;
+}
+
+.photo-app .organization-workspace .organization-control-group small,
+.photo-app .organization-workspace .organization-rule-row label small,
+.photo-app .organization-workspace .organization-level-note {
+  min-width: 0;
+  color: var(--text-muted);
+  font-size: 9px;
+  line-height: 1.35;
+}
+
+.photo-app .organization-workspace .organization-label-row {
+  min-width: 0;
+  min-height: 18px;
+  align-items: baseline;
+}
+
+.photo-app .organization-workspace .organization-label-row small {
+  flex: 0 1 auto;
+  color: var(--text-muted);
+  font-size: 9px;
+  white-space: nowrap;
+}
+
+.photo-app .organization-workspace .organization-target-input {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 6px;
+  min-width: 0;
+}
+
+.photo-app
+  .organization-workspace
+  :is(
+    .organization-target-input input,
+    .template-input,
+    .organization-control-group select,
+    .organization-rule-row select,
+    .organization-rule-row input,
+    .organization-level select
+  ) {
+  box-sizing: border-box;
+  min-width: 0;
+  min-height: var(--organization-control-height);
+  height: var(--organization-control-height);
+  padding: 0 9px;
+  color: var(--text-high);
+  border: 1px solid var(--line-subtle) !important;
+  border-radius: var(--control-radius) !important;
+  outline: none;
+  background: var(--panel-inset) !important;
+  box-shadow: none !important;
+  font-size: 10px;
+  line-height: 1.1;
+}
+
+.photo-app
+  .organization-workspace
+  :is(
+    .organization-target-input input,
+    .template-input,
+    .organization-control-group select,
+    .organization-rule-row select,
+    .organization-rule-row input,
+    .organization-level select
+  ):focus {
+  border-color: var(--accent) !important;
+  outline: 2px solid color-mix(in srgb, var(--accent) 22%, transparent);
+  outline-offset: 0;
+}
+
+.photo-app
+  .organization-workspace
+  :is(
+    .organization-safety-banner > button,
+    .organization-target-input > button,
+    .organization-actions > button,
+    .organization-level > button,
+    .subtle-button,
+    .organization-generate
+  ) {
+  box-sizing: border-box;
+  min-height: var(--organization-control-height);
+  height: var(--organization-control-height);
+  align-items: center;
+  justify-content: center;
+  padding: 0 10px;
+  color: var(--text-secondary);
+  border: 1px solid var(--line-subtle) !important;
+  border-radius: var(--control-radius) !important;
+  background: var(--panel-raised);
+  box-shadow: none !important;
+  font: inherit;
+  font-size: 10px;
+  font-weight: 550;
+  line-height: 1;
+}
+
+.photo-app
+  .organization-workspace
+  :is(
+    .organization-safety-banner > button,
+    .organization-target-input > button,
+    .organization-actions > button,
+    .organization-level > button,
+    .subtle-button
+  ):hover:not(:disabled) {
+  color: var(--text-high);
+  border-color: var(--line-visible) !important;
+  background: var(--panel-raised);
+}
+
+.photo-app .organization-workspace .organization-level > button {
+  width: var(--organization-control-height);
+  padding: 0;
+  color: var(--text-muted);
+  display: inline-flex;
+  line-height: 1;
+}
+
+.photo-app .organization-workspace .organization-level > button:hover:not(:disabled) {
+  color: var(--text-high);
+}
+
+.photo-app .organization-workspace .organization-level > button:disabled {
+  opacity: 0.3;
+}
+
+.photo-app .organization-workspace .organization-level-columns {
+  display: grid;
+  grid-template-columns: 16px 18px minmax(70px, 1fr) minmax(70px, 1fr) repeat(
+      3,
+      var(--organization-control-height)
+    );
+  gap: 4px;
+  margin: 1px 0 4px;
+  padding: 0 4px;
+  color: var(--text-muted);
+  font-size: 9px;
+}
+
+.photo-app .organization-workspace .organization-level-columns span:first-child {
+  grid-column: 3;
+}
+
+.photo-app .organization-workspace .organization-level-columns span:last-child {
+  grid-column: 4;
+}
+
+.photo-app .organization-workspace .organization-levels {
+  display: grid;
+  gap: 7px;
+  min-width: 0;
+}
+
+.photo-app .organization-workspace .organization-level-entry {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.photo-app .organization-workspace .organization-level {
+  display: grid;
+  min-width: 0;
+  min-height: calc(var(--organization-control-height) + 8px);
+  grid-template-columns: 16px 18px minmax(70px, 1fr) minmax(70px, 1fr) repeat(
+      3,
+      var(--organization-control-height)
+    );
+  align-items: center;
+  gap: 4px;
+  padding: 4px;
+  overflow: hidden;
+  border: 1px solid var(--line-subtle) !important;
+  border-radius: var(--control-radius) !important;
+  background: var(--panel-inset) !important;
+}
+
+.photo-app .organization-workspace .organization-level.is-dragging {
+  border-color: var(--accent) !important;
+  opacity: 0.7;
+}
+
+.photo-app .organization-workspace .organization-level strong {
+  color: var(--text-muted);
+  font-size: 9px;
+  font-variant-numeric: tabular-nums;
+  text-align: center;
+}
+
+.photo-app .organization-workspace .organization-level select {
+  width: 100%;
+  padding: 0 7px;
+  overflow: hidden;
+  color: var(--text-secondary);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.photo-app .organization-workspace .drag-handle {
+  color: var(--text-low);
+  font-size: 11px;
+  line-height: 1;
+}
+
+.photo-app .organization-workspace .organization-level-note {
+  display: block;
+  padding: 0 4px 0 24px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.photo-app .organization-workspace .subtle-button {
+  justify-self: start;
+  margin-top: 7px;
+  color: var(--accent-strong);
+  border-color: transparent !important;
+  background: transparent;
+}
+
+.photo-app .organization-workspace .organization-rule-row {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+  min-width: 0;
+  margin-bottom: 12px;
+}
+
+.photo-app .organization-workspace .organization-rule-row label {
+  display: grid;
+  gap: 5px;
+  color: var(--text-muted);
+  font-weight: 500;
+}
+
+.photo-app .organization-workspace .organization-rule-row label small {
+  display: block;
+}
+
+.photo-app .organization-workspace .organization-generate {
+  position: sticky;
+  bottom: 0;
+  z-index: 2;
+  display: inline-flex;
+  width: 100%;
+  margin-top: 1px;
+  color: var(--on-accent, #fff) !important;
+  border-color: var(--accent) !important;
+  background: var(--accent) !important;
+  box-shadow: 0 -12px 18px color-mix(in srgb, var(--panel) 92%, transparent) !important;
+}
+
+.photo-app .organization-workspace .organization-generate:hover:not(:disabled) {
+  background: var(--accent-strong) !important;
+}
+
+.photo-app .organization-workspace .organization-preview-heading > div:first-child {
+  min-width: 0;
+}
+
+.photo-app .organization-workspace .organization-actions {
+  display: flex;
+  flex: 0 0 auto;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 6px;
+}
+
+.photo-app .organization-workspace .organization-summary {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
+  padding: 12px clamp(14px, 2vw, 20px);
+  border-bottom: 1px solid var(--line-subtle);
+}
+
+.photo-app .organization-workspace .organization-metric {
+  min-width: 0;
+  min-height: 54px;
+  gap: 4px;
+  padding: 9px 10px;
+  border: 1px solid var(--line-subtle) !important;
+  border-radius: var(--control-radius) !important;
+  background: var(--panel) !important;
+}
+
+.photo-app .organization-workspace .organization-metric span {
+  color: var(--text-muted);
+  font-size: 9px;
+}
+
+.photo-app .organization-workspace .organization-metric strong {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text-high);
+  font-size: 16px;
+  font-weight: 650;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.photo-app .organization-workspace .organization-space-note {
+  margin: 10px clamp(14px, 2vw, 20px) 0;
+  padding: 7px 9px;
+  border: 1px solid color-mix(in srgb, var(--warning) 30%, transparent);
+  border-radius: var(--control-radius);
+  background: color-mix(in srgb, var(--warning) 8%, var(--canvas));
+  font-size: 9px;
+  line-height: 1.35;
+}
+
+.photo-app .organization-workspace .organization-tree {
+  min-height: 120px;
+  margin: 0 clamp(14px, 2vw, 20px);
+  padding: 10px 0 14px;
+  border-bottom: 1px solid var(--line-subtle);
+}
+
+.photo-app .organization-workspace .tree-node-label {
+  min-width: 0;
+  min-height: 30px;
+  grid-template-columns: 18px minmax(0, 1fr) auto;
+  gap: 7px;
+  padding: 0 8px;
+  border-radius: var(--control-radius);
+}
+
+.photo-app .organization-workspace .tree-node-label strong,
+.photo-app .organization-workspace .tree-node-label > span:last-child {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.photo-app .organization-workspace .tree-node-label strong {
+  color: var(--text-secondary);
+  font-size: 10px;
+}
+
+.photo-app .organization-workspace .tree-node-label > span:last-child {
+  color: var(--text-muted);
+  font-size: 9px;
+}
+
+.photo-app .organization-workspace .organization-mapping-heading {
+  display: flex;
+  min-width: 0;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 14px clamp(14px, 2vw, 20px) 8px;
+  color: var(--text-high);
+  font-size: 11px;
+}
+
+.photo-app .organization-workspace .organization-mapping-heading strong,
+.photo-app .organization-workspace .organization-mapping-heading span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.photo-app .organization-workspace .organization-mapping-heading span {
+  flex: 0 1 auto;
+  color: var(--text-muted);
+  font-size: 9px;
+}
+
+.photo-app .organization-workspace .organization-mapping-table {
+  min-width: 0;
+  padding: 0 clamp(14px, 2vw, 20px) 18px;
+  overflow: hidden;
+}
+
+.photo-app .organization-workspace .organization-mapping-row {
+  min-width: 0;
+  min-height: 36px;
+  grid-template-columns: minmax(0, 1.1fr) minmax(0, 1.5fr) auto;
+  align-items: center;
+  gap: 10px;
+  padding: 0 9px;
+  color: var(--text-secondary);
+  border-bottom: 1px solid var(--line-subtle);
+  font-size: 10px;
+}
+
+.photo-app .organization-workspace .organization-mapping-row:not(.is-header) {
+  width: 100%;
+  border: 1px solid transparent;
+  border-radius: var(--control-radius) !important;
+  background: transparent;
+  cursor: pointer;
+  font: inherit;
+  text-align: left;
+}
+
+.photo-app .organization-workspace .organization-mapping-row:not(.is-header):hover,
+.photo-app .organization-workspace .organization-mapping-row.is-selected {
+  color: var(--text-high);
+  border-color: var(--line-subtle);
+  background: var(--panel-raised);
+}
+
+.photo-app .organization-workspace .organization-mapping-row > span:not(.mapping-status) {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.photo-app .organization-workspace .organization-mapping-row.is-header {
+  min-height: 26px;
+  color: var(--text-muted);
+  border-bottom-color: var(--line-visible);
+  font-size: 9px;
+}
+
+.photo-app .organization-workspace .mapping-status {
+  white-space: nowrap;
+  font-size: 9px;
+}
+
+.photo-app .organization-workspace .organization-empty {
+  min-height: 120px;
+  margin: 10px clamp(14px, 2vw, 20px);
+  padding: 24px 14px;
+  gap: 6px;
+  border-radius: var(--control-radius) !important;
+  background: var(--panel) !important;
+}
+
+.photo-app .organization-workspace .organization-empty strong {
+  color: var(--text-high);
+  font-size: 14px;
+  font-weight: 650;
+}
+
+.photo-app .organization-workspace .organization-empty.is-compact {
+  min-height: 86px;
+  margin: 10px 0;
+  padding: 20px 10px;
+}
+
+.photo-app .organization-workspace .organization-empty.is-compact strong {
+  font-size: 11px;
+}
+
+.photo-app .organization-workspace .organization-detail .path-card,
+.photo-app .organization-workspace .organization-detail .variable-list,
+.photo-app .organization-workspace .organization-detail .issue-list {
+  min-width: 0;
+  padding: 14px 0;
+  border-bottom: 1px solid var(--line-subtle);
+  background: transparent !important;
+}
+
+.photo-app .organization-workspace .organization-detail .path-card code {
+  max-width: 100%;
+  padding: 6px 7px;
+  overflow-wrap: anywhere;
+  border-radius: var(--control-radius);
+  background: var(--panel-inset);
+  color: var(--accent-strong);
+  font-size: 9px;
+  line-height: 1.4;
+}
+
+.photo-app .organization-workspace .organization-detail .variable-list div {
+  min-width: 0;
+  min-height: 23px;
+  align-items: center;
+}
+
+.photo-app .organization-workspace .organization-detail .variable-list code {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text-secondary);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.photo-app .organization-workspace .organization-issue {
+  padding: 8px;
+  border: 1px solid color-mix(in srgb, var(--error) 32%, transparent) !important;
+  border-radius: var(--control-radius) !important;
+  background: color-mix(in srgb, var(--error) 8%, var(--panel)) !important;
+}
+
+.photo-app .organization-workspace .organization-issue.is-warning {
+  border-color: color-mix(in srgb, var(--warning) 32%, transparent) !important;
+  background: color-mix(in srgb, var(--warning) 8%, var(--panel)) !important;
+}
+
+@media (max-width: 1120px) {
+  .photo-app .organization-workspace .organization-columns {
+    grid-template-columns: minmax(272px, 304px) minmax(0, 1fr);
+  }
+
+  .photo-app .organization-workspace .organization-detail {
+    display: none;
+  }
+}
+
+@media (max-width: 820px) {
+  .photo-app .organization-workspace .organization-columns {
+    display: block;
+    overflow: auto;
+  }
+
+  .photo-app .organization-workspace .organization-controls,
+  .photo-app .organization-workspace .organization-detail {
+    display: block;
+    border: 0;
+  }
+
+  .photo-app .organization-workspace .organization-preview {
+    min-height: 520px;
+  }
+
+  .photo-app .organization-workspace .organization-detail {
+    border-top: 1px solid var(--line-subtle);
+  }
+}
+
+@media (max-width: 560px) {
+  .photo-app .organization-workspace .organization-safety-banner {
+    min-height: 52px;
+    flex-wrap: wrap;
+    padding-block: 7px;
+  }
+
+  .photo-app .organization-workspace .organization-safety-banner > strong {
+    flex: 1 1 auto;
+  }
+
+  .photo-app .organization-workspace .organization-scope-chip {
+    order: 3;
+    flex-basis: 100%;
+    max-width: none;
+  }
+
+  .photo-app .organization-workspace .organization-summary {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .photo-app .organization-workspace .organization-preview-heading {
+    align-items: flex-start;
+  }
+
+  .photo-app .organization-workspace .organization-level,
+  .photo-app .organization-workspace .organization-level-columns {
+    grid-template-columns: 16px 18px minmax(66px, 1fr) minmax(66px, 1fr) repeat(3, 26px);
+  }
+
+  .photo-app .organization-workspace .organization-level > button {
+    width: 26px;
+  }
+}
+
+@media (max-width: 370px) {
+  .photo-app .organization-workspace .organization-level-columns {
+    display: none;
+  }
+
+  .photo-app .organization-workspace .organization-level {
+    grid-template-columns: 16px 18px minmax(0, 1fr) repeat(3, 26px);
+    grid-auto-rows: var(--organization-control-height);
+    row-gap: 3px;
+  }
+
+  .photo-app .organization-workspace .organization-level > .drag-handle {
+    grid-column: 1;
+    grid-row: 1 / span 2;
+  }
+
+  .photo-app .organization-workspace .organization-level > strong {
+    grid-column: 2;
+    grid-row: 1 / span 2;
+  }
+
+  .photo-app .organization-workspace .organization-level > select:first-of-type {
+    grid-column: 3;
+    grid-row: 1;
+  }
+
+  .photo-app .organization-workspace .organization-level > select:nth-of-type(2) {
+    grid-column: 3 / span 4;
+    grid-row: 2;
+  }
+
+  .photo-app .organization-workspace .organization-level > button:nth-of-type(1) {
+    grid-column: 4;
+    grid-row: 1;
+  }
+
+  .photo-app .organization-workspace .organization-level > button:nth-of-type(2) {
+    grid-column: 5;
+    grid-row: 1;
+  }
+
+  .photo-app .organization-workspace .organization-level > button:nth-of-type(3) {
+    grid-column: 6;
+    grid-row: 1;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .photo-app .organization-workspace * {
+    scroll-behavior: auto !important;
+    transition-duration: 0.01ms !important;
+  }
+}

@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use crate::db::{Repository, SemanticAssetCandidate};
+use crate::db::{Repository, SemanticAssetCandidate, is_terminal_semantic_job_status};
 use crate::error::{AppError, AppResult};
 use crate::gpu::{
     CPU_ANALYSIS_BATCH_LIMIT, MAX_DIRECTML_ANALYSIS_BATCH_SIZE, analysis_batch_limit_for_backend,
@@ -12,11 +12,111 @@ use crate::semantic::{
     SemanticSimilarity,
 };
 use crate::subject::{SubjectAnalysisOutput, SubjectClassifier};
-use crate::tasks::{SemanticControlSignal, SemanticTaskRegistry};
+use crate::tasks::{SemanticControlSignal, SemanticTaskJobState, SemanticTaskRegistry};
 
 // Keep CPU inference small enough for ordinary desktops; DirectML may use a wider
 // application analysis batch after the GPU capacity tier has been checked.
 pub(crate) const SEMANTIC_BATCH_SIZE: usize = 4;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SemanticWorkerAction {
+    Continue,
+    WaitForResume,
+    Stop,
+}
+
+fn persist_semantic_progress_and_emit<F>(
+    repository: &Repository,
+    progress: &SemanticProgress,
+    emit: &F,
+) -> Result<bool, String>
+where
+    F: Fn(SemanticProgress),
+{
+    match repository.update_semantic_job_progress_if_active(progress) {
+        Ok(true) => {
+            emit(progress.clone());
+            Ok(true)
+        }
+        Ok(false) => Ok(false),
+        Err(error) => Err(error.to_string()),
+    }
+}
+
+fn publish_semantic_persistence_failure<F>(
+    job: &mut SemanticTaskJobState,
+    repository: &Repository,
+    progress: &mut SemanticProgress,
+    error: String,
+    emit: &F,
+) where
+    F: Fn(SemanticProgress),
+{
+    log::error!(
+        "could not persist semantic job {}: {error}",
+        progress.job_id
+    );
+    progress.status = "failed".into();
+    progress.error = Some(error);
+    progress.current_asset_id = None;
+    progress.current_path = None;
+    match repository.update_semantic_job_progress_if_active(progress) {
+        Ok(true) => {}
+        Ok(false) => log::error!(
+            "semantic job {} failure status was not persisted",
+            progress.job_id
+        ),
+        Err(error) => log::error!(
+            "could not persist semantic job {} failure status: {error}",
+            progress.job_id
+        ),
+    }
+    job.mark_terminal();
+    emit(progress.clone());
+}
+
+fn cancel_semantic_job_locked<F>(
+    job: &mut SemanticTaskJobState,
+    repository: &Repository,
+    progress: &mut SemanticProgress,
+    emit: &F,
+) where
+    F: Fn(SemanticProgress),
+{
+    if job.is_terminal() {
+        return;
+    }
+    progress.status = "cancelled".into();
+    progress.current_asset_id = None;
+    progress.current_path = None;
+    let cancelled = match repository.cancel_semantic_job_if_active(&progress.job_id) {
+        Ok(cancelled) => cancelled,
+        Err(error) => {
+            publish_semantic_persistence_failure(
+                job,
+                repository,
+                progress,
+                format!("could not cancel semantic job: {error}"),
+                emit,
+            );
+            return;
+        }
+    };
+    job.mark_terminal();
+    if cancelled {
+        match persist_semantic_progress_and_emit(repository, progress, emit) {
+            Ok(true) => {}
+            Ok(false) => emit(progress.clone()),
+            Err(error) => {
+                log::warn!(
+                    "could not persist cancelled semantic job {} progress: {error}",
+                    progress.job_id
+                );
+                emit(progress.clone());
+            }
+        }
+    }
+}
 
 #[allow(clippy::too_many_arguments)]
 pub fn spawn_semantic_job<F>(
@@ -86,23 +186,112 @@ where
                     model_name: classifier.result_metadata().name,
                     model_version: classifier.result_metadata().version,
                     error: None,
-                });
+            });
             progress.execution_backend = Some(backend.id().into());
-            progress.status = "running".into();
             progress.error = None;
-            let _ = repository.update_semantic_job_progress(&progress);
-            emit(progress.clone());
+            let startup_action = control.with_job_lock(|job| {
+                if is_terminal_semantic_job_status(&progress.status) {
+                    job.mark_terminal();
+                    return SemanticWorkerAction::Stop;
+                }
+                match control.current_signal() {
+                    SemanticControlSignal::Cancel => {
+                        cancel_semantic_job_locked(job, &repository, &mut progress, &emit);
+                        SemanticWorkerAction::Stop
+                    }
+                    SemanticControlSignal::Paused => {
+                        progress.status = "paused".into();
+                        match persist_semantic_progress_and_emit(&repository, &progress, &emit) {
+                            Ok(true) => SemanticWorkerAction::Continue,
+                            Ok(false) => {
+                                job.mark_terminal();
+                                SemanticWorkerAction::Stop
+                            }
+                            Err(error) => {
+                                publish_semantic_persistence_failure(
+                                    job,
+                                    &repository,
+                                    &mut progress,
+                                    error,
+                                    &emit,
+                                );
+                                SemanticWorkerAction::Stop
+                            }
+                        }
+                    }
+                    SemanticControlSignal::Continue => {
+                        progress.status = "running".into();
+                        match persist_semantic_progress_and_emit(&repository, &progress, &emit) {
+                            Ok(true) => SemanticWorkerAction::Continue,
+                            Ok(false) => {
+                                job.mark_terminal();
+                                SemanticWorkerAction::Stop
+                            }
+                            Err(error) => {
+                                publish_semantic_persistence_failure(
+                                    job,
+                                    &repository,
+                                    &mut progress,
+                                    error,
+                                    &emit,
+                                );
+                                SemanticWorkerAction::Stop
+                            }
+                        }
+                    }
+                }
+            });
+            if startup_action == SemanticWorkerAction::Stop {
+                registry.remove(&thread_job_id);
+                return;
+            }
 
             for candidate_batch in candidates.chunks(batch_size) {
-                if control.wait_until_runnable() == SemanticControlSignal::Cancel {
-                    progress.status = "cancelled".into();
-                    progress.current_asset_id = None;
-                    progress.current_path = None;
-                    let _ = repository.cancel_semantic_job(&thread_job_id);
-                    let _ = repository.update_semantic_job_progress(&progress);
-                    emit(progress.clone());
-                    registry.remove(&thread_job_id);
-                    return;
+                loop {
+                    match control.wait_until_runnable() {
+                        SemanticControlSignal::Cancel => {
+                            control.with_job_lock(|job| {
+                                cancel_semantic_job_locked(
+                                    job,
+                                    &repository,
+                                    &mut progress,
+                                    &emit,
+                                );
+                            });
+                            registry.remove(&thread_job_id);
+                            return;
+                        }
+                        SemanticControlSignal::Paused => continue,
+                        SemanticControlSignal::Continue => {
+                            let signal = control.with_job_lock(|job| {
+                                if job.is_terminal() {
+                                    None
+                                } else {
+                                    Some(control.current_signal())
+                                }
+                            });
+                            match signal {
+                                None => {
+                                    registry.remove(&thread_job_id);
+                                    return;
+                                }
+                                Some(SemanticControlSignal::Cancel) => {
+                                    control.with_job_lock(|job| {
+                                        cancel_semantic_job_locked(
+                                            job,
+                                            &repository,
+                                            &mut progress,
+                                            &emit,
+                                        );
+                                    });
+                                    registry.remove(&thread_job_id);
+                                    return;
+                                }
+                                Some(SemanticControlSignal::Paused) => continue,
+                                Some(SemanticControlSignal::Continue) => break,
+                            }
+                        }
+                    }
                 }
 
                 let mut ready = Vec::with_capacity(candidate_batch.len());
@@ -153,11 +342,109 @@ where
                 }
 
                 if let Some(candidate) = cache_ready.first() {
-                    progress.status = "running".into();
-                    progress.current_asset_id = Some(candidate.id);
-                    progress.current_path =
-                        Some(candidate.absolute_path.to_string_lossy().into_owned());
-                    emit(progress.clone());
+                    loop {
+                        match control.wait_until_runnable() {
+                            SemanticControlSignal::Cancel => {
+                                control.with_job_lock(|job| {
+                                    cancel_semantic_job_locked(
+                                        job,
+                                        &repository,
+                                        &mut progress,
+                                        &emit,
+                                    );
+                                });
+                                registry.remove(&thread_job_id);
+                                return;
+                            }
+                            SemanticControlSignal::Paused => continue,
+                            SemanticControlSignal::Continue => {
+                                let action = control.with_job_lock(|job| {
+                                    if job.is_terminal() {
+                                        return SemanticWorkerAction::Stop;
+                                    }
+                                    match control.current_signal() {
+                                        SemanticControlSignal::Cancel => {
+                                            cancel_semantic_job_locked(
+                                                job,
+                                                &repository,
+                                                &mut progress,
+                                                &emit,
+                                            );
+                                            SemanticWorkerAction::Stop
+                                        }
+                                        SemanticControlSignal::Paused => {
+                                            progress.status = "paused".into();
+                                            progress.current_asset_id = None;
+                                            progress.current_path = None;
+                                            match persist_semantic_progress_and_emit(
+                                                &repository,
+                                                &progress,
+                                                &emit,
+                                            ) {
+                                                Ok(true) => SemanticWorkerAction::WaitForResume,
+                                                Ok(false) => {
+                                                    job.mark_terminal();
+                                                    SemanticWorkerAction::Stop
+                                                }
+                                                Err(error) => {
+                                                    publish_semantic_persistence_failure(
+                                                        job,
+                                                        &repository,
+                                                        &mut progress,
+                                                        error,
+                                                        &emit,
+                                                    );
+                                                    SemanticWorkerAction::Stop
+                                                }
+                                            }
+                                        }
+                                        SemanticControlSignal::Continue => {
+                                            progress.status = "running".into();
+                                            progress.current_asset_id = Some(candidate.id);
+                                            progress.current_path = Some(
+                                                candidate
+                                                    .absolute_path
+                                                    .to_string_lossy()
+                                                    .into_owned(),
+                                            );
+                                            match persist_semantic_progress_and_emit(
+                                                &repository,
+                                                &progress,
+                                                &emit,
+                                            ) {
+                                                Ok(true) => SemanticWorkerAction::Continue,
+                                                Ok(false) => {
+                                                    job.mark_terminal();
+                                                    SemanticWorkerAction::Stop
+                                                }
+                                                Err(error) => {
+                                                    publish_semantic_persistence_failure(
+                                                        job,
+                                                        &repository,
+                                                        &mut progress,
+                                                        error,
+                                                        &emit,
+                                                    );
+                                                    SemanticWorkerAction::Stop
+                                                }
+                                            }
+                                        }
+                                    }
+                                });
+                                match action {
+                                    SemanticWorkerAction::Continue => break,
+                                    SemanticWorkerAction::WaitForResume => {
+                                        let _ = control.wait_until_runnable();
+                                        continue;
+                                    }
+                                    SemanticWorkerAction::Stop => {
+                                        registry.remove(&thread_job_id);
+                                        return;
+                                    }
+                                }
+                            }
+                        }
+                    }
 
                     let paths = cache_ready
                         .iter()
@@ -254,21 +541,150 @@ where
                         }
                     }
                 }
-                progress.processed = progress.completed + progress.failed + progress.skipped;
-                progress.current_asset_id = None;
-                progress.current_path = None;
-                let _ = repository.update_semantic_job_progress(&progress);
-                emit(progress.clone());
+                let batch_action = control.with_job_lock(|job| {
+                    if job.is_terminal() {
+                        return SemanticWorkerAction::Stop;
+                    }
+                    progress.processed = progress.completed + progress.failed + progress.skipped;
+                    progress.current_asset_id = None;
+                    progress.current_path = None;
+                    match control.current_signal() {
+                        SemanticControlSignal::Cancel => {
+                            cancel_semantic_job_locked(
+                                job,
+                                &repository,
+                                &mut progress,
+                                &emit,
+                            );
+                            SemanticWorkerAction::Stop
+                        }
+                        SemanticControlSignal::Paused => {
+                            progress.status = "paused".into();
+                            match persist_semantic_progress_and_emit(
+                                &repository,
+                                &progress,
+                                &emit,
+                            ) {
+                                Ok(true) => SemanticWorkerAction::WaitForResume,
+                                Ok(false) => {
+                                    job.mark_terminal();
+                                    SemanticWorkerAction::Stop
+                                }
+                                Err(error) => {
+                                    publish_semantic_persistence_failure(
+                                        job,
+                                        &repository,
+                                        &mut progress,
+                                        error,
+                                        &emit,
+                                    );
+                                    SemanticWorkerAction::Stop
+                                }
+                            }
+                        }
+                        SemanticControlSignal::Continue => {
+                            progress.status = "running".into();
+                            match persist_semantic_progress_and_emit(
+                                &repository,
+                                &progress,
+                                &emit,
+                            ) {
+                                Ok(true) => SemanticWorkerAction::Continue,
+                                Ok(false) => {
+                                    job.mark_terminal();
+                                    SemanticWorkerAction::Stop
+                                }
+                                Err(error) => {
+                                    publish_semantic_persistence_failure(
+                                        job,
+                                        &repository,
+                                        &mut progress,
+                                        error,
+                                        &emit,
+                                    );
+                                    SemanticWorkerAction::Stop
+                                }
+                            }
+                        }
+                    }
+                });
+                if batch_action == SemanticWorkerAction::Stop {
+                    registry.remove(&thread_job_id);
+                    return;
+                }
             }
 
-            progress.status = "completed".into();
-            progress.current_asset_id = None;
-            progress.current_path = None;
-            if progress.failed == 0 {
-                progress.error = None;
+            loop {
+                let finish_action = control.with_job_lock(|job| {
+                    if job.is_terminal() {
+                        return SemanticWorkerAction::Stop;
+                    }
+                    match control.current_signal() {
+                        SemanticControlSignal::Cancel => {
+                            cancel_semantic_job_locked(
+                                job,
+                                &repository,
+                                &mut progress,
+                                &emit,
+                            );
+                            SemanticWorkerAction::Stop
+                        }
+                        SemanticControlSignal::Paused => {
+                            progress.status = "paused".into();
+                            progress.current_asset_id = None;
+                            progress.current_path = None;
+                            match persist_semantic_progress_and_emit(
+                                &repository,
+                                &progress,
+                                &emit,
+                            ) {
+                                Ok(true) => SemanticWorkerAction::WaitForResume,
+                                Ok(false) => {
+                                    job.mark_terminal();
+                                    SemanticWorkerAction::Stop
+                                }
+                                Err(error) => {
+                                    publish_semantic_persistence_failure(
+                                        job,
+                                        &repository,
+                                        &mut progress,
+                                        error,
+                                        &emit,
+                                    );
+                                    SemanticWorkerAction::Stop
+                                }
+                            }
+                        }
+                        SemanticControlSignal::Continue => {
+                            progress.status = "completed".into();
+                            progress.current_asset_id = None;
+                            progress.current_path = None;
+                            if progress.failed == 0 {
+                                progress.error = None;
+                            }
+                            job.mark_terminal();
+                            if let Err(error) = persist_semantic_progress_and_emit(
+                                &repository,
+                                &progress,
+                                &emit,
+                            ) {
+                                publish_semantic_persistence_failure(
+                                    job,
+                                    &repository,
+                                    &mut progress,
+                                    error,
+                                    &emit,
+                                );
+                            }
+                            SemanticWorkerAction::Stop
+                        }
+                    }
+                });
+                if finish_action != SemanticWorkerAction::WaitForResume {
+                    break;
+                }
+                let _ = control.wait_until_runnable();
             }
-            let _ = repository.update_semantic_job_progress(&progress);
-            emit(progress);
             registry.remove(&thread_job_id);
         })
         .map_err(AppError::Io)?;
@@ -619,9 +1035,14 @@ fn classify_single_with_fallback(
 
 #[cfg(test)]
 mod tests {
+    use std::sync::{Arc, Barrier};
+    use std::time::Duration;
+
     use parking_lot::Mutex;
+    use rusqlite::params;
 
     use super::*;
+    use crate::db::Repository;
     use crate::semantic::{ModelMetadata, SemanticError, SemanticRuntimeStatus};
     use crate::subject::{SubjectPrediction, SubjectRuntimeStatus};
 
@@ -665,6 +1086,53 @@ mod tests {
         ) -> Result<Vec<SemanticAnalysisOutput>, SemanticError> {
             self.calls.lock().push(images.to_vec());
             Err(SemanticError::Inference("test failure".into()))
+        }
+    }
+
+    struct BlockingClassifier {
+        entered: Arc<Barrier>,
+        release: Arc<Barrier>,
+    }
+
+    impl SemanticClassifier for BlockingClassifier {
+        fn metadata(&self) -> ModelMetadata {
+            ModelMetadata {
+                name: "blocking-test-model".into(),
+                version: "test-version".into(),
+                analysis_version: "test-analysis".into(),
+                license: Some("test".into()),
+                installed: true,
+                model_size_bytes: None,
+                model_sha256: None,
+                supported_backends: vec![ExecutionBackend::Cpu],
+            }
+        }
+
+        fn status(&self) -> SemanticRuntimeStatus {
+            SemanticRuntimeStatus {
+                status: "ready".into(),
+                message: "test".into(),
+                model: self.metadata(),
+                topic_model: None,
+                selected_backend: Some(ExecutionBackend::Cpu),
+            }
+        }
+
+        fn classify_batch(
+            &self,
+            images: &[PathBuf],
+            _backend: ExecutionBackend,
+        ) -> Result<Vec<SemanticAnalysisOutput>, SemanticError> {
+            self.entered.wait();
+            self.release.wait();
+            Ok(images
+                .iter()
+                .map(|_| SemanticAnalysisOutput {
+                    predictions: Vec::new(),
+                    embedding: Vec::new(),
+                    raw_similarities: Vec::new(),
+                })
+                .collect())
         }
     }
 
@@ -832,6 +1300,144 @@ mod tests {
     }
 
     #[test]
+    fn batch_tail_persists_pause_before_final_finish() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let repository = Repository::new(temp.path().join("database.sqlite3"));
+        repository.initialize().expect("initialize");
+        let library_root = temp.path().join("library");
+        std::fs::create_dir_all(&library_root).expect("library root");
+        let (library_id, _) = repository
+            .begin_scan(
+                library_root.to_string_lossy().as_ref(),
+                "semantic-pause-scan",
+            )
+            .expect("begin scan");
+        let source_path = library_root.join("photo.jpg");
+        let thumbnail_dir = temp.path().join("thumbnails");
+        std::fs::create_dir_all(&thumbnail_dir).expect("thumbnail directory");
+        let thumbnail_path = thumbnail_dir.join("asset-grid-640-v1.jpg");
+        std::fs::write(&thumbnail_path, b"thumbnail fixture").expect("thumbnail fixture");
+
+        let connection = repository.open_for_tests().expect("open database");
+        connection
+            .execute(
+                "INSERT INTO assets(
+                    library_id, asset_identity_key, absolute_path, relative_path, file_name,
+                    extension, file_size, modified_at, fingerprint, width, height, orientation,
+                    file_status, scan_status, analysis_status, first_seen_at, last_seen_at,
+                    last_seen_scan
+                 ) VALUES(?1, 'semantic-pause-asset', ?2, 'photo.jpg', 'photo.jpg', 'jpg',
+                          100, 1, 'semantic-pause-fingerprint', 1000, 800, 1,
+                          'present', 'indexed', 'completed', ?3, ?3, 1)",
+                params![
+                    library_id,
+                    source_path.to_string_lossy().into_owned(),
+                    "2026-09-14T00:00:00Z"
+                ],
+            )
+            .expect("insert semantic asset");
+        let asset_id = connection.last_insert_rowid();
+        connection
+            .execute(
+                "INSERT INTO thumbnails(
+                    asset_id, cache_path, spec, source_modified_at, source_size,
+                    status, updated_at
+                 ) VALUES(?1, ?2, ?3, 1, 100, 'ready', ?4)",
+                params![
+                    asset_id,
+                    thumbnail_path.to_string_lossy().into_owned(),
+                    crate::imaging::THUMBNAIL_SPEC,
+                    "2026-09-14T00:00:00Z"
+                ],
+            )
+            .expect("insert semantic thumbnail");
+        connection
+            .execute(
+                "UPDATE libraries SET status='ready' WHERE id=?1",
+                [library_id],
+            )
+            .expect("finish seed library");
+        drop(connection);
+
+        let job_id = "semantic-pause-job";
+        let candidates = repository
+            .create_semantic_job(job_id, library_id, false, None)
+            .expect("create semantic job");
+        assert_eq!(candidates.len(), 1);
+        let registry = Arc::new(SemanticTaskRegistry::default());
+        let entered = Arc::new(Barrier::new(2));
+        let release = Arc::new(Barrier::new(2));
+        let classifier = Arc::new(BlockingClassifier {
+            entered: entered.clone(),
+            release: release.clone(),
+        });
+        let emitted_statuses = Arc::new(Mutex::new(Vec::<String>::new()));
+        let emitted_statuses_for_worker = emitted_statuses.clone();
+        spawn_semantic_job(
+            repository.clone(),
+            classifier,
+            None,
+            registry.clone(),
+            job_id.into(),
+            library_id,
+            candidates,
+            thumbnail_dir,
+            1,
+            ExecutionBackend::Cpu,
+            move |progress| {
+                emitted_statuses_for_worker.lock().push(progress.status);
+            },
+        )
+        .expect("spawn semantic worker");
+
+        entered.wait();
+        assert!(registry.pause(job_id));
+        release.wait();
+
+        let paused = (0..200).find_map(|_| {
+            let progress = repository
+                .semantic_progress_by_job(job_id)
+                .expect("read semantic progress");
+            if progress
+                .as_ref()
+                .is_some_and(|progress| progress.status == "paused")
+            {
+                progress
+            } else {
+                std::thread::sleep(Duration::from_millis(5));
+                None
+            }
+        });
+        assert!(
+            paused.is_some(),
+            "worker did not persist paused batch progress"
+        );
+        assert!(
+            emitted_statuses
+                .lock()
+                .iter()
+                .any(|status| status == "paused")
+        );
+
+        assert!(registry.resume(job_id));
+        let completed = (0..200).find_map(|_| {
+            let progress = repository
+                .semantic_progress_by_job(job_id)
+                .expect("read completed semantic progress");
+            if progress
+                .as_ref()
+                .is_some_and(|progress| progress.status == "completed")
+            {
+                progress
+            } else {
+                std::thread::sleep(Duration::from_millis(5));
+                None
+            }
+        });
+        assert!(completed.is_some(), "worker did not finish after resume");
+    }
+
+    #[test]
     fn semantic_batch_failure_splits_on_the_same_thumbnail_backend() {
         let candidates = adaptive_candidates(4);
         let candidate_refs = candidates.iter().collect::<Vec<_>>();
@@ -871,7 +1477,7 @@ mod tests {
     }
 
     #[test]
-    fn subject_batch_failure_splits_on_the_same_thumbnail_backend() {
+    fn cpu_subject_batch_failure_recovers_each_thumbnail_individually() {
         let candidates = adaptive_candidates(4);
         let candidate_refs = candidates.iter().collect::<Vec<_>>();
         let paths = candidates
@@ -880,7 +1486,7 @@ mod tests {
             .collect::<Vec<_>>();
         let classifier = AdaptiveSubjectClassifier {
             calls: Mutex::new(Vec::new()),
-            max_batch_size: 2,
+            max_batch_size: 1,
         };
 
         let results = classify_subject_batch_with_fallback(
@@ -893,8 +1499,10 @@ mod tests {
         assert_eq!(results.len(), 4);
         assert!(results.iter().all(Result::is_ok));
         let calls = classifier.calls.lock();
-        assert_eq!(calls[0].len(), 4);
-        assert!(calls.iter().skip(1).all(|call| call.len() <= 2));
+        assert_eq!(
+            calls.iter().map(Vec::len).collect::<Vec<_>>(),
+            vec![4, 2, 1, 1, 2, 1, 1]
+        );
         assert!(
             calls
                 .iter()

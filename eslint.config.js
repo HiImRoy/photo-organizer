@@ -6,7 +6,16 @@ import tseslint from "typescript-eslint";
 
 export default tseslint.config(
   {
-    ignores: ["dist", "coverage", "node_modules", "src-tauri/target", "reference", "lap", "target"],
+    ignores: [
+      "dist",
+      "coverage",
+      "node_modules",
+      "src-tauri/target",
+      "reference",
+      "lap",
+      "target",
+      "output/playwright/**",
+    ],
   },
   js.configs.recommended,
   ...tseslint.configs.recommended,

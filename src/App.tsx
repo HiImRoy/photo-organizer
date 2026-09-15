@@ -154,6 +154,14 @@ const GRID_COLUMNS_MIN = 2;
 const GRID_COLUMNS_MAX = 12;
 const GRID_COLUMNS_STEP = 2;
 
+function isTerminalScanStatus(status: ScanProgress["status"]) {
+  return ["completed", "cancelled", "failed"].includes(status);
+}
+
+function isTerminalSemanticStatus(status: SemanticProgress["status"]) {
+  return ["completed", "cancelled", "failed"].includes(status);
+}
+
 const GROUP_BY_OPTIONS: Array<{ value: AssetGroupBy; label: string }> = [
   { value: "none", label: "不分组" },
   { value: "primary_category", label: "拍摄题材" },
@@ -163,6 +171,43 @@ const GROUP_BY_OPTIONS: Array<{ value: AssetGroupBy; label: string }> = [
   { value: "dominant_color", label: "主色" },
   { value: "rating", label: "评分" },
 ];
+
+const INTERACTIVE_KEYBOARD_TARGET_SELECTOR = [
+  "button",
+  "input",
+  "textarea",
+  "select",
+  "option",
+  "summary",
+  "label",
+  "a[href]",
+  "[contenteditable]",
+  '[tabindex]:not([tabindex="-1"])',
+  '[role="button"]',
+  '[role="link"]',
+  '[role="tab"]',
+  '[role="checkbox"]',
+  '[role="radio"]',
+  '[role="switch"]',
+  '[role="slider"]',
+  '[role="combobox"]',
+  '[role="listbox"]',
+  '[role="option"]',
+  '[role="menuitem"]',
+].join(", ");
+
+function isInteractiveKeyboardTarget(target: EventTarget | null) {
+  if (!(target instanceof Element)) return false;
+  if (target instanceof HTMLElement && target.isContentEditable) return true;
+  return (
+    target.matches(INTERACTIVE_KEYBOARD_TARGET_SELECTOR) ||
+    target.closest(INTERACTIVE_KEYBOARD_TARGET_SELECTOR) !== null
+  );
+}
+
+function isGalleryKeyboardTarget(target: EventTarget | null) {
+  return target instanceof Element && target.closest(".asset-card, .filmstrip button") !== null;
+}
 
 function topicModelIdFromStatus(status: SemanticRuntimeStatus | null): string | null {
   const name = status?.topicModel?.name ?? status?.model?.name;
@@ -270,6 +315,7 @@ export default function App() {
   const [scanProgress, setScanProgress] = useState<ScanProgress | null>(null);
   const [semanticProgress, setSemanticProgress] = useState<SemanticProgress | null>(null);
   const [cancellingScan, setCancellingScan] = useState(false);
+  const [semanticControlBusy, setSemanticControlBusy] = useState(false);
   const [semanticStatus, setSemanticStatus] = useState<SemanticRuntimeStatus | null>(null);
   const [gpuCapabilities, setGpuCapabilities] = useState<GpuCapabilities | null>(null);
   const [subjectStatus, setSubjectStatus] = useState<SubjectRuntimeStatus | null>(null);
@@ -295,6 +341,19 @@ export default function App() {
   const refreshTimerRef = useRef<number | null>(null);
   const filterPopoverRef = useRef<HTMLDivElement | null>(null);
   const gridResultsRef = useRef<HTMLDivElement | null>(null);
+  const scanProgressRef = useRef<ScanProgress | null>(null);
+  const scanTaskIdRef = useRef<string | null>(null);
+  const scanTerminalTaskIdRef = useRef<string | null>(null);
+  const retiredScanTaskIdsRef = useRef(new Set<string>());
+  const scanControlTokenRef = useRef(0);
+  const scanCancelRequestRef = useRef<{ taskId: string; token: number } | null>(null);
+  const semanticProgressRef = useRef<SemanticProgress | null>(null);
+  const semanticJobIdRef = useRef<string | null>(null);
+  const semanticTerminalJobIdRef = useRef<string | null>(null);
+  const retiredSemanticJobIdsRef = useRef(new Set<string>());
+  const semanticControlTokenRef = useRef(0);
+  const semanticControlRequestRef = useRef<{ jobId: string; token: number } | null>(null);
+  const semanticProgressRevisionRef = useRef(0);
 
   const aiSearchTriggerRef = useRef<HTMLButtonElement | null>(null);
   const assetsRef = useRef<AssetListItem[]>([]);
@@ -309,6 +368,97 @@ export default function App() {
   const assetAssignmentRef = useRef<(assetIds: number[], targetLibraryId: number) => void>(
     () => {},
   );
+  const beginScanProgress = useCallback((progress: ScanProgress) => {
+    if (scanProgressRef.current?.taskId === progress.taskId) return;
+    if (retiredScanTaskIdsRef.current.has(progress.taskId)) return;
+    if (scanTaskIdRef.current !== null) {
+      retiredScanTaskIdsRef.current.add(scanTaskIdRef.current);
+    }
+    scanControlTokenRef.current += 1;
+    scanCancelRequestRef.current = null;
+    scanTaskIdRef.current = progress.taskId;
+    scanTerminalTaskIdRef.current = null;
+    scanProgressRef.current = progress;
+    setCancellingScan(false);
+    setScanProgress(progress);
+  }, []);
+  const acceptScanProgress = useCallback((progress: ScanProgress) => {
+    const current = scanProgressRef.current;
+    if (retiredScanTaskIdsRef.current.has(progress.taskId)) return false;
+    const switchingTask =
+      scanTaskIdRef.current !== null && scanTaskIdRef.current !== progress.taskId;
+    if (
+      (switchingTask && current !== null && !isTerminalScanStatus(current.status)) ||
+      scanTerminalTaskIdRef.current === progress.taskId ||
+      (current?.taskId === progress.taskId && isTerminalScanStatus(current.status))
+    ) {
+      return false;
+    }
+    if (switchingTask) {
+      retiredScanTaskIdsRef.current.add(scanTaskIdRef.current as string);
+      scanTerminalTaskIdRef.current = null;
+    }
+    scanTaskIdRef.current = progress.taskId;
+    scanProgressRef.current = progress;
+    if (isTerminalScanStatus(progress.status)) {
+      scanTerminalTaskIdRef.current = progress.taskId;
+      retiredScanTaskIdsRef.current.add(progress.taskId);
+    }
+    setScanProgress(progress);
+    return true;
+  }, []);
+  const dismissScanProgress = useCallback(() => {
+    scanCancelRequestRef.current = null;
+    setCancellingScan(false);
+    setScanProgress(null);
+  }, []);
+  const beginSemanticProgress = useCallback((progress: SemanticProgress) => {
+    if (semanticProgressRef.current?.jobId === progress.jobId) return;
+    if (retiredSemanticJobIdsRef.current.has(progress.jobId)) return;
+    if (semanticJobIdRef.current !== null) {
+      retiredSemanticJobIdsRef.current.add(semanticJobIdRef.current);
+    }
+    semanticControlTokenRef.current += 1;
+    semanticControlRequestRef.current = null;
+    setSemanticControlBusy(false);
+    semanticProgressRevisionRef.current += 1;
+    semanticJobIdRef.current = progress.jobId;
+    semanticTerminalJobIdRef.current = null;
+    semanticProgressRef.current = progress;
+    setSemanticProgress(progress);
+  }, []);
+  const acceptSemanticProgress = useCallback((progress: SemanticProgress) => {
+    const current = semanticProgressRef.current;
+    if (retiredSemanticJobIdsRef.current.has(progress.jobId)) return false;
+    const switchingJob =
+      semanticJobIdRef.current !== null && semanticJobIdRef.current !== progress.jobId;
+    if (
+      (switchingJob && current !== null && !isTerminalSemanticStatus(current.status)) ||
+      semanticTerminalJobIdRef.current === progress.jobId ||
+      (current?.jobId === progress.jobId && isTerminalSemanticStatus(current.status))
+    ) {
+      return false;
+    }
+    if (switchingJob) {
+      retiredSemanticJobIdsRef.current.add(semanticJobIdRef.current as string);
+      semanticControlRequestRef.current = null;
+      semanticControlTokenRef.current += 1;
+      semanticTerminalJobIdRef.current = null;
+      setSemanticControlBusy(false);
+    }
+    semanticJobIdRef.current = progress.jobId;
+    semanticProgressRevisionRef.current += 1;
+    semanticProgressRef.current = progress;
+    if (isTerminalSemanticStatus(progress.status)) {
+      semanticTerminalJobIdRef.current = progress.jobId;
+      retiredSemanticJobIdsRef.current.add(progress.jobId);
+    }
+    setSemanticProgress(progress);
+    return true;
+  }, []);
+  const closeSettingsDialog = useCallback(() => {
+    setSettingsOpen(false);
+  }, []);
   assetsRef.current = assets;
   assetQueryRef.current = assetQuery;
 
@@ -648,7 +798,7 @@ export default function App() {
     scanProgress !== null && ["running", "cancelling"].includes(scanProgress.status);
   const semanticRunning =
     semanticProgress !== null &&
-    ["queued", "running", "paused", "cancelling"].includes(semanticProgress.status);
+    ["queued", "running", "paused", "cancelling", "interrupted"].includes(semanticProgress.status);
   const activeFilterCount = countActiveFilters(filter);
   const activeCollection = filter.favoriteOnly
     ? (collections.find((collection) => collection.systemKey === "default_favorites") ?? null)
@@ -716,7 +866,10 @@ export default function App() {
       }
     };
     const handleKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape") setFilterPopoverOpen(false);
+      if (event.key !== "Escape" || event.defaultPrevented || event.isComposing) return;
+      event.preventDefault();
+      event.stopPropagation();
+      setFilterPopoverOpen(false);
     };
 
     document.addEventListener("pointerdown", handlePointerDown);
@@ -869,6 +1022,7 @@ export default function App() {
   useEffect(() => {
     let active = true;
     if (currentLibraryId === null) return undefined;
+    const fetchProgressRevision = semanticProgressRevisionRef.current;
     void Promise.all([
       fetchLibraries(),
       fetchBrowseNodes(),
@@ -880,15 +1034,24 @@ export default function App() {
         setLibraries(nextLibraries);
         setBrowseNodes(nextBrowseNodes);
         setSemanticGroups(nextGroups);
-        setSemanticProgress(progress);
+        if (fetchProgressRevision !== semanticProgressRevisionRef.current) return;
+        if (progress) {
+          acceptSemanticProgress(progress);
+        } else if (semanticJobIdRef.current === null) {
+          semanticProgressRevisionRef.current += 1;
+          semanticProgressRef.current = null;
+          setSemanticProgress(null);
+        }
       })
       .catch((reason: unknown) => {
-        if (active) setError(messageFrom(reason));
+        if (active && fetchProgressRevision === semanticProgressRevisionRef.current) {
+          setError(messageFrom(reason));
+        }
       });
     return () => {
       active = false;
     };
-  }, [refreshKey, currentLibraryId]);
+  }, [acceptSemanticProgress, refreshKey, currentLibraryId]);
 
   useEffect(() => {
     let disposed = false;
@@ -896,9 +1059,13 @@ export default function App() {
     let stopSemantic: (() => void) | undefined;
     void subscribeScanProgress((progress) => {
       if (disposed) return;
-      setScanProgress(progress);
+      if (!acceptScanProgress(progress)) return;
       if (progress.libraryId !== null) setCurrentLibraryId(progress.libraryId);
-      if (["completed", "cancelled", "failed"].includes(progress.status)) {
+      if (isTerminalScanStatus(progress.status)) {
+        if (scanCancelRequestRef.current?.taskId === progress.taskId) {
+          scanCancelRequestRef.current = null;
+          scanControlTokenRef.current += 1;
+        }
         setCancellingScan(false);
         requestDataRefresh(true);
       }
@@ -908,8 +1075,13 @@ export default function App() {
     });
     void subscribeSemanticProgress((progress) => {
       if (disposed) return;
-      setSemanticProgress(progress);
-      if (["completed", "cancelled", "failed", "interrupted"].includes(progress.status)) {
+      if (!acceptSemanticProgress(progress)) return;
+      if (isTerminalSemanticStatus(progress.status)) {
+        if (semanticControlRequestRef.current?.jobId === progress.jobId) {
+          semanticControlRequestRef.current = null;
+          semanticControlTokenRef.current += 1;
+          setSemanticControlBusy(false);
+        }
         requestDataRefresh(true);
       }
     }).then((stop) => {
@@ -921,7 +1093,7 @@ export default function App() {
       stopScan?.();
       stopSemantic?.();
     };
-  }, [requestDataRefresh, setCurrentLibraryId]);
+  }, [acceptScanProgress, acceptSemanticProgress, requestDataRefresh, setCurrentLibraryId]);
 
   useEffect(() => {
     if (
@@ -935,10 +1107,10 @@ export default function App() {
 
     const taskId = scanProgress.taskId;
     const dismissTimer = window.setTimeout(() => {
-      setScanProgress((current) => (current?.taskId === taskId ? null : current));
+      if (scanProgressRef.current?.taskId === taskId) dismissScanProgress();
     }, 700);
     return () => window.clearTimeout(dismissTimer);
-  }, [scanProgress]);
+  }, [dismissScanProgress, scanProgress]);
 
   function updateFilter(next: AssetFilter) {
     const normalized = {
@@ -974,7 +1146,7 @@ export default function App() {
         importWorkerCount: appSettings.importWorkerCount,
       });
       setPendingImportPath(null);
-      setScanProgress({
+      beginScanProgress({
         taskId: result.taskId,
         libraryId: null,
         status: "running",
@@ -994,12 +1166,31 @@ export default function App() {
   }
 
   async function cancelScan() {
-    if (!scanProgress) return;
+    const progress = scanProgressRef.current;
+    if (!progress || isTerminalScanStatus(progress.status)) return;
+    if (scanCancelRequestRef.current?.taskId === progress.taskId) return;
+    const taskId = progress.taskId;
+    const token = scanControlTokenRef.current + 1;
+    scanControlTokenRef.current = token;
+    scanCancelRequestRef.current = { taskId, token };
     setCancellingScan(true);
     try {
-      const result = await cancelLibraryScan(scanProgress.taskId);
-      if (!result.accepted) setError("扫描任务已经结束，无法再次取消。");
+      const result = await cancelLibraryScan(taskId);
+      const request = scanCancelRequestRef.current;
+      if (!request || request.taskId !== taskId || request.token !== token) return;
+      scanCancelRequestRef.current = null;
+      if (!result.accepted) {
+        setCancellingScan(false);
+        setError("扫描任务已经结束，无法再次取消。");
+      }
     } catch (reason) {
+      if (
+        scanCancelRequestRef.current?.taskId !== taskId ||
+        scanCancelRequestRef.current.token !== token
+      ) {
+        return;
+      }
+      scanCancelRequestRef.current = null;
       setError(messageFrom(reason));
       setCancellingScan(false);
     }
@@ -1071,7 +1262,7 @@ export default function App() {
           nextSemanticStatus.selectedBackend === "direct_ml",
         ),
       });
-      setSemanticProgress(pendingSemanticProgress(jobId, currentLibraryId, nextSemanticStatus));
+      beginSemanticProgress(pendingSemanticProgress(jobId, currentLibraryId, nextSemanticStatus));
     } catch (reason) {
       setError(messageFrom(reason));
     }
@@ -1093,7 +1284,7 @@ export default function App() {
           nextSemanticStatus.selectedBackend === "direct_ml",
         ),
       });
-      setSemanticProgress(pendingSemanticProgress(jobId, asset.libraryId, nextSemanticStatus));
+      beginSemanticProgress(pendingSemanticProgress(jobId, asset.libraryId, nextSemanticStatus));
     } catch (reason) {
       setError(messageFrom(reason));
     }
@@ -1262,29 +1453,76 @@ export default function App() {
     }
   }
 
-  async function pauseOrResumeSemantic() {
-    if (!semanticProgress) return;
+  async function requestSemanticControl(action: "pause" | "resume" | "cancel") {
+    const progress = semanticProgressRef.current;
+    if (
+      !progress ||
+      progress.status === "cancelling" ||
+      isTerminalSemanticStatus(progress.status) ||
+      semanticControlRequestRef.current !== null
+    ) {
+      return;
+    }
+    const jobId = progress.jobId;
+    const token = semanticControlTokenRef.current + 1;
+    semanticControlTokenRef.current = token;
+    semanticControlRequestRef.current = { jobId, token };
+    setSemanticControlBusy(true);
     try {
-      if (semanticProgress.status === "paused") {
-        const result = await resumeSemanticAnalysis(semanticProgress.jobId);
-        if (result.accepted) setSemanticProgress({ ...semanticProgress, status: "running" });
-      } else {
-        const result = await pauseSemanticAnalysis(semanticProgress.jobId);
-        if (result.accepted) setSemanticProgress({ ...semanticProgress, status: "paused" });
+      const result =
+        action === "pause"
+          ? await pauseSemanticAnalysis(jobId)
+          : action === "resume"
+            ? await resumeSemanticAnalysis(jobId)
+            : await cancelSemanticAnalysis(jobId);
+      const request = semanticControlRequestRef.current;
+      if (
+        !request ||
+        request.jobId !== jobId ||
+        request.token !== token ||
+        semanticJobIdRef.current !== jobId
+      ) {
+        return;
       }
+      semanticProgressRevisionRef.current += 1;
+      semanticControlRequestRef.current = null;
+      setSemanticControlBusy(false);
+      if (!result.accepted) {
+        setError("语义任务已经结束，无法修改。");
+        return;
+      }
+      const current = semanticProgressRef.current;
+      if (!current || current.jobId !== jobId || isTerminalSemanticStatus(current.status)) {
+        return;
+      }
+      const nextStatus =
+        action === "pause" ? "paused" : action === "resume" ? "running" : "cancelling";
+      const nextProgress = { ...current, status: nextStatus };
+      semanticProgressRef.current = nextProgress;
+      setSemanticProgress(nextProgress);
     } catch (reason) {
+      if (
+        semanticControlRequestRef.current?.jobId !== jobId ||
+        semanticControlRequestRef.current.token !== token
+      ) {
+        return;
+      }
+      semanticControlRequestRef.current = null;
+      setSemanticControlBusy(false);
       setError(messageFrom(reason));
     }
   }
 
+  async function pauseOrResumeSemantic() {
+    const progress = semanticProgressRef.current;
+    if (!progress || isTerminalSemanticStatus(progress.status)) return;
+    await requestSemanticControl(
+      progress.status === "paused" || progress.status === "interrupted" ? "resume" : "pause",
+    );
+  }
+
   async function cancelSemantic() {
-    if (!semanticProgress) return;
-    try {
-      const result = await cancelSemanticAnalysis(semanticProgress.jobId);
-      if (result.accepted) setSemanticProgress({ ...semanticProgress, status: "cancelling" });
-    } catch (reason) {
-      setError(messageFrom(reason));
-    }
+    await requestSemanticControl("cancel");
   }
 
   function selectLibrary(id: number) {
@@ -1662,7 +1900,7 @@ export default function App() {
       const result = await requestLibraryRescan(library.id, {
         importWorkerCount: appSettings.importWorkerCount,
       });
-      setScanProgress({
+      beginScanProgress({
         taskId: result.taskId,
         libraryId: library.id,
         status: "running",
@@ -1683,83 +1921,127 @@ export default function App() {
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
-      if ((event.ctrlKey || event.metaKey) && event.key === ",") {
+      if (event.defaultPrevented || event.isComposing) return;
+
+      const batchEditorVisible = batchEditorOpen && selectedAssetIds.length > 0;
+      const blockingOverlayOpen =
+        settingsOpen ||
+        filterPopoverOpen ||
+        collectionDialogRequest !== null ||
+        pendingImportPath !== null ||
+        batchEditorVisible;
+      const interactiveTarget = isInteractiveKeyboardTarget(event.target);
+      const galleryTarget = isGalleryKeyboardTarget(event.target);
+
+      if (event.key === "Escape") {
+        if (settingsOpen) {
+          event.preventDefault();
+          closeSettingsDialog();
+          return;
+        }
+        if (pendingImportPath !== null) {
+          event.preventDefault();
+          setPendingImportPath(null);
+          return;
+        }
+        if (collectionDialogRequest !== null) {
+          event.preventDefault();
+          if (!collectionOperationBusy) setCollectionDialogRequest(null);
+          return;
+        }
+        if (batchEditorVisible) {
+          event.preventDefault();
+          setBatchEditorOpen(false);
+          return;
+        }
+        if (filterPopoverOpen) {
+          event.preventDefault();
+          setFilterPopoverOpen(false);
+          return;
+        }
+        if (workflowTool !== null) {
+          event.preventDefault();
+          closeWorkflowTool(true);
+          return;
+        }
+        if (isInteractiveKeyboardTarget(event.target) && !isGalleryKeyboardTarget(event.target)) {
+          return;
+        }
+        event.preventDefault();
+        if (viewMode === "single") setViewMode("grid");
+        else clearSelection();
+        return;
+      }
+
+      if (!blockingOverlayOpen && (event.ctrlKey || event.metaKey) && event.key === ",") {
         event.preventDefault();
         setSettingsOpen(true);
         setFilterPopoverOpen(false);
         return;
       }
-      if (event.key === "Escape" && settingsOpen) {
+
+      if (blockingOverlayOpen || (interactiveTarget && !galleryTarget)) return;
+
+      const hasShortcutModifier = event.ctrlKey || event.metaKey || event.altKey;
+
+      const markedAssetIds =
+        activeAsset && selectedAssetIds.includes(activeAsset.id)
+          ? selectedAssetIds
+          : activeAsset
+            ? [activeAsset.id]
+            : [];
+      const ratingShortcut = Object.entries(appSettings.shortcuts.ratings).find(
+        ([, shortcut]) => shortcut.toLowerCase() === event.key.toLowerCase(),
+      );
+      const ratingKey = ratingShortcut ? Number(ratingShortcut[0]) : null;
+      const colorShortcut = Object.entries(appSettings.shortcuts.colors).find(
+        ([, shortcut]) => shortcut.toLowerCase() === event.key.toLowerCase(),
+      );
+      if (!hasShortcutModifier && markedAssetIds.length > 0 && ratingKey !== null) {
         event.preventDefault();
-        setSettingsOpen(false);
+        void Promise.all(markedAssetIds.map((assetId) => editAssetRating(assetId, ratingKey)));
         return;
       }
-      const target = event.target;
-      const isFormControl =
-        target instanceof HTMLInputElement ||
-        target instanceof HTMLTextAreaElement ||
-        target instanceof HTMLSelectElement ||
-        (target instanceof HTMLElement && target.isContentEditable);
-      if (!isFormControl) {
-        const markedAssetIds =
-          activeAsset && selectedAssetIds.includes(activeAsset.id)
-            ? selectedAssetIds
-            : activeAsset
-              ? [activeAsset.id]
-              : [];
-        const ratingShortcut = Object.entries(appSettings.shortcuts.ratings).find(
-          ([, shortcut]) => shortcut.toLowerCase() === event.key.toLowerCase(),
+      if (
+        !hasShortcutModifier &&
+        markedAssetIds.length > 0 &&
+        (event.key === appSettings.shortcuts.ratingDown ||
+          event.key === appSettings.shortcuts.ratingUp)
+      ) {
+        event.preventDefault();
+        const delta = event.key === appSettings.shortcuts.ratingUp ? 1 : -1;
+        void Promise.all(
+          markedAssetIds.map((assetId) => {
+            const current = assets.find((item) => item.id === assetId)?.rating ?? 0;
+            return editAssetRating(assetId, Math.max(0, Math.min(5, current + delta)));
+          }),
         );
-        const ratingKey = ratingShortcut ? Number(ratingShortcut[0]) : null;
-        const colorShortcut = Object.entries(appSettings.shortcuts.colors).find(
-          ([, shortcut]) => shortcut.toLowerCase() === event.key.toLowerCase(),
-        );
-        if (markedAssetIds.length > 0 && ratingKey !== null) {
-          event.preventDefault();
-          void Promise.all(markedAssetIds.map((assetId) => editAssetRating(assetId, ratingKey)));
-          return;
-        }
-        if (
-          markedAssetIds.length > 0 &&
-          (event.key === appSettings.shortcuts.ratingDown ||
-            event.key === appSettings.shortcuts.ratingUp)
-        ) {
-          event.preventDefault();
-          const delta = event.key === appSettings.shortcuts.ratingUp ? 1 : -1;
-          void Promise.all(
-            markedAssetIds.map((assetId) => {
-              const current = assets.find((item) => item.id === assetId)?.rating ?? 0;
-              return editAssetRating(assetId, Math.max(0, Math.min(5, current + delta)));
-            }),
-          );
-          return;
-        }
-        if (markedAssetIds.length > 0 && colorShortcut) {
-          event.preventDefault();
-          const colorLabel = colorShortcut[0] as ManualColorLabel;
-          void toggleAssetColorLabelForSelection(markedAssetIds[0], colorLabel);
-          return;
-        }
-        const viewShortcut = Object.entries(appSettings.shortcuts.view).find(
-          ([, shortcut]) => shortcut.toLowerCase() === event.key.toLowerCase(),
-        );
-        if (viewShortcut && !event.ctrlKey && !event.metaKey && !event.altKey && !settingsOpen) {
-          event.preventDefault();
-          if (viewShortcut[0] === "grid") {
-            changeView("grid");
-          } else {
-            changeView("single");
-          }
-          return;
-        }
+        return;
       }
-      if (event.key === "Escape") {
-        if (workflowTool !== null) {
-          event.preventDefault();
-          closeWorkflowTool(true);
-        } else if (viewMode === "single") setViewMode("grid");
-        else clearSelection();
-      } else if (event.key === "ArrowLeft" && viewMode === "single") {
+      if (!hasShortcutModifier && markedAssetIds.length > 0 && colorShortcut) {
+        event.preventDefault();
+        const colorLabel = colorShortcut[0] as ManualColorLabel;
+        void toggleAssetColorLabelForSelection(markedAssetIds[0], colorLabel);
+        return;
+      }
+      const viewShortcut = Object.entries(appSettings.shortcuts.view).find(
+        ([, shortcut]) => shortcut.toLowerCase() === event.key.toLowerCase(),
+      );
+      if (viewShortcut && !hasShortcutModifier) {
+        event.preventDefault();
+        if (viewShortcut[0] === "grid") changeView("grid");
+        else changeView("single");
+        return;
+      }
+      if (
+        interactiveTarget &&
+        !galleryTarget &&
+        event.key !== "ArrowLeft" &&
+        event.key !== "ArrowRight"
+      ) {
+        return;
+      }
+      if (event.key === "ArrowLeft" && viewMode === "single") {
         event.preventDefault();
         navigatePreview(-1);
       } else if (event.key === "ArrowRight" && viewMode === "single") {
@@ -1776,12 +2058,18 @@ export default function App() {
     activeAsset,
     appSettings,
     assets,
+    batchEditorOpen,
     changeView,
+    closeSettingsDialog,
     closeWorkflowTool,
+    collectionDialogRequest,
+    collectionOperationBusy,
     editAssetColorLabel,
     editAssetRating,
+    filterPopoverOpen,
     navigatePreview,
     openSinglePreview,
+    pendingImportPath,
     selectedAssetIds,
     settingsOpen,
     toggleAssetColorLabelForSelection,
@@ -1844,8 +2132,9 @@ export default function App() {
             scanTaskName={scanTaskName}
             semanticTaskName={semanticTaskName}
             cancellingScan={cancellingScan}
+            semanticControlBusy={semanticControlBusy}
             onCancelScan={() => void cancelScan()}
-            onDismissScan={() => setScanProgress(null)}
+            onDismissScan={dismissScanProgress}
             onPauseResumeSemantic={() => void pauseOrResumeSemantic()}
             onCancelSemantic={() => void cancelSemantic()}
           />
@@ -2506,7 +2795,7 @@ export default function App() {
             setAppSettings(normalizeAppSettings(DEFAULT_APP_SETTINGS));
             setThemeMode("dark");
           }}
-          onClose={() => setSettingsOpen(false)}
+          onClose={closeSettingsDialog}
         />
       ) : null}
     </div>
