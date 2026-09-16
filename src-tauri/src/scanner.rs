@@ -1523,8 +1523,8 @@ mod tests {
                             is_primary: true,
                         },
                         crate::semantic::SemanticPrediction {
-                            label_id: "night".into(),
-                            display_name: "夜景".into(),
+                            label_id: "outdoor".into(),
+                            display_name: "室外".into(),
                             category_group: "context".into(),
                             similarity: 0.27,
                             threshold: 0.16,
@@ -1536,9 +1536,23 @@ mod tests {
                 },
             )
             .expect("save semantic result");
+        repository
+            .save_subject_result(
+                candidate,
+                &crate::subject::SubjectAnalysisOutput {
+                    predictions: vec![crate::subject::SubjectPrediction {
+                        label_id: "single_person".into(),
+                        display_name: "单人".into(),
+                        category_group: "subject".into(),
+                        similarity: 0.91,
+                        threshold: 0.45,
+                    }],
+                },
+            )
+            .expect("save subject result");
         let combined_filter = crate::models::AssetFilter {
             primary_categories: vec!["photo_portrait".into()],
-            auxiliary_tags: vec!["night".into()],
+            auxiliary_tags: vec!["single_person".into()],
             semantic_match: crate::models::SemanticMatchMode::All,
             tone_labels: semantic_asset.tone_label.clone().into_iter().collect(),
             color_categories: semantic_asset
@@ -1564,7 +1578,15 @@ mod tests {
             .expect("combined filtered assets");
         assert_eq!(filtered.total, 1);
         assert_eq!(filtered.items[0].id, candidate.id);
-        assert_eq!(filtered.items[0].semantic_labels.len(), 2);
+        assert_eq!(filtered.items[0].semantic_labels.len(), 3);
+        assert!(filtered.items[0].semantic_labels.iter().any(|label| {
+            label.label_id == "outdoor" && label.category_group == "context" && !label.is_primary
+        }));
+        assert!(filtered.items[0].semantic_labels.iter().any(|label| {
+            label.label_id == "single_person"
+                && label.category_group == "subject"
+                && !label.is_primary
+        }));
         for (path, before) in images.iter().zip(original_hashes) {
             assert_eq!(hash_file(path).expect("hash after"), before);
         }

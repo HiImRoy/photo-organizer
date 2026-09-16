@@ -18,6 +18,32 @@ describe("classification display labels", () => {
     expect(classificationSourceLabel("manual")).toBe("手动");
   });
 
+  it("resolves overlapping topic and subject ids within their own layer", () => {
+    const catalog = [
+      {
+        id: "photo_vehicle",
+        displayName: "交通工具",
+        categoryGroup: "scene",
+        threshold: 0.22,
+        isPrimaryCategory: true,
+        taxonomyVersion: "current",
+      },
+      {
+        id: "vehicle",
+        displayName: "车辆",
+        categoryGroup: "subject",
+        threshold: 0.4,
+        isPrimaryCategory: false,
+        taxonomyVersion: "current",
+      },
+    ];
+
+    expect(classificationValueLabel("vehicle", "primary", catalog)).toBe("交通工具");
+    expect(classificationValueLabel("vehicle", "tag", catalog)).toBe("车辆");
+    expect(classificationValueLabel("photo_vehicle", "tag", catalog)).toBe("其他标签");
+    expect(classificationValueLabel("not-a-real-label", "primary", catalog)).toBe("未分类");
+  });
+
   it("exposes selectable Chinese options instead of free text values", () => {
     expect(primaryCategoryOptions([])).toContainEqual({
       value: "photo_landscape",
@@ -48,9 +74,10 @@ describe("classification display labels", () => {
     expect(auxiliaryTagOptions([])).not.toContainEqual({ value: "mountain", label: "山" });
     expect(auxiliaryTagOptions([])).toContainEqual({ value: "single_person", label: "单人" });
     expect(auxiliaryTagOptions([])).toContainEqual({ value: "multiple_people", label: "多人" });
+    expect(auxiliaryTagOptions([])).toContainEqual({ value: "vehicle", label: "车辆" });
     expect(auxiliaryTagOptions([])).toContainEqual({ value: "food", label: "食物" });
-    expect(auxiliaryTagOptions([])).toContainEqual({ value: "scenery", label: "风景" });
-    expect(auxiliaryTagOptions([])).not.toContainEqual({ value: "vehicle", label: "车辆" });
+    expect(auxiliaryTagOptions([])).toContainEqual({ value: "plant", label: "植物" });
+    expect(auxiliaryTagOptions([])).not.toContainEqual({ value: "scenery", label: "风景" });
     expect(auxiliaryTagOptions([])).not.toContainEqual({ value: "person", label: "人物" });
     expect(auxiliaryTagOptions([])).not.toContainEqual({ value: "portrait", label: "人像" });
     expect(auxiliaryTagOptions([])).not.toContainEqual({ value: "pet", label: "宠物" });
@@ -64,8 +91,8 @@ describe("classification display labels", () => {
     expect(classificationValueLabel("person", "tag")).toBe("单人");
     expect(classificationValueLabel("pet", "tag")).toBe("动物");
     expect(classificationValueLabel("food", "tag")).toBe("食物");
-    expect(classificationValueLabel("unknown", "primary")).toBe("抽象艺术");
-    expect(classificationValueLabel("photo_documentary", "primary")).toBe("抽象艺术");
+    expect(classificationValueLabel("unknown", "primary")).toBe("未分类（历史标签）");
+    expect(classificationValueLabel("photo_documentary", "primary")).toBe("纪实（历史标签）");
   });
 
   it("keeps active option sets closed even when catalog contains legacy values", () => {
@@ -119,9 +146,9 @@ describe("classification display labels", () => {
       { value: "single_person", label: "单人" },
       { value: "multiple_people", label: "多人" },
       { value: "animal", label: "动物" },
-      { value: "plant", label: "植物" },
+      { value: "vehicle", label: "车辆" },
       { value: "food", label: "食物" },
-      { value: "scenery", label: "风景" },
+      { value: "plant", label: "植物" },
     ]);
   });
 });

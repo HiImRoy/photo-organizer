@@ -10,8 +10,8 @@ use crate::semantic::{ExecutionBackend, ModelMetadata, SemanticError, SemanticLa
 
 pub const MODEL_NAME: &str = "PicoDet-S-COCO";
 pub const MODEL_VERSION: &str = "onnx-2026-08-10";
-pub const ANALYSIS_VERSION: &str = "photo-organizer-subject-picodet-yunet-v1";
-pub const TAXONOMY_VERSION: &str = "photo-organizer-subject-tags-v3";
+pub const ANALYSIS_VERSION: &str = "photo-organizer-subject-picodet-yunet-v2";
+pub const TAXONOMY_VERSION: &str = "photo-organizer-subject-tags-v4";
 pub const MODEL_FILE: &str = "picodet_s_320_lcnet_postprocessed.onnx";
 pub const LABELS_FILE: &str = "coco80.txt";
 pub const MODEL_SHA256: &str = "09fc88131be8ad224f13739a5cf8fc838600d76a77539af7f0400fa90506c5f3";
@@ -35,8 +35,10 @@ const YUNET_OUTPUT_NAMES: [&str; 12] = [
 ];
 
 const ANIMAL_CLASSES: &[usize] = &[14, 15, 16, 17, 18, 19, 20, 21, 22, 23];
+const VEHICLE_CLASSES: &[usize] = &[2, 3, 4, 5, 6, 7, 8];
 const FOOD_CLASSES: &[usize] = &[39, 40, 41, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55];
 const PLANT_CLASSES: &[usize] = &[58];
+const PERSON_DUPLICATE_IOU_THRESHOLD: f32 = 0.85;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
@@ -71,7 +73,7 @@ struct SubjectLabelDefinition {
     threshold: f32,
 }
 
-const SUBJECT_LABELS: [SubjectLabelDefinition; 5] = [
+const SUBJECT_LABELS: [SubjectLabelDefinition; 6] = [
     SubjectLabelDefinition {
         id: "single_person",
         display_name: "单人",
@@ -85,6 +87,11 @@ const SUBJECT_LABELS: [SubjectLabelDefinition; 5] = [
     SubjectLabelDefinition {
         id: "animal",
         display_name: "动物",
+        threshold: DETECTION_SCORE_THRESHOLD,
+    },
+    SubjectLabelDefinition {
+        id: "vehicle",
+        display_name: "车辆",
         threshold: DETECTION_SCORE_THRESHOLD,
     },
     SubjectLabelDefinition {
@@ -759,7 +766,14 @@ fn preprocess_yunet(image: &image::RgbImage) -> Vec<f32> {
     values
 }
 
-fn parse_picodet_output(shape: &[i64], data: &[f32]) -> Result<Vec<(usize, f32)>, SemanticError> {
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct Detection {
+    class_id: usize,
+    score: f32,
+    bbox: [f32; 4],
+}
+
+fn parse_picodet_output(shape: &[i64], data: &[f32]) -> Result<Vec<Detection>, SemanticError> {
     if shape.last().copied() != Some(6) || !data.len().is_multiple_of(6) {
         return Err(SemanticError::Inference(format!(
             "unexpected PicoDet output shape {shape:?}; expected [..., 6]"
@@ -777,7 +791,15 @@ fn parse_picodet_output(shape: &[i64], data: &[f32]) -> Result<Vec<(usize, f32)>
         {
             continue;
         }
-        detections.push((class_id as usize, score));
+        let bbox = [row[2], row[3], row[4], row[5]];
+        if bbox.iter().any(|value| !value.is_finite()) || bbox[2] <= bbox[0] || bbox[3] <= bbox[1] {
+            continue;
+        }
+        detections.push(Detection {
+            class_id: class_id as usize,
+            score,
+            bbox,
+        });
     }
     Ok(detections)
 }
@@ -841,36 +863,47 @@ fn checked_yunet_blob<'a>(
     Ok(data)
 }
 
-fn aggregate_subjects(detections: &[(usize, f32)], face_score: f32) -> SubjectAnalysisOutput {
+fn aggregate_subjects(detections: &[Detection], face_score: f32) -> SubjectAnalysisOutput {
     let mut class_scores = [0.0_f32; COCO_LABEL_COUNT];
-    let mut person_scores = Vec::new();
-    for (class_id, score) in detections {
-        class_scores[*class_id] = class_scores[*class_id].max(*score);
-        if *class_id == 0 && *score >= PERSON_SCORE_THRESHOLD {
-            person_scores.push(*score);
+    let mut person_detections = Vec::new();
+    for detection in detections {
+        class_scores[detection.class_id] = class_scores[detection.class_id].max(detection.score);
+        if detection.class_id == 0 && detection.score >= PERSON_SCORE_THRESHOLD {
+            person_detections.push(*detection);
         }
     }
-    person_scores.sort_by(|left, right| right.total_cmp(left));
+    person_detections.sort_by(|left, right| right.score.total_cmp(&left.score));
+    let mut distinct_persons = Vec::with_capacity(person_detections.len());
+    for detection in person_detections {
+        if distinct_persons.iter().all(|kept: &Detection| {
+            bbox_iou(&kept.bbox, &detection.bbox) < PERSON_DUPLICATE_IOU_THRESHOLD
+        }) {
+            distinct_persons.push(detection);
+        }
+    }
 
     let mut predictions = Vec::new();
-    match person_scores.as_slice() {
+    match distinct_persons.as_slice() {
         [] if face_score >= FACE_SCORE_THRESHOLD => {
             // A clear face without a surviving full-body person box is still
             // useful evidence for the mutually exclusive single-person tag.
             predictions.push(prediction("single_person", face_score));
         }
         [] => {}
-        [score] => {
-            predictions.push(prediction("single_person", (*score).max(face_score)));
+        [detection] => {
+            predictions.push(prediction("single_person", detection.score.max(face_score)));
         }
-        scores => {
+        detections => {
             // The second strongest box is a conservative confidence for the
             // presence of more than one person.
-            predictions.push(prediction("multiple_people", scores[1]));
+            predictions.push(prediction("multiple_people", detections[1].score));
         }
     }
     if let Some(score) = max_for_classes(&class_scores, ANIMAL_CLASSES) {
         predictions.push(prediction("animal", score));
+    }
+    if let Some(score) = max_for_classes(&class_scores, VEHICLE_CLASSES) {
+        predictions.push(prediction("vehicle", score));
     }
     if let Some(score) = max_for_classes(&class_scores, FOOD_CLASSES) {
         predictions.push(prediction("food", score));
@@ -879,6 +912,24 @@ fn aggregate_subjects(detections: &[(usize, f32)], face_score: f32) -> SubjectAn
         predictions.push(prediction("plant", score));
     }
     SubjectAnalysisOutput { predictions }
+}
+
+fn bbox_iou(left: &[f32; 4], right: &[f32; 4]) -> f32 {
+    let intersection_left = left[0].max(right[0]);
+    let intersection_top = left[1].max(right[1]);
+    let intersection_right = left[2].min(right[2]);
+    let intersection_bottom = left[3].min(right[3]);
+    let intersection_width = (intersection_right - intersection_left).max(0.0);
+    let intersection_height = (intersection_bottom - intersection_top).max(0.0);
+    let intersection = intersection_width * intersection_height;
+    let left_area = (left[2] - left[0]).max(0.0) * (left[3] - left[1]).max(0.0);
+    let right_area = (right[2] - right[0]).max(0.0) * (right[3] - right[1]).max(0.0);
+    let union = left_area + right_area - intersection;
+    if union <= f32::EPSILON {
+        0.0
+    } else {
+        intersection / union
+    }
 }
 
 fn max_for_classes(scores: &[f32; COCO_LABEL_COUNT], classes: &[usize]) -> Option<f32> {
@@ -910,7 +961,7 @@ mod tests {
     #[test]
     fn subject_catalog_is_non_primary_and_chinese() {
         let catalog = subject_catalog();
-        assert_eq!(catalog.len(), 5);
+        assert_eq!(catalog.len(), 6);
         assert_eq!(
             catalog
                 .iter()
@@ -920,6 +971,7 @@ mod tests {
                 ("single_person", "单人"),
                 ("multiple_people", "多人"),
                 ("animal", "动物"),
+                ("vehicle", "车辆"),
                 ("food", "食物"),
                 ("plant", "植物"),
             ]
@@ -1083,18 +1135,26 @@ mod tests {
 
     #[test]
     fn detections_are_aggregated_without_forcing_a_primary_scene() {
-        let output = aggregate_subjects(&[(0, 0.91), (0, 0.86), (2, 0.88), (16, 0.79)], 0.82);
+        let output = aggregate_subjects(
+            &[
+                detection(0, 0.91, [0.0, 0.0, 0.4, 1.0]),
+                detection(0, 0.86, [0.6, 0.0, 1.0, 1.0]),
+                detection(2, 0.88, [0.0, 0.0, 1.0, 1.0]),
+                detection(16, 0.79, [0.0, 0.0, 1.0, 1.0]),
+            ],
+            0.82,
+        );
         let labels = output
             .predictions
             .iter()
             .map(|prediction| prediction.label_id.as_str())
             .collect::<Vec<_>>();
-        assert_eq!(labels, &["multiple_people", "animal"]);
+        assert_eq!(labels, &["multiple_people", "animal", "vehicle"]);
     }
 
     #[test]
     fn person_labels_are_mutually_exclusive_and_face_fallback_is_single_person() {
-        let one_person = aggregate_subjects(&[(0, 0.91)], 0.82);
+        let one_person = aggregate_subjects(&[detection(0, 0.91, [0.0, 0.0, 1.0, 1.0])], 0.82);
         assert_eq!(
             one_person
                 .predictions
@@ -1115,10 +1175,52 @@ mod tests {
     }
 
     #[test]
+    fn overlapping_person_boxes_do_not_count_the_same_person_twice() {
+        let output = aggregate_subjects(
+            &[
+                detection(0, 0.91, [0.0, 0.0, 1.0, 1.0]),
+                detection(0, 0.86, [0.02, 0.02, 0.98, 0.98]),
+            ],
+            0.0,
+        );
+
+        assert_eq!(
+            output
+                .predictions
+                .iter()
+                .map(|prediction| prediction.label_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["single_person"]
+        );
+    }
+
+    #[test]
+    fn ordinary_objects_cannot_create_a_person_label() {
+        let output = aggregate_subjects(&[detection(2, 0.99, [0.0, 0.0, 1.0, 1.0])], 0.0);
+
+        assert_eq!(
+            output
+                .predictions
+                .iter()
+                .map(|prediction| prediction.label_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["vehicle"]
+        );
+    }
+
+    #[test]
     fn unsupported_detections_are_ignored() {
         let output = parse_picodet_output(&[1, 2, 6], &[100.0, 0.9, 0.0, 0.0, 1.0, 1.0])
             .expect("valid shape");
         assert_eq!(output.len(), 0);
+    }
+
+    fn detection(class_id: usize, score: f32, bbox: [f32; 4]) -> Detection {
+        Detection {
+            class_id,
+            score,
+            bbox,
+        }
     }
 
     #[test]

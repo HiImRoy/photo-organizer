@@ -18,9 +18,9 @@ export const AUXILIARY_TAG_OPTIONS = [
   ["single_person", "单人"],
   ["multiple_people", "多人"],
   ["animal", "动物"],
-  ["plant", "植物"],
+  ["vehicle", "车辆"],
   ["food", "食物"],
-  ["scenery", "风景"],
+  ["plant", "植物"],
 ] as const;
 
 const ACTIVE_PRIMARY_CATEGORY_IDS: ReadonlySet<string> = new Set(
@@ -79,8 +79,8 @@ const FALLBACK_LABELS = new Map<string, string>([
   ["photo_event", "运动（历史标签）"],
   ["photo_transport", "交通工具"],
   ["photo_plant", "植物"],
-  ["photo_documentary", "抽象艺术"],
-  ["unknown", "抽象艺术"],
+  ["photo_documentary", "纪实（历史标签）"],
+  ["unknown", "未分类（历史标签）"],
   ["still_life", "静物"],
   ["screenshot", "截图"],
   ["mountain", "山"],
@@ -90,7 +90,7 @@ const FALLBACK_LABELS = new Map<string, string>([
   ["other", "其他"],
   ["single_person", "单人"],
   ["multiple_people", "多人"],
-  ["scenery", "风景"],
+  ["scenery", "风景（历史派生）"],
   ["person", "单人"],
   ["portrait", "单人"],
   ["group", "多人"],
@@ -102,16 +102,26 @@ const FALLBACK_LABELS = new Map<string, string>([
   ["document", "文档"],
 ]);
 
-const LEGACY_LABEL_ALIASES = new Map<string, string>([
-  ["unknown", "photo_abstract"],
-  ["photo_documentary", "photo_abstract"],
+const LEGACY_PRIMARY_ALIASES = new Map<string, string>([
+  ["portrait", "photo_portrait"],
+  ["person", "photo_portrait"],
+  ["landscape", "photo_landscape"],
   ["photo_urban", "photo_street"],
-  ["photo_event", "photo_abstract"],
+  ["street", "photo_street"],
+  ["architecture", "photo_architecture"],
+  ["product", "photo_still_life"],
+  ["still_life", "photo_still_life"],
   ["photo_food", "photo_still_life"],
   ["photo_commercial", "photo_still_life"],
-  ["photo_document", "photo_abstract"],
   ["photo_transport", "photo_vehicle"],
   ["photo_plant", "photo_macro"],
+  ["animal", "photo_wildlife"],
+  ["vehicle", "photo_vehicle"],
+  ["plant", "photo_macro"],
+  ["abstract", "photo_abstract"],
+]);
+
+const LEGACY_SUBJECT_ALIASES = new Map<string, string>([
   ["person", "single_person"],
   ["portrait", "single_person"],
   ["group", "multiple_people"],
@@ -124,22 +134,12 @@ export function canonicalClassificationValue(
 ): string | null | undefined {
   if (!value) return value;
   if (kind === "primary") {
-    const legacyPrimaryAliases: Record<string, string> = {
-      portrait: "photo_portrait",
-      person: "photo_portrait",
-      landscape: "photo_landscape",
-      street: "photo_street",
-      architecture: "photo_architecture",
-      product: "photo_still_life",
-      still_life: "photo_still_life",
-      animal: "photo_wildlife",
-      vehicle: "photo_vehicle",
-      plant: "photo_macro",
-      abstract: "photo_abstract",
-    };
-    return legacyPrimaryAliases[value] ?? LEGACY_LABEL_ALIASES.get(value) ?? value;
+    return LEGACY_PRIMARY_ALIASES.get(value) ?? value;
   }
-  return LEGACY_LABEL_ALIASES.get(value) ?? value;
+  if (kind === "tag") {
+    return LEGACY_SUBJECT_ALIASES.get(value) ?? value;
+  }
+  return value;
 }
 
 export function classificationFieldLabel(field: string): string {
@@ -178,12 +178,16 @@ export function classificationValueLabel(
   catalog: SemanticLabelDescriptor[] = [],
 ): string {
   if (!value) return "未设置";
-  const catalogLabel = catalog.find((item) => item.id === value)?.displayName;
-  if (catalogLabel) return catalogLabel;
   const canonicalValue = canonicalClassificationValue(value, kind) ?? value;
-  const canonicalCatalogLabel = catalog.find((item) => item.id === canonicalValue)?.displayName;
+  const canonicalCatalogLabel = catalog.find(
+    (item) => item.id === canonicalValue && catalogItemMatchesKind(item, kind),
+  )?.displayName;
   if (canonicalCatalogLabel) return canonicalCatalogLabel;
-  return FALLBACK_LABELS.get(canonicalValue) ?? fallbackValueLabel(kind);
+  const fallbackLabel = FALLBACK_LABELS.get(canonicalValue);
+  if (fallbackLabel && fallbackLabelMatchesKind(canonicalValue, kind)) {
+    return fallbackLabel;
+  }
+  return fallbackValueLabel(kind);
 }
 
 export function classificationValuesLabel(
@@ -205,7 +209,9 @@ export function primaryCategoryOptions(
   const selectedCompatibilityOption =
     canonicalSelectedValue &&
     ACTIVE_PRIMARY_CATEGORY_IDS.has(canonicalSelectedValue) &&
-    !catalog.some((item) => item.id === canonicalSelectedValue) &&
+    !catalog.some(
+      (item) => item.id === canonicalSelectedValue && catalogItemMatchesKind(item, "primary"),
+    ) &&
     canonicalSelectedValue !== "unknown"
       ? [
           {
@@ -263,10 +269,33 @@ function mergeOptions(
   return options;
 }
 
+function catalogItemMatchesKind(
+  item: SemanticLabelDescriptor,
+  kind: ClassificationValueKind,
+): boolean {
+  if (kind === "primary") {
+    return item.categoryGroup === "scene" && item.isPrimaryCategory;
+  }
+  if (kind === "tag") {
+    return item.categoryGroup === "subject" && !item.isPrimaryCategory;
+  }
+  return false;
+}
+
+function fallbackLabelMatchesKind(value: string, kind: ClassificationValueKind): boolean {
+  if (kind === "primary") {
+    return !ACTIVE_AUXILIARY_TAG_IDS.has(value);
+  }
+  if (kind === "tag") {
+    return !ACTIVE_PRIMARY_CATEGORY_IDS.has(value);
+  }
+  return true;
+}
+
 function fallbackValueLabel(kind: ClassificationValueKind): string {
   switch (kind) {
     case "primary":
-      return "抽象艺术";
+      return "未分类";
     case "tag":
       return "其他标签";
     case "tone":

@@ -25,8 +25,8 @@ use crate::models::{
 use crate::semantic::{
     ANALYSIS_VERSION as SEMANTIC_ANALYSIS_VERSION, ExecutionBackend, MODEL_NAME, MODEL_VERSION,
     ModelMetadata, SIGLIP2_ANALYSIS_VERSION, SIGLIP2_MODEL_NAME, SIGLIP2_MODEL_VERSION,
-    SemanticAnalysisOutput, TAXONOMY_VERSION, canonical_label_id, category_group_for_label_id,
-    known_display_name_for_label_id,
+    SemanticAnalysisOutput, TAXONOMY_VERSION, canonical_stored_label_id, canonical_subject_id,
+    canonical_topic_id, known_display_name_for_label_id,
 };
 use crate::source_identity::{SourceIdentity, identity_key, is_same_or_descendant};
 use crate::subject::{
@@ -1933,7 +1933,7 @@ impl Repository {
             let mut asset = load_asset_by_id(&connection, asset_id)?;
             asset.semantic_labels = semantic_labels_for_asset(&connection, asset_id)?;
             asset.classification = effective_classification_for_asset(&connection, &asset)?;
-            let mut add_group = |label_id: String| {
+            let mut add_group = |label_id: String, group_hint: &'static str| {
                 let label = asset
                     .semantic_labels
                     .iter()
@@ -1944,18 +1944,17 @@ impl Repository {
                     .unwrap_or_else(|| label_id.clone());
                 let category_group = label
                     .map(|label| label.category_group.clone())
-                    .or_else(|| category_group_for_label_id(&label_id).map(str::to_owned))
-                    .unwrap_or_else(|| "subject".to_owned());
+                    .unwrap_or_else(|| group_hint.to_owned());
                 let entry = groups
                     .entry(label_id)
                     .or_insert((display_name, category_group, 0));
                 entry.2 += 1;
             };
             if let Some(label_id) = asset.classification.primary_category.effective.clone() {
-                add_group(label_id);
+                add_group(label_id, "scene");
             }
             for tag_id in &asset.classification.auxiliary_tags.effective {
-                add_group(tag_id.clone());
+                add_group(tag_id.clone(), "subject");
             }
         }
         let mut result = groups
@@ -3363,15 +3362,31 @@ fn asset_filter_sql(query: &AssetQuery) -> (String, Vec<Value>) {
         );
         values.push(Value::Integer(collection_id));
     }
+    let primary_filter_requested = !filter.primary_categories.is_empty();
     let primary_categories = filter
         .primary_categories
         .iter()
-        .map(|value| canonical_label_id(value).to_owned())
+        .filter_map(|value| {
+            canonical_topic_id(value).map(|canonical| {
+                [canonical.to_owned(), value.clone()]
+                    .into_iter()
+                    .collect::<Vec<_>>()
+            })
+        })
+        .flatten()
         .collect::<Vec<_>>();
+    let mut primary_categories = primary_categories;
+    primary_categories.sort();
+    primary_categories.dedup();
+    let auxiliary_filter_requested = !filter.auxiliary_tags.is_empty();
     let auxiliary_tags = filter
         .auxiliary_tags
         .iter()
-        .map(|value| canonical_label_id(value).to_owned())
+        .map(|value| {
+            canonical_subject_id(value)
+                .map(str::to_owned)
+                .unwrap_or_else(|| value.clone())
+        })
         .collect::<Vec<_>>();
     if let Some(search) = filter
         .search
@@ -3385,13 +3400,16 @@ fn asset_filter_sql(query: &AssetQuery) -> (String, Vec<Value>) {
         values.push(Value::Text(value.clone()));
         values.push(Value::Text(value));
     }
-    if !primary_categories.is_empty() {
+    if primary_filter_requested && primary_categories.is_empty() {
+        clauses.push("0=1".into());
+    } else if !primary_categories.is_empty() {
         let expression = effective_scalar_expression(
             FIELD_PRIMARY_CATEGORY,
             &format!(
                 "(SELECT sl.label FROM semantic_labels sl
-                  WHERE sl.asset_id=a.id AND sl.source_fingerprint=a.fingerprint
+                 WHERE sl.asset_id=a.id AND sl.source_fingerprint=a.fingerprint
                     AND sl.is_manual=0 AND sl.is_primary=1
+                    AND sl.category_group='scene'
                     AND sl.model_name={model_name} AND sl.model_version={model_version}
                     AND sl.analysis_version={analysis_version}
                     AND sl.taxonomy_version={taxonomy_version}
@@ -3408,7 +3426,9 @@ fn asset_filter_sql(query: &AssetQuery) -> (String, Vec<Value>) {
         ));
         values.extend(primary_categories.into_iter().map(Value::Text));
     }
-    if !auxiliary_tags.is_empty() {
+    if auxiliary_filter_requested && auxiliary_tags.is_empty() {
+        clauses.push("0=1".into());
+    } else if !auxiliary_tags.is_empty() {
         let predicates = auxiliary_tags
             .iter()
             .map(|_| {
@@ -3417,7 +3437,8 @@ fn asset_filter_sql(query: &AssetQuery) -> (String, Vec<Value>) {
                             WHERE add_tag.asset_id=a.id AND add_tag.tag_id=? AND add_tag.state='add')
                      OR ((EXISTS(SELECT 1 FROM semantic_labels sl
                                   WHERE sl.asset_id=a.id AND sl.source_fingerprint=a.fingerprint
-                                    AND sl.is_manual=0 AND sl.is_primary=0
+                                  AND sl.is_manual=0 AND sl.is_primary=0
+                                    AND sl.category_group='subject'
                                     AND sl.model_name={model_name} AND sl.model_version={model_version}
                                     AND sl.analysis_version={analysis_version}
                                     AND sl.taxonomy_version={taxonomy_version} AND sl.label=?)
@@ -3756,14 +3777,21 @@ fn semantic_labels_for_asset(
     ))?;
     let rows = statement.query_map(params![asset_id], |row| {
         let stored_label_id: String = row.get(0)?;
-        let label_id = canonical_label_id(&stored_label_id).to_owned();
+        let category_group: String = row.get(7)?;
+        let is_primary = row.get::<_, i64>(11)? != 0;
+        let Some(label_id) =
+            canonical_stored_label_id(&stored_label_id, &category_group, is_primary)
+        else {
+            return Ok(None);
+        };
+        let label_id = label_id.to_owned();
         let stored_display_name: String = row.get(1)?;
-        Ok(SemanticLabelResult {
+        Ok(Some(SemanticLabelResult {
             display_name: known_display_name_for_label_id(&label_id)
                 .unwrap_or(stored_display_name.as_str())
                 .to_owned(),
             label_id,
-            category_group: row.get(7)?,
+            category_group,
             similarity: row.get(2)?,
             threshold: row.get(3)?,
             model_name: row.get(4)?,
@@ -3772,10 +3800,16 @@ fn semantic_labels_for_asset(
             taxonomy_version: row.get(8)?,
             analyzed_at: row.get(9)?,
             is_manual: row.get::<_, i64>(10)? != 0,
-            is_primary: row.get::<_, i64>(11)? != 0,
-        })
+            is_primary,
+        }))
     })?;
-    rows.collect::<Result<Vec<_>, _>>().map_err(AppError::from)
+    rows.filter_map(|row| match row {
+        Ok(Some(label)) => Some(Ok(label)),
+        Ok(None) => None,
+        Err(error) => Some(Err(error)),
+    })
+    .collect::<Result<Vec<_>, _>>()
+    .map_err(AppError::from)
 }
 
 fn semantic_labels_for_assets(
@@ -3838,16 +3872,23 @@ fn semantic_labels_for_assets(
     let rows = statement.query_map(params_from_iter(query_values.iter()), |row| {
         let asset_id: i64 = row.get(0)?;
         let stored_label_id: String = row.get(1)?;
-        let label_id = canonical_label_id(&stored_label_id).to_owned();
+        let category_group: String = row.get(8)?;
+        let is_primary = row.get::<_, i64>(12)? != 0;
+        let Some(label_id) =
+            canonical_stored_label_id(&stored_label_id, &category_group, is_primary)
+        else {
+            return Ok(None);
+        };
+        let label_id = label_id.to_owned();
         let stored_display_name: String = row.get(2)?;
-        Ok((
+        Ok(Some((
             asset_id,
             SemanticLabelResult {
                 display_name: known_display_name_for_label_id(&label_id)
                     .unwrap_or(stored_display_name.as_str())
                     .to_owned(),
                 label_id,
-                category_group: row.get(8)?,
+                category_group,
                 similarity: row.get(3)?,
                 threshold: row.get(4)?,
                 model_name: row.get(5)?,
@@ -3856,13 +3897,15 @@ fn semantic_labels_for_assets(
                 taxonomy_version: row.get(9)?,
                 analyzed_at: row.get(10)?,
                 is_manual: row.get::<_, i64>(11)? != 0,
-                is_primary: row.get::<_, i64>(12)? != 0,
+                is_primary,
             },
-        ))
+        )))
     })?;
     let mut result = HashMap::<i64, Vec<SemanticLabelResult>>::new();
     for row in rows {
-        let (asset_id, label) = row?;
+        let Some((asset_id, label)) = row? else {
+            continue;
+        };
         result.entry(asset_id).or_default().push(label);
     }
     Ok(result)
@@ -3904,7 +3947,7 @@ fn manual_classifications_for_assets(
             FIELD_PRIMARY_CATEGORY => {
                 manual.primary_category = value
                     .as_str()
-                    .map(|value| canonical_label_id(value).to_owned())
+                    .map(|value| canonical_topic_id(value).unwrap_or(value).to_owned())
             }
             FIELD_TONE => manual.tone = value.as_str().map(str::to_owned),
             FIELD_SATURATION_LEVEL => manual.saturation_level = value.as_str().map(str::to_owned),
@@ -3944,7 +3987,7 @@ fn manual_classifications_for_assets(
     for row in rows {
         let (asset_id, tag_id, state) = row?;
         let manual = result.entry(asset_id).or_default();
-        let tag_id = canonical_label_id(&tag_id).to_owned();
+        let tag_id = canonical_subject_id(&tag_id).unwrap_or(&tag_id).to_owned();
         match state.as_str() {
             "add" => manual.auxiliary_tag_additions.push(tag_id),
             "remove" => manual.auxiliary_tag_removals.push(tag_id),
@@ -4034,12 +4077,20 @@ fn resolve_effective_classification(
     let auto = AutoClassification {
         primary_category: semantic_labels
             .iter()
-            .find(|label| label.is_primary)
-            .map(|label| canonical_label_id(&label.label_id).to_owned()),
+            .find(|label| label.category_group == "scene" && label.is_primary)
+            .map(|label| {
+                canonical_topic_id(&label.label_id)
+                    .unwrap_or(&label.label_id)
+                    .to_owned()
+            }),
         auxiliary_tags: semantic_labels
             .iter()
-            .filter(|label| !label.is_primary)
-            .map(|label| canonical_label_id(&label.label_id).to_owned())
+            .filter(|label| label.category_group == "subject" && !label.is_primary)
+            .map(|label| {
+                canonical_subject_id(&label.label_id)
+                    .unwrap_or(&label.label_id)
+                    .to_owned()
+            })
             .collect::<Vec<_>>(),
         tone: asset.tone_label.clone(),
         dominant_color_categories: dominant_color_categories_for_asset(asset),
@@ -4069,7 +4120,7 @@ fn manual_classification_for_asset(
             FIELD_PRIMARY_CATEGORY => {
                 manual.primary_category = value
                     .as_str()
-                    .map(|value| canonical_label_id(value).to_owned())
+                    .map(|value| canonical_topic_id(value).unwrap_or(value).to_owned())
             }
             FIELD_TONE => manual.tone = value.as_str().map(str::to_owned),
             FIELD_SATURATION_LEVEL => manual.saturation_level = value.as_str().map(str::to_owned),
@@ -4102,7 +4153,7 @@ fn manual_classification_for_asset(
     })?;
     for row in rows {
         let (tag_id, state) = row?;
-        let tag_id = canonical_label_id(&tag_id).to_owned();
+        let tag_id = canonical_subject_id(&tag_id).unwrap_or(&tag_id).to_owned();
         match state.as_str() {
             "add" => manual.auxiliary_tag_additions.push(tag_id),
             "remove" => manual.auxiliary_tag_removals.push(tag_id),
@@ -5451,7 +5502,7 @@ mod tests {
         let temp = tempfile::tempdir().expect("temp dir");
         let repository = Repository::new(temp.path().join("database.sqlite3"));
         repository.initialize().expect("initialize");
-        let (library_id, asset_id) = seed_classifiable_asset(&repository, "siglip2-v3-requeue");
+        let (library_id, asset_id) = seed_classifiable_asset(&repository, "siglip2-v4-requeue");
         let legacy_analysis_version = "photo-organizer-semantic-topic-candidates-siglip2-v2";
         let thumbnail_path = temp.path().join("asset-grid-640-v1.jpg");
         std::fs::write(&thumbnail_path, b"thumbnail fixture").expect("write thumbnail fixture");
@@ -5480,7 +5531,7 @@ mod tests {
         drop(connection);
 
         let candidates = repository
-            .create_semantic_job("siglip2-v3-requeue-job", library_id, false, None)
+            .create_semantic_job("siglip2-v4-requeue-job", library_id, false, None)
             .expect("create v3 job");
 
         assert_eq!(candidates.len(), 1);
@@ -5493,7 +5544,7 @@ mod tests {
         let job_version: String = connection
             .query_row(
                 "SELECT analysis_version FROM analysis_jobs
-                 WHERE id='siglip2-v3-requeue-job'",
+                 WHERE id='siglip2-v4-requeue-job'",
                 [],
                 |row| row.get(0),
             )
@@ -6378,7 +6429,7 @@ mod tests {
         assert_eq!(marked_filter.total, 1);
         assert_eq!(
             detail.asset.classification.primary_category.auto.as_deref(),
-            Some("landscape")
+            Some("photo_landscape")
         );
         assert_eq!(
             detail
@@ -6387,11 +6438,11 @@ mod tests {
                 .primary_category
                 .effective
                 .as_deref(),
-            Some("landscape")
+            Some("photo_landscape")
         );
         assert_eq!(
             detail.asset.classification.auxiliary_tags.effective,
-            vec!["outdoor"]
+            Vec::<String>::new()
         );
         assert_eq!(
             detail.asset.classification.dominant_color_categories.auto,
@@ -6426,7 +6477,7 @@ mod tests {
                 .primary_category
                 .manual
                 .as_deref(),
-            Some("architecture")
+            Some("photo_architecture")
         );
         assert_eq!(
             detail
@@ -6435,7 +6486,7 @@ mod tests {
                 .primary_category
                 .effective
                 .as_deref(),
-            Some("architecture")
+            Some("photo_architecture")
         );
 
         let _detail = repository
@@ -6505,7 +6556,7 @@ mod tests {
                 .primary_category
                 .effective
                 .as_deref(),
-            Some("architecture")
+            Some("photo_architecture")
         );
 
         let restored = repository
@@ -6543,7 +6594,7 @@ mod tests {
                 .primary_category
                 .effective
                 .as_deref(),
-            Some("product")
+            Some("photo_still_life")
         );
     }
 

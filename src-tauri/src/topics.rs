@@ -13,15 +13,19 @@ pub struct TopicLabelDefinition {
     pub threshold: f32,
 }
 
-pub const TAXONOMY_VERSION: &str = "photo-organizer-photography-topics-v4";
+pub const TAXONOMY_VERSION: &str = "photo-organizer-photography-topics-v5";
 pub const SCORE_MARGIN: f32 = 0.035;
 pub const MAX_RAW_CANDIDATES: usize = 16;
 
-const PORTRAIT_PROMPTS: &[&str] = &["a portrait", "a person", "people"];
+const PORTRAIT_PROMPTS: &[&str] = &[
+    "a portrait photograph",
+    "a headshot or half-length portrait",
+    "a posed or candid portrait photograph",
+];
 const LANDSCAPE_PROMPTS: &[&str] = &[
     "a landscape photograph",
-    "natural scenery",
-    "a mountain, coast, or open landscape",
+    "a scenic nature landscape photograph",
+    "a mountain, coast, or open landscape photograph",
 ];
 const STREET_PROMPTS: &[&str] = &[
     "street photography",
@@ -284,6 +288,31 @@ mod tests {
         let aggregated = aggregate_prompt_scores(&scores, &label_indexes);
         assert_eq!(aggregated[0], 0.30);
         assert_eq!(portrait_count, TOPIC_LABELS[0].prompts.len());
+    }
+
+    #[test]
+    fn portrait_prompts_describe_photography_not_a_generic_person() {
+        let portrait_prompts = TOPIC_LABELS
+            .iter()
+            .find(|label| label.id == "photo_portrait")
+            .expect("portrait topic")
+            .prompts;
+
+        assert!(
+            portrait_prompts
+                .iter()
+                .all(|prompt| prompt != &"a person" && prompt != &"people")
+        );
+        assert!(
+            portrait_prompts
+                .iter()
+                .any(|prompt| prompt.contains("portrait photograph"))
+        );
+        assert!(
+            portrait_prompts
+                .iter()
+                .any(|prompt| prompt.contains("headshot"))
+        );
     }
 
     #[test]

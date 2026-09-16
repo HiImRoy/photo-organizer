@@ -7,10 +7,7 @@ use crate::gpu::{
     CPU_ANALYSIS_BATCH_LIMIT, MAX_DIRECTML_ANALYSIS_BATCH_SIZE, analysis_batch_limit_for_backend,
 };
 use crate::models::SemanticProgress;
-use crate::semantic::{
-    ExecutionBackend, SemanticAnalysisOutput, SemanticClassifier, SemanticPrediction,
-    SemanticSimilarity,
-};
+use crate::semantic::{ExecutionBackend, SemanticAnalysisOutput, SemanticClassifier};
 use crate::subject::{SubjectAnalysisOutput, SubjectClassifier};
 use crate::tasks::{SemanticControlSignal, SemanticTaskJobState, SemanticTaskRegistry};
 
@@ -465,17 +462,14 @@ where
                     });
                     let mut successful = Vec::with_capacity(cache_ready.len());
 
-                    for (index, ((candidate, path), output)) in
-                        cache_ready.iter().zip(paths).zip(outputs).enumerate()
+                    for ((candidate, path), output) in cache_ready.iter().zip(paths).zip(outputs)
                     {
                         match output {
-                            Ok(mut output) => {
-                                add_derived_subject_evidence(&mut output);
-                                if let Some(subject_outputs) = subject_outputs.as_ref()
-                                    && let Some(Ok(subject_output)) = subject_outputs.get(index)
-                                {
-                                    fuse_topic_with_subject_evidence(&mut output, subject_output);
-                                }
+                            Ok(output) => {
+                                // Topic predictions are persisted independently from subject
+                                // predictions. A detected person, animal, or vehicle is
+                                // evidence about the contents of the frame, not a replacement
+                                // for the photographer-facing topic selected by SigLIP2.
                                 successful.push((*candidate, output));
                             }
                             Err(error) => {
@@ -689,94 +683,6 @@ where
         })
         .map_err(AppError::Io)?;
     Ok(())
-}
-
-fn add_derived_subject_evidence(output: &mut SemanticAnalysisOutput) {
-    let Some((similarity, threshold)) = output
-        .predictions
-        .iter()
-        .find(|prediction| prediction.is_primary && prediction.label_id == "photo_landscape")
-        .map(|prediction| (prediction.similarity, prediction.threshold))
-    else {
-        return;
-    };
-    if output
-        .predictions
-        .iter()
-        .any(|prediction| prediction.label_id == "scenery")
-    {
-        return;
-    }
-    output.predictions.push(SemanticPrediction {
-        label_id: "scenery".into(),
-        display_name: "风景".into(),
-        category_group: "subject".into(),
-        similarity,
-        threshold,
-        is_primary: false,
-    });
-}
-
-fn fuse_topic_with_subject_evidence(
-    output: &mut SemanticAnalysisOutput,
-    subject_output: &SubjectAnalysisOutput,
-) {
-    let Some((label_id, display_name, similarity, threshold)) = subject_output
-        .predictions
-        .iter()
-        .filter_map(|prediction| match prediction.label_id.as_str() {
-            "single_person" | "multiple_people" => {
-                Some(("photo_portrait", "人像", prediction.similarity, 0.22_f32))
-            }
-            "animal" => Some(("photo_wildlife", "动物", prediction.similarity, 0.22_f32)),
-            "food" => Some((
-                "photo_still_life",
-                "静物特写",
-                prediction.similarity,
-                0.21_f32,
-            )),
-            "plant" => Some(("photo_macro", "植物", prediction.similarity, 0.22_f32)),
-            _ => None,
-        })
-        .max_by(|left, right| left.2.total_cmp(&right.2))
-    else {
-        return;
-    };
-
-    output
-        .predictions
-        .retain(|prediction| !prediction.is_primary);
-    output.predictions.push(SemanticPrediction {
-        label_id: label_id.into(),
-        display_name: display_name.into(),
-        category_group: "scene".into(),
-        similarity,
-        threshold,
-        is_primary: true,
-    });
-
-    if let Some(evidence) = output
-        .raw_similarities
-        .iter_mut()
-        .find(|evidence| evidence.label_id == label_id)
-    {
-        evidence.similarity = evidence.similarity.max(similarity);
-    } else {
-        output.raw_similarities.push(SemanticSimilarity {
-            label_id: label_id.into(),
-            display_name: display_name.into(),
-            category_group: "topic_subject_fusion".into(),
-            similarity,
-            threshold,
-        });
-    }
-    output.raw_similarities.sort_by(|left, right| {
-        right
-            .similarity
-            .total_cmp(&left.similarity)
-            .then(left.label_id.cmp(&right.label_id))
-    });
-    output.raw_similarities.truncate(8);
 }
 
 fn classify_subject_batch_with_fallback(
@@ -1044,7 +950,7 @@ mod tests {
     use super::*;
     use crate::db::Repository;
     use crate::semantic::{ModelMetadata, SemanticError, SemanticRuntimeStatus};
-    use crate::subject::{SubjectPrediction, SubjectRuntimeStatus};
+    use crate::subject::SubjectRuntimeStatus;
 
     #[test]
     fn application_analysis_uses_batch_size_four() {
@@ -1607,64 +1513,9 @@ mod tests {
     }
 
     #[test]
-    fn subject_evidence_can_replace_a_scene_topic_without_creating_a_subject_label() {
-        let mut output = SemanticAnalysisOutput {
-            predictions: vec![SemanticPrediction {
-                label_id: "photo_landscape".into(),
-                display_name: "风光".into(),
-                category_group: "scene".into(),
-                similarity: 0.42,
-                threshold: 0.18,
-                is_primary: true,
-            }],
-            embedding: vec![],
-            raw_similarities: vec![SemanticSimilarity {
-                label_id: "photo_landscape".into(),
-                display_name: "风光".into(),
-                category_group: "topic_candidate".into(),
-                similarity: 0.42,
-                threshold: 0.18,
-            }],
-        };
-        let subject_output = SubjectAnalysisOutput {
-            predictions: vec![SubjectPrediction {
-                label_id: "single_person".into(),
-                display_name: "单人".into(),
-                category_group: "subject".into(),
-                similarity: 0.91,
-                threshold: 0.45,
-            }],
-        };
-
-        fuse_topic_with_subject_evidence(&mut output, &subject_output);
-
-        assert_eq!(
-            output
-                .predictions
-                .iter()
-                .filter(|prediction| prediction.is_primary)
-                .map(|prediction| prediction.label_id.as_str())
-                .collect::<Vec<_>>(),
-            vec!["photo_portrait"]
-        );
-        assert!(
-            !output
-                .predictions
-                .iter()
-                .any(|prediction| prediction.category_group == "subject")
-        );
-        assert!(
-            output
-                .raw_similarities
-                .iter()
-                .any(|evidence| evidence.label_id == "photo_portrait")
-        );
-    }
-
-    #[test]
-    fn landscape_topic_adds_a_non_primary_scenery_subject_label() {
-        let mut output = SemanticAnalysisOutput {
-            predictions: vec![SemanticPrediction {
+    fn topic_and_subject_results_keep_independent_layers() {
+        let topic_output = SemanticAnalysisOutput {
+            predictions: vec![crate::semantic::SemanticPrediction {
                 label_id: "photo_landscape".into(),
                 display_name: "风光".into(),
                 category_group: "scene".into(),
@@ -1675,16 +1526,82 @@ mod tests {
             embedding: vec![],
             raw_similarities: vec![],
         };
+        let subject_output = SubjectAnalysisOutput {
+            predictions: vec![crate::subject::SubjectPrediction {
+                label_id: "single_person".into(),
+                display_name: "单人".into(),
+                category_group: "subject".into(),
+                similarity: 0.91,
+                threshold: 0.45,
+            }],
+        };
 
-        add_derived_subject_evidence(&mut output);
+        let merged =
+            crate::semantic::merge_topic_and_environment_predictions(Some(&topic_output), None);
+        assert_eq!(
+            merged
+                .iter()
+                .filter(|prediction| prediction.is_primary)
+                .map(|prediction| prediction.label_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["photo_landscape"]
+        );
+        assert!(
+            !merged
+                .iter()
+                .any(|prediction| prediction.category_group == "subject")
+        );
+        assert_eq!(subject_output.predictions[0].label_id, "single_person");
+        assert_eq!(subject_output.predictions[0].category_group, "subject");
+        assert!(
+            !subject_output
+                .predictions
+                .iter()
+                .any(|prediction| prediction.label_id == "photo_portrait")
+        );
+    }
 
-        let scenery = output
-            .predictions
-            .iter()
-            .find(|prediction| prediction.label_id == "scenery")
-            .expect("derived scenery label");
-        assert_eq!(scenery.display_name, "风景");
-        assert_eq!(scenery.category_group, "subject");
-        assert!(!scenery.is_primary);
+    #[test]
+    fn street_topic_and_animal_subject_keep_independent_layers() {
+        let topic_output = SemanticAnalysisOutput {
+            predictions: vec![crate::semantic::SemanticPrediction {
+                label_id: "photo_street".into(),
+                display_name: "街拍".into(),
+                category_group: "scene".into(),
+                similarity: 0.44,
+                threshold: 0.18,
+                is_primary: true,
+            }],
+            embedding: vec![],
+            raw_similarities: vec![],
+        };
+        let subject_output = SubjectAnalysisOutput {
+            predictions: vec![crate::subject::SubjectPrediction {
+                label_id: "animal".into(),
+                display_name: "动物".into(),
+                category_group: "subject".into(),
+                similarity: 0.88,
+                threshold: 0.45,
+            }],
+        };
+
+        let merged =
+            crate::semantic::merge_topic_and_environment_predictions(Some(&topic_output), None);
+        assert_eq!(
+            merged
+                .iter()
+                .filter(|prediction| prediction.is_primary)
+                .map(|prediction| prediction.label_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["photo_street"]
+        );
+        assert_eq!(subject_output.predictions[0].label_id, "animal");
+        assert_eq!(subject_output.predictions[0].category_group, "subject");
+        assert!(
+            !subject_output
+                .predictions
+                .iter()
+                .any(|prediction| prediction.label_id == "photo_wildlife")
+        );
     }
 }

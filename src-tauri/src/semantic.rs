@@ -36,7 +36,7 @@ pub const TINYCLIP_TOKENIZER_SHA256: &str =
     "6d9109cc838977f3ca94a379eec36aecc7c807e1785cd729660ca2fc0171fb35";
 pub const SIGLIP2_MODEL_NAME: &str = "SigLIP2-Base-Patch16-224";
 pub const SIGLIP2_MODEL_VERSION: &str = "onnx-int8-2026-08-11";
-pub const SIGLIP2_ANALYSIS_VERSION: &str = "photo-organizer-semantic-topic-candidates-siglip2-v3";
+pub const SIGLIP2_ANALYSIS_VERSION: &str = "photo-organizer-semantic-topic-candidates-siglip2-v4";
 pub const SIGLIP2_MODEL_FILE: &str = "model_int8.onnx";
 pub const SIGLIP2_TOKENIZER_FILE: &str = "tokenizer.json";
 pub const SIGLIP2_MODEL_SHA256: &str =
@@ -311,10 +311,6 @@ pub struct SemanticLabelDescriptor {
 
 const CONTEXT_LABELS: [(&str, &str, f32); 2] =
     [("indoor", "室内", 0.55), ("outdoor", "室外", 0.55)];
-// 风景是一个由高置信“风光”题材证据派生出的主体层标签。它不由
-// PicoDet/YuNet 检测物体，而是作为语义层的可筛选结果保存，避免把
-// 场景模型伪装成目标检测模型。
-const DERIVED_SUBJECT_LABELS: [(&str, &str, f32); 1] = [("scenery", "风景", 0.18)];
 
 #[derive(Debug, thiserror::Error)]
 pub enum SemanticError {
@@ -373,67 +369,107 @@ pub fn semantic_catalog() -> Vec<SemanticLabelDescriptor> {
             taxonomy_version: TAXONOMY_VERSION.into(),
         }
     }));
-    catalog.extend(
-        DERIVED_SUBJECT_LABELS
-            .iter()
-            .map(|(id, display_name, threshold)| SemanticLabelDescriptor {
-                id: (*id).into(),
-                display_name: (*display_name).into(),
-                category_group: "subject".into(),
-                threshold: *threshold,
-                is_primary_category: false,
-                taxonomy_version: TAXONOMY_VERSION.into(),
-            }),
-    );
     catalog.extend(crate::subject::subject_catalog());
     catalog
 }
 
-/// Map values written by older taxonomy versions to the current user-facing
-/// taxonomy. This is intentionally kept at the read boundary so existing
-/// manual classifications and organization rules remain readable after a
-/// taxonomy refresh.
-pub fn canonical_label_id(label_id: &str) -> &str {
+/// Canonicalize a stored value only when it is being read as a photography
+/// topic. Topic and subject ids intentionally overlap (for example `vehicle`)
+/// but must never be normalized through one global map.
+pub fn canonical_topic_id(label_id: &str) -> Option<&'static str> {
     match label_id {
-        "unknown" | "photo_documentary" | "photo_event" | "photo_document" => "photo_abstract",
-        "photo_food" | "photo_commercial" => "photo_still_life",
-        "person" | "portrait" => "single_person",
-        "group" => "multiple_people",
-        "pet" => "animal",
-        "photo_urban" => "photo_street",
-        "photo_transport" => "photo_vehicle",
-        "photo_plant" => "photo_macro",
-        _ => label_id,
+        "photo_portrait" => Some("photo_portrait"),
+        "photo_landscape" => Some("photo_landscape"),
+        "photo_street" => Some("photo_street"),
+        "photo_architecture" => Some("photo_architecture"),
+        "photo_still_life" => Some("photo_still_life"),
+        "photo_wildlife" => Some("photo_wildlife"),
+        "photo_macro" => Some("photo_macro"),
+        "photo_vehicle" => Some("photo_vehicle"),
+        "photo_abstract" => Some("photo_abstract"),
+        "person" | "portrait" => Some("photo_portrait"),
+        "landscape" => Some("photo_landscape"),
+        "street" | "photo_urban" => Some("photo_street"),
+        "architecture" => Some("photo_architecture"),
+        "product" | "still_life" | "photo_food" | "photo_commercial" => Some("photo_still_life"),
+        "animal" => Some("photo_wildlife"),
+        "vehicle" | "photo_transport" => Some("photo_vehicle"),
+        "plant" | "photo_plant" => Some("photo_macro"),
+        "abstract" => Some("photo_abstract"),
+        // Unknown, documentary, event, and document are historical or
+        // rejected topic values. They are deliberately not abstract art.
+        _ => None,
+    }
+}
+
+/// Canonicalize a stored value only when it is being read as a subject tag.
+pub fn canonical_subject_id(label_id: &str) -> Option<&'static str> {
+    match label_id {
+        "single_person" => Some("single_person"),
+        "multiple_people" => Some("multiple_people"),
+        "animal" => Some("animal"),
+        "vehicle" => Some("vehicle"),
+        "food" => Some("food"),
+        "plant" => Some("plant"),
+        "person" | "portrait" => Some("single_person"),
+        "group" => Some("multiple_people"),
+        "pet" => Some("animal"),
+        // `scenery` was a derived topic label, never a detector subject.
+        _ => None,
+    }
+}
+
+pub fn canonical_context_id(label_id: &str) -> Option<&'static str> {
+    match label_id {
+        "indoor" => Some("indoor"),
+        "outdoor" => Some("outdoor"),
+        // These ids were emitted by the former context taxonomy. They remain
+        // context evidence with their original ids; they must not become a
+        // photography topic or a detector subject merely because the same
+        // words have meanings in other layers.
+        "night" => Some("night"),
+        "sunset" => Some("sunset"),
+        "street" => Some("street"),
+        _ => None,
+    }
+}
+
+pub fn canonical_stored_label_id(
+    label_id: &str,
+    category_group: &str,
+    is_primary: bool,
+) -> Option<&'static str> {
+    match (category_group, is_primary) {
+        ("scene", true) => canonical_topic_id(label_id),
+        ("subject", false) => canonical_subject_id(label_id),
+        ("context", false) => canonical_context_id(label_id),
+        _ => None,
     }
 }
 
 pub fn known_display_name_for_label_id(label_id: &str) -> Option<&'static str> {
-    let canonical_id = canonical_label_id(label_id);
-    if canonical_id != label_id {
-        return known_display_name_for_label_id(canonical_id);
-    }
     let legacy_name = match label_id {
-        "single_person" => Some("单人"),
-        "multiple_people" => Some("多人"),
-        "scenery" => Some("风景"),
-        "landscape" => Some("风景"),
-        "architecture" => Some("建筑"),
-        "product" => Some("产品"),
-        "still_life" => Some("静物"),
-        "food" => Some("食物"),
-        "animal" => Some("动物"),
-        "screenshot" => Some("截图"),
-        "document" => Some("文档"),
-        "abstract" => Some("抽象"),
-        "vehicle" => Some("车辆"),
-        "plant" => Some("植物"),
-        "flower" => Some("花卉"),
-        "mountain" => Some("山"),
-        "water" => Some("水体"),
-        "forest" => Some("森林"),
-        "street" => Some("街道"),
-        "night" => Some("夜景"),
-        "sunset" => Some("日落"),
+        "unknown" => Some("未分类（历史标签）"),
+        "photo_documentary" => Some("纪实（历史标签）"),
+        "photo_event" => Some("运动（历史标签）"),
+        "photo_document" => Some("文档（历史标签）"),
+        "photo_food" => Some("美食（历史标签）"),
+        "photo_commercial" => Some("商业与静物（历史标签）"),
+        "scenery" => Some("风景（历史派生）"),
+        "landscape" => Some("风光（历史标签）"),
+        "person" | "portrait" => Some("人物（历史主体）"),
+        "group" => Some("多人（历史主体）"),
+        "pet" => Some("动物（历史主体）"),
+        "screenshot" => Some("截图（历史标签）"),
+        "document" => Some("文档（历史标签）"),
+        "abstract" => Some("抽象（历史标签）"),
+        "flower" => Some("花卉（历史标签）"),
+        "mountain" => Some("山（历史标签）"),
+        "water" => Some("水体（历史标签）"),
+        "forest" => Some("森林（历史标签）"),
+        "street" => Some("街道（历史标签）"),
+        "night" => Some("夜景（历史标签）"),
+        "sunset" => Some("日落（历史标签）"),
         _ => None,
     };
     if legacy_name.is_some() {
@@ -443,40 +479,20 @@ pub fn known_display_name_for_label_id(label_id: &str) -> Option<&'static str> {
         .iter()
         .find(|label| label.id == label_id)
         .map(|label| label.display_name)
+        .or_else(|| match label_id {
+            "single_person" => Some("单人"),
+            "multiple_people" => Some("多人"),
+            "animal" => Some("动物"),
+            "vehicle" => Some("车辆"),
+            "food" => Some("食物"),
+            "plant" => Some("植物"),
+            _ => None,
+        })
         .or_else(|| {
             CONTEXT_LABELS
                 .iter()
                 .find(|(id, _, _)| *id == label_id)
                 .map(|(_, display_name, _)| *display_name)
-        })
-}
-
-pub fn category_group_for_label_id(label_id: &str) -> Option<&'static str> {
-    let canonical_id = canonical_label_id(label_id);
-    if canonical_id != label_id {
-        return category_group_for_label_id(canonical_id);
-    }
-    let legacy_group = match label_id {
-        "single_person" | "multiple_people" | "animal" | "vehicle" | "food" | "plant"
-        | "scenery" => Some("subject"),
-        "landscape" | "architecture" | "product" | "still_life" | "screenshot" | "document"
-        | "abstract" => Some("scene"),
-        "flower" | "mountain" | "water" | "forest" => Some("subject"),
-        "street" | "night" | "sunset" | "indoor" | "outdoor" => Some("context"),
-        _ => None,
-    };
-    if legacy_group.is_some() {
-        return legacy_group;
-    }
-    topics::TOPIC_LABELS
-        .iter()
-        .find(|label| label.id == label_id)
-        .map(|_| "scene")
-        .or_else(|| {
-            CONTEXT_LABELS
-                .iter()
-                .find(|(id, _, _)| *id == label_id)
-                .map(|_| "context")
         })
 }
 
@@ -1776,7 +1792,7 @@ fn places365_raw_similarities(
         .collect()
 }
 
-fn merge_topic_and_environment_predictions(
+pub(crate) fn merge_topic_and_environment_predictions(
     topic_output: Option<&SemanticAnalysisOutput>,
     environment: Option<(&'static str, f32)>,
 ) -> Vec<SemanticPrediction> {
@@ -2455,17 +2471,34 @@ mod tests {
             known_display_name_for_label_id("photo_landscape"),
             Some("风光")
         );
-        assert_eq!(known_display_name_for_label_id("unknown"), Some("抽象艺术"));
+        assert_eq!(
+            known_display_name_for_label_id("unknown"),
+            Some("未分类（历史标签）")
+        );
         assert_eq!(
             known_display_name_for_label_id("photo_documentary"),
-            Some("抽象艺术")
+            Some("纪实（历史标签）")
         );
-        assert_eq!(known_display_name_for_label_id("person"), Some("单人"));
-        assert_eq!(known_display_name_for_label_id("pet"), Some("动物"));
-        assert_eq!(known_display_name_for_label_id("scenery"), Some("风景"));
+        assert_eq!(
+            known_display_name_for_label_id("person"),
+            Some("人物（历史主体）")
+        );
+        assert_eq!(
+            known_display_name_for_label_id("pet"),
+            Some("动物（历史主体）")
+        );
+        assert_eq!(
+            known_display_name_for_label_id("scenery"),
+            Some("风景（历史派生）")
+        );
         assert_eq!(known_display_name_for_label_id("food"), Some("食物"));
-        assert_eq!(canonical_label_id("photo_food"), "photo_still_life");
-        assert_eq!(canonical_label_id("photo_event"), "photo_abstract");
+        assert_eq!(canonical_topic_id("photo_food"), Some("photo_still_life"));
+        assert_eq!(canonical_topic_id("photo_event"), None);
+        assert_eq!(canonical_subject_id("vehicle"), Some("vehicle"));
+        assert_eq!(canonical_subject_id("scenery"), None);
+        assert_eq!(canonical_context_id("night"), Some("night"));
+        assert_eq!(canonical_context_id("sunset"), Some("sunset"));
+        assert_eq!(canonical_context_id("street"), Some("street"));
         assert_eq!(
             catalog
                 .iter()
@@ -2480,6 +2513,7 @@ mod tests {
                 .count(),
             6
         );
+        assert!(!catalog.iter().any(|label| label.id == "scenery"));
         assert!(catalog
             .iter()
             .filter(|label| label.category_group == "scene" || label.category_group == "context")
@@ -2502,13 +2536,43 @@ mod tests {
     }
 
     #[test]
-    fn legacy_labels_canonicalize_to_the_consolidated_taxonomy() {
-        assert_eq!(canonical_label_id("unknown"), "photo_abstract");
-        assert_eq!(canonical_label_id("photo_documentary"), "photo_abstract");
-        assert_eq!(canonical_label_id("person"), "single_person");
-        assert_eq!(canonical_label_id("portrait"), "single_person");
-        assert_eq!(canonical_label_id("group"), "multiple_people");
-        assert_eq!(canonical_label_id("pet"), "animal");
+    fn legacy_labels_canonicalize_only_within_their_layer() {
+        assert_eq!(canonical_topic_id("unknown"), None);
+        assert_eq!(canonical_topic_id("photo_documentary"), None);
+        assert_eq!(canonical_topic_id("person"), Some("photo_portrait"));
+        assert_eq!(canonical_subject_id("person"), Some("single_person"));
+        assert_eq!(canonical_subject_id("portrait"), Some("single_person"));
+        assert_eq!(canonical_subject_id("group"), Some("multiple_people"));
+        assert_eq!(canonical_subject_id("pet"), Some("animal"));
+        assert_eq!(canonical_topic_id("vehicle"), Some("photo_vehicle"));
+        assert_eq!(canonical_subject_id("vehicle"), Some("vehicle"));
+        assert_eq!(
+            canonical_stored_label_id("night", "context", false),
+            Some("night")
+        );
+        assert_eq!(
+            canonical_stored_label_id("sunset", "context", false),
+            Some("sunset")
+        );
+        assert_eq!(
+            canonical_stored_label_id("street", "context", false),
+            Some("street")
+        );
+        assert_eq!(canonical_stored_label_id("street", "subject", false), None);
+        assert_eq!(
+            canonical_stored_label_id("street", "scene", true),
+            Some("photo_street")
+        );
+        assert_eq!(
+            canonical_stored_label_id("person", "subject", false),
+            Some("single_person")
+        );
+        assert_eq!(
+            canonical_stored_label_id("person", "scene", true),
+            Some("photo_portrait")
+        );
+        assert_eq!(canonical_stored_label_id("unknown", "scene", true), None);
+        assert_eq!(canonical_stored_label_id("scenery", "subject", false), None);
     }
 
     #[test]

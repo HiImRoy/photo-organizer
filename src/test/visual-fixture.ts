@@ -47,23 +47,23 @@ const semanticCatalog: SemanticLabelDescriptor[] = [
   ["single_person", "单人"],
   ["multiple_people", "多人"],
   ["animal", "动物"],
+  ["vehicle", "车辆"],
   ["plant", "植物"],
   ["food", "食物"],
-  ["scenery", "风景"],
 ].map(([id, displayName]) => ({
   id,
   displayName,
   categoryGroup: id.startsWith("photo_")
     ? "scene"
-    : ["single_person", "multiple_people", "animal", "plant", "food", "scenery"].includes(id)
+    : ["single_person", "multiple_people", "animal", "vehicle", "plant", "food"].includes(id)
       ? "subject"
       : "context",
   threshold: id === "single_person" ? 0.45 : 0.16,
   isPrimaryCategory: id.startsWith("photo_"),
   taxonomyVersion:
-    id.startsWith("photo_") || id === "indoor" || id === "outdoor" || id === "scenery"
-      ? "photo-organizer-photography-topics-v4"
-      : "photo-organizer-subject-tags-v3",
+    id.startsWith("photo_") || id === "indoor" || id === "outdoor"
+      ? "photo-organizer-photography-topics-v5"
+      : "photo-organizer-subject-tags-v4",
 }));
 
 const library: LibrarySummary = {
@@ -234,7 +234,7 @@ export function visualFixtureFromSearch(search: string): VisualFixture | null {
       topicModel: {
         name: "SigLIP2-Base-Patch16-224",
         version: "onnx-int8-2026-08-11",
-        analysisVersion: "photo-organizer-semantic-topic-candidates-siglip2-v2",
+        analysisVersion: "photo-organizer-semantic-topic-candidates-siglip2-v4",
         license: "Apache-2.0",
         installed: true,
         modelSizeBytes: 378_000_135,
@@ -249,7 +249,7 @@ export function visualFixtureFromSearch(search: string): VisualFixture | null {
       model: {
         name: "PicoDet-S-COCO",
         version: "onnx-2026-08-10",
-        analysisVersion: "photo-organizer-subject-picodet-yunet-v1",
+        analysisVersion: "photo-organizer-subject-picodet-yunet-v2",
         license: "Apache-2.0",
         installed: true,
         modelSizeBytes: 4_792_914,
@@ -259,7 +259,7 @@ export function visualFixtureFromSearch(search: string): VisualFixture | null {
       faceModel: {
         name: "YuNet-FaceDetector",
         version: "onnx-2023mar",
-        analysisVersion: "photo-organizer-subject-picodet-yunet-v1",
+        analysisVersion: "photo-organizer-subject-picodet-yunet-v2",
         license: "MIT",
         installed: true,
         modelSizeBytes: 232_589,
@@ -282,7 +282,12 @@ export function visualFixtureFromSearch(search: string): VisualFixture | null {
         categoryGroup: "scene",
         assetCount: 4,
       },
-      { labelId: "photo_still_life", displayName: "静物特写", categoryGroup: "scene", assetCount: 4 },
+      {
+        labelId: "photo_still_life",
+        displayName: "静物特写",
+        categoryGroup: "scene",
+        assetCount: 4,
+      },
       { labelId: "outdoor", displayName: "室外", categoryGroup: "context", assetCount: 11 },
     ],
     folders: [
@@ -342,8 +347,8 @@ function semanticLabelsFor(index: number) {
       threshold: 0.16,
       modelName: "SigLIP2-Base-Patch16-224",
       modelVersion: "onnx-int8-2026-08-11",
-      analysisVersion: "photo-organizer-semantic-topic-candidates-siglip2-v2",
-      taxonomyVersion: "photo-organizer-photography-topics-v4",
+      analysisVersion: "photo-organizer-semantic-topic-candidates-siglip2-v4",
+      taxonomyVersion: "photo-organizer-photography-topics-v5",
       analyzedAt: "2026-08-07T03:12:00Z",
       isManual: false,
       isPrimary: rank === 0,
