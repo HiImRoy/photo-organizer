@@ -61,6 +61,8 @@ const IMPORT_SUBFOLDER_SCOPE_MIGRATION: &str =
     include_str!("../migrations/0015_import_subfolder_scope.sql");
 const UNIFIED_SOURCE_COLLECTION_MIGRATION: &str =
     include_str!("../migrations/0016_unified_source_collection.sql");
+const SEMANTIC_ANALYSIS_TAXONOMY_MIGRATION: &str =
+    include_str!("../migrations/0017_semantic_analysis_taxonomy.sql");
 
 #[derive(Debug, Clone)]
 pub struct Repository {
@@ -162,6 +164,7 @@ impl Repository {
             (14_i64, SUBJECT_ANALYSIS_MIGRATION),
             (15_i64, IMPORT_SUBFOLDER_SCOPE_MIGRATION),
             (16_i64, UNIFIED_SOURCE_COLLECTION_MIGRATION),
+            (17_i64, SEMANTIC_ANALYSIS_TAXONOMY_MIGRATION),
         ] {
             if current < version {
                 let transaction = connection.transaction()?;
@@ -2296,10 +2299,10 @@ impl Repository {
         }
         if !force {
             let scene_not_exists = "NOT EXISTS(
-                    SELECT 1 FROM semantic_labels sl
-                    WHERE sl.asset_id=a.id AND sl.source_fingerprint=a.fingerprint
-                      AND sl.model_name=? AND sl.model_version=? AND sl.analysis_version=?
-                      AND sl.taxonomy_version=?
+                    SELECT 1 FROM semantic_embeddings se
+                    WHERE se.asset_id=a.id AND se.source_fingerprint=a.fingerprint
+                      AND se.model_name=? AND se.model_version=? AND se.analysis_version=?
+                      AND se.taxonomy_version=?
                  )";
             if subject_model.is_some() {
                 sql.push_str(&format!(
@@ -2539,10 +2542,11 @@ impl Repository {
             transaction.execute(
                 "INSERT INTO semantic_embeddings(
                     asset_id, model_name, model_version, analysis_version, source_fingerprint,
-                    dimensions, vector_blob, generated_at
-                 ) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+                    taxonomy_version, dimensions, vector_blob, generated_at
+                 ) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
                  ON CONFLICT(asset_id, model_name, model_version, analysis_version, source_fingerprint)
-                 DO UPDATE SET dimensions=excluded.dimensions, vector_blob=excluded.vector_blob,
+                 DO UPDATE SET taxonomy_version=excluded.taxonomy_version,
+                               dimensions=excluded.dimensions, vector_blob=excluded.vector_blob,
                                generated_at=excluded.generated_at",
                 params![
                     candidate.id,
@@ -2550,6 +2554,7 @@ impl Repository {
                     &candidate.model_version,
                     &candidate.analysis_version,
                     candidate.fingerprint,
+                    &candidate.taxonomy_version,
                     output.embedding.len() as i64,
                     embedding_bytes,
                     timestamp,
@@ -4749,10 +4754,10 @@ fn merge_duplicate_assets(
             transaction.execute(
                 "INSERT OR IGNORE INTO semantic_embeddings(
                     asset_id, model_name, model_version, analysis_version,
-                    source_fingerprint, dimensions, vector_blob, generated_at
+                    source_fingerprint, taxonomy_version, dimensions, vector_blob, generated_at
                  )
                  SELECT ?1, model_name, model_version, analysis_version,
-                        source_fingerprint, dimensions, vector_blob, generated_at
+                        source_fingerprint, taxonomy_version, dimensions, vector_blob, generated_at
                  FROM semantic_embeddings WHERE asset_id=?2",
                 params![survivor, duplicate],
             )?;
@@ -5707,7 +5712,7 @@ mod tests {
         let repository = Repository::new(temp.path().join("database.sqlite3"));
         repository.initialize().expect("first initialization");
         repository.initialize().expect("second initialization");
-        assert_eq!(repository.migration_version().expect("version"), 16);
+        assert_eq!(repository.migration_version().expect("version"), 17);
         let connection = repository.open().expect("connection");
         for table in [
             "organization_plans",
@@ -5739,6 +5744,15 @@ mod tests {
                 .expect("column lookup");
             assert_eq!(exists, 1, "missing asset column {column}");
         }
+        let taxonomy_version_exists: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('semantic_embeddings')
+                 WHERE name='taxonomy_version'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("semantic embedding taxonomy column");
+        assert_eq!(taxonomy_version_exists, 1);
     }
 
     fn initialize_legacy_schema_at_version_15(repository: &Repository) {
@@ -6204,6 +6218,127 @@ mod tests {
     }
 
     #[test]
+    fn successful_empty_semantic_results_are_cached_by_analysis_identity() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let repository = Repository::new(temp.path().join("database.sqlite3"));
+        repository.initialize().expect("initialize");
+        let (library_id, asset_id) = seed_classifiable_asset(&repository, "empty-results-cache");
+        let thumbnail_path = temp.path().join("empty-results-grid-640-v1.jpg");
+        std::fs::write(&thumbnail_path, b"thumbnail fixture").expect("write thumbnail fixture");
+        repository
+            .open()
+            .expect("open database")
+            .execute(
+                "INSERT INTO thumbnails(
+                    asset_id, cache_path, spec, source_modified_at, source_size, status, updated_at
+                 ) SELECT ?1, ?2, ?3, modified_at, file_size, 'ready', ?4
+                 FROM assets WHERE id=?1",
+                params![
+                    asset_id,
+                    thumbnail_path.to_string_lossy().into_owned(),
+                    crate::imaging::THUMBNAIL_SPEC,
+                    now()
+                ],
+            )
+            .expect("insert current thumbnail");
+
+        let candidates = repository
+            .create_semantic_job("empty-results-job", library_id, false, None)
+            .expect("queue initial analysis");
+        assert_eq!(candidates.len(), 1);
+        let empty_output = SemanticAnalysisOutput {
+            predictions: Vec::new(),
+            embedding: Vec::new(),
+            raw_similarities: Vec::new(),
+        };
+        assert_eq!(
+            repository
+                .save_semantic_results("empty-results-job", &[(&candidates[0], &empty_output)])
+                .expect("save successful empty result"),
+            (1, 0)
+        );
+        repository
+            .set_semantic_job_status("empty-results-job", "completed")
+            .expect("finish initial job");
+
+        let repeated = repository
+            .create_semantic_job("empty-results-repeat", library_id, false, None)
+            .expect("create repeat job");
+        assert!(repeated.is_empty(), "empty predictions are still completed");
+        repository
+            .set_semantic_job_status("empty-results-repeat", "completed")
+            .expect("finish repeat job");
+
+        let mut changed_model = default_semantic_model_metadata();
+        changed_model.version.push_str("-changed");
+        let changed_model_candidates = repository
+            .create_semantic_job_with_semantic_model(
+                "empty-results-model-changed",
+                library_id,
+                false,
+                None,
+                &changed_model,
+                None,
+            )
+            .expect("model version change queues analysis");
+        assert_eq!(changed_model_candidates.len(), 1);
+        repository
+            .set_semantic_job_status("empty-results-model-changed", "completed")
+            .expect("finish model version job");
+
+        let mut changed_analysis = default_semantic_model_metadata();
+        changed_analysis.analysis_version.push_str("-changed");
+        let changed_analysis_candidates = repository
+            .create_semantic_job_with_semantic_model(
+                "empty-results-analysis-changed",
+                library_id,
+                false,
+                None,
+                &changed_analysis,
+                None,
+            )
+            .expect("analysis version change queues analysis");
+        assert_eq!(changed_analysis_candidates.len(), 1);
+        repository
+            .set_semantic_job_status("empty-results-analysis-changed", "completed")
+            .expect("finish analysis version job");
+
+        repository
+            .open()
+            .expect("open database")
+            .execute(
+                "UPDATE semantic_embeddings SET taxonomy_version='stale-taxonomy'
+                 WHERE asset_id=?1",
+                [asset_id],
+            )
+            .expect("change classification version");
+        let changed_taxonomy_candidates = repository
+            .create_semantic_job("empty-results-taxonomy-changed", library_id, false, None)
+            .expect("taxonomy change queues analysis");
+        assert_eq!(changed_taxonomy_candidates.len(), 1);
+        repository
+            .set_semantic_job_status("empty-results-taxonomy-changed", "completed")
+            .expect("finish taxonomy job");
+
+        repository
+            .open()
+            .expect("open database")
+            .execute(
+                "UPDATE assets SET fingerprint='changed-empty-result-fingerprint' WHERE id=?1",
+                [asset_id],
+            )
+            .expect("change source fingerprint");
+        let changed_fingerprint_candidates = repository
+            .create_semantic_job("empty-results-fingerprint-changed", library_id, false, None)
+            .expect("fingerprint change queues analysis");
+        assert_eq!(changed_fingerprint_candidates.len(), 1);
+        assert_eq!(
+            changed_fingerprint_candidates[0].fingerprint,
+            "changed-empty-result-fingerprint"
+        );
+    }
+
+    #[test]
     fn subject_labels_are_non_primary_and_filterable() {
         let temp = tempfile::tempdir().expect("temp dir");
         let repository = Repository::new(temp.path().join("database.sqlite3"));
@@ -6254,6 +6389,7 @@ mod tests {
                 similarity: 0.91,
                 threshold: 0.45,
             }],
+            person_crops: Vec::new(),
         };
         repository
             .save_subject_result(&candidates[0], &output)

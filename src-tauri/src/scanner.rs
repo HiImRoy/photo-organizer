@@ -1547,6 +1547,7 @@ mod tests {
                         similarity: 0.91,
                         threshold: 0.45,
                     }],
+                    person_crops: Vec::new(),
                 },
             )
             .expect("save subject result");

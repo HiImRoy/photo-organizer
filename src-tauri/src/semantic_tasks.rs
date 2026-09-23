@@ -7,9 +7,12 @@ use crate::gpu::{
     CPU_ANALYSIS_BATCH_LIMIT, MAX_DIRECTML_ANALYSIS_BATCH_SIZE, analysis_batch_limit_for_backend,
 };
 use crate::models::SemanticProgress;
-use crate::semantic::{ExecutionBackend, SemanticAnalysisOutput, SemanticClassifier};
+use crate::semantic::{
+    ExecutionBackend, SemanticAnalysisOutput, SemanticClassifier, SemanticError,
+};
 use crate::subject::{SubjectAnalysisOutput, SubjectClassifier};
 use crate::tasks::{SemanticControlSignal, SemanticTaskJobState, SemanticTaskRegistry};
+use crate::topics;
 
 // Keep CPU inference small enough for ordinary desktops; DirectML may use a wider
 // application analysis batch after the GPU capacity tier has been checked.
@@ -136,6 +139,7 @@ where
         AppError::InvalidArgument(format!("semantic job is already running: {job_id}"))
     })?;
     let thread_job_id = job_id.clone();
+    let backend = classifier.status().selected_backend.unwrap_or(backend);
     let gpu_capabilities = crate::gpu::detect_gpu_capabilities();
     let max_batch_size = analysis_batch_limit_for_backend(&gpu_capabilities, backend);
     debug_assert!(
@@ -452,6 +456,14 @@ where
                         .collect::<Vec<_>>();
                     let outputs =
                         classify_batch_with_fallback(classifier.as_ref(), &cache_ready, &paths, backend);
+                    progress.execution_backend = Some(
+                        classifier
+                            .status()
+                            .selected_backend
+                            .unwrap_or(backend)
+                            .id()
+                            .into(),
+                    );
                     let subject_outputs = subject_classifier.as_ref().map(|subject_classifier| {
                         classify_subject_batch_with_fallback(
                             subject_classifier.as_ref(),
@@ -462,15 +474,36 @@ where
                     });
                     let mut successful = Vec::with_capacity(cache_ready.len());
 
-                    for ((candidate, path), output) in cache_ready.iter().zip(paths).zip(outputs)
+                    for (index, ((candidate, path), output)) in
+                        cache_ready.iter().zip(paths).zip(outputs).enumerate()
                     {
                         match output {
-                            Ok(output) => {
+                            Ok(mut output) => {
                                 // Topic predictions are persisted independently from subject
                                 // predictions. A detected person, animal, or vehicle is
                                 // evidence about the contents of the frame, not a replacement
                                 // for the photographer-facing topic selected by SigLIP2.
-                                successful.push((*candidate, output));
+                                let subject_output = subject_outputs
+                                    .as_ref()
+                                    .and_then(|outputs| outputs.get(index))
+                                    .and_then(|result| result.as_ref().ok());
+                                if let Err(error) = gate_portrait_topic(
+                                    classifier.as_ref(),
+                                    &mut output,
+                                    subject_output,
+                                    backend,
+                                ) {
+                                    let error = error.to_string();
+                                    progress.failed += 1;
+                                    progress.error = Some(error.clone());
+                                    let _ = repository.fail_semantic_item(
+                                        &thread_job_id,
+                                        candidate.id,
+                                        &error,
+                                    );
+                                } else {
+                                    successful.push((*candidate, output));
+                                }
                             }
                             Err(error) => {
                                 progress.failed += 1;
@@ -484,6 +517,14 @@ where
                         }
                         progress.current_path = Some(path.to_string_lossy().into_owned());
                     }
+                    progress.execution_backend = Some(
+                        classifier
+                            .status()
+                            .selected_backend
+                            .unwrap_or(backend)
+                            .id()
+                            .into(),
+                    );
 
                     let entries = successful
                         .iter()
@@ -694,6 +735,98 @@ fn classify_subject_batch_with_fallback(
     classify_subject_batch_adaptively(classifier, candidates, paths, backend)
 }
 
+fn gate_portrait_topic(
+    classifier: &dyn SemanticClassifier,
+    output: &mut SemanticAnalysisOutput,
+    subject_output: Option<&SubjectAnalysisOutput>,
+    backend: ExecutionBackend,
+) -> Result<(), SemanticError> {
+    if !output
+        .predictions
+        .iter()
+        .any(|prediction| prediction.label_id == "photo_portrait")
+    {
+        return Ok(());
+    }
+
+    let Some(subject_output) = subject_output else {
+        remove_portrait_prediction(output);
+        return Ok(());
+    };
+    let subject_score = subject_output
+        .predictions
+        .iter()
+        .filter(|prediction| {
+            prediction.label_id == "single_person" || prediction.label_id == "multiple_people"
+        })
+        .map(|prediction| prediction.similarity)
+        .max_by(f32::total_cmp);
+    let Some(subject_score) = subject_score else {
+        remove_portrait_prediction(output);
+        return Ok(());
+    };
+    if subject_score < topics::PORTRAIT_SUBJECT_SCORE_THRESHOLD
+        || subject_output.person_crops.is_empty()
+    {
+        remove_portrait_prediction(output);
+        return Ok(());
+    }
+
+    let crop_paths = subject_output
+        .person_crops
+        .iter()
+        .map(|crop| crop.path.clone())
+        .collect::<Vec<_>>();
+    let backend = classifier.status().selected_backend.unwrap_or(backend);
+    let crop_outputs = match classifier.classify_batch(&crop_paths, backend) {
+        Ok(outputs) if outputs.len() == crop_paths.len() => outputs,
+        Ok(outputs) => {
+            return Err(SemanticError::Inference(format!(
+                "portrait crop topic gate returned {} results for {} crops",
+                outputs.len(),
+                crop_paths.len()
+            )));
+        }
+        Err(error) => return Err(error),
+    };
+
+    let allowed = crop_outputs.iter().any(|crop_output| {
+        topic_score_and_margin(crop_output, "photo_portrait").is_some_and(|(score, margin)| {
+            topics::portrait_gate_allows(subject_score, score, margin)
+        })
+    });
+    if !allowed {
+        remove_portrait_prediction(output);
+    }
+    Ok(())
+}
+
+fn remove_portrait_prediction(output: &mut SemanticAnalysisOutput) {
+    output
+        .predictions
+        .retain(|prediction| prediction.label_id != "photo_portrait");
+}
+
+fn topic_score_and_margin(output: &SemanticAnalysisOutput, label_id: &str) -> Option<(f32, f32)> {
+    let target = output
+        .raw_similarities
+        .iter()
+        .find(|similarity| {
+            similarity.category_group == "topic_candidate" && similarity.label_id == label_id
+        })?
+        .similarity;
+    let strongest_other = output
+        .raw_similarities
+        .iter()
+        .filter(|similarity| {
+            similarity.category_group == "topic_candidate" && similarity.label_id != label_id
+        })
+        .map(|similarity| similarity.similarity)
+        .max_by(f32::total_cmp)
+        .unwrap_or(0.0);
+    Some((target, target - strongest_other))
+}
+
 fn classify_subject_batch_adaptively(
     classifier: &dyn SubjectClassifier,
     candidates: &[&SemanticAssetCandidate],
@@ -802,6 +935,44 @@ fn classify_subject_single_with_fallback(
     ))
 }
 
+#[cfg(windows)]
+fn is_link_or_reparse_point(metadata: &std::fs::Metadata) -> bool {
+    use std::os::windows::fs::MetadataExt;
+
+    const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0000_0400;
+    metadata.file_type().is_symlink()
+        || metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
+}
+
+#[cfg(not(windows))]
+fn is_link_or_reparse_point(metadata: &std::fs::Metadata) -> bool {
+    metadata.file_type().is_symlink()
+}
+
+fn path_has_link_component(path: &Path) -> bool {
+    let mut current = PathBuf::new();
+    for component in path.components() {
+        match component {
+            std::path::Component::ParentDir => return true,
+            std::path::Component::CurDir => continue,
+            _ => current.push(component.as_os_str()),
+        }
+        if matches!(
+            component,
+            std::path::Component::Prefix(_) | std::path::Component::RootDir
+        ) {
+            continue;
+        }
+        let Ok(metadata) = std::fs::symlink_metadata(&current) else {
+            return true;
+        };
+        if is_link_or_reparse_point(&metadata) {
+            return true;
+        }
+    }
+    false
+}
+
 fn analysis_path(candidate: &SemanticAssetCandidate, thumbnail_dir: &Path) -> Option<PathBuf> {
     // New jobs only schedule assets with a current grid thumbnail. A recovered
     // queued item can have an empty path when its cache became stale; keeping
@@ -812,10 +983,20 @@ fn analysis_path(candidate: &SemanticAssetCandidate, thumbnail_dir: &Path) -> Op
     if candidate.analysis_path == candidate.absolute_path
         || !candidate.analysis_path.starts_with(thumbnail_dir)
         || !file_name.ends_with(&expected_suffix)
+        || path_has_link_component(thumbnail_dir)
+        || path_has_link_component(&candidate.analysis_path)
     {
         return None;
     }
-    Some(candidate.analysis_path.clone())
+
+    let thumbnail_root = std::fs::canonicalize(thumbnail_dir).ok()?;
+    let analysis_file = std::fs::canonicalize(&candidate.analysis_path).ok()?;
+    if !analysis_file.starts_with(&thumbnail_root)
+        || !std::fs::metadata(&analysis_file).ok()?.is_file()
+    {
+        return None;
+    }
+    Some(analysis_file)
 }
 
 fn classify_batch_with_fallback(
@@ -834,6 +1015,7 @@ fn classify_batch_adaptively(
     backend: ExecutionBackend,
 ) -> Vec<Result<SemanticAnalysisOutput, String>> {
     debug_assert_eq!(candidates.len(), paths.len());
+    let backend = classifier.status().selected_backend.unwrap_or(backend);
     match classifier.classify_batch(paths, backend) {
         Ok(outputs) if outputs.len() == paths.len() => outputs.into_iter().map(Ok).collect(),
         Ok(outputs) => {
@@ -921,6 +1103,7 @@ fn classify_single_with_fallback(
     backend: ExecutionBackend,
 ) -> Result<SemanticAnalysisOutput, String> {
     let retry_paths = [path.to_path_buf()];
+    let backend = classifier.status().selected_backend.unwrap_or(backend);
     let last_error = match classifier.classify_batch(&retry_paths, backend) {
         Ok(mut outputs) if outputs.len() == 1 => return Ok(outputs.remove(0)),
         Ok(outputs) => {
@@ -993,6 +1176,53 @@ mod tests {
             self.calls.lock().push(images.to_vec());
             Err(SemanticError::Inference("test failure".into()))
         }
+    }
+
+    #[test]
+    fn portrait_crop_topic_failure_is_not_saved_as_semantic_success() {
+        let classifier = RecordingClassifier {
+            calls: Mutex::new(Vec::new()),
+        };
+        let mut topic_output = SemanticAnalysisOutput {
+            predictions: vec![crate::semantic::SemanticPrediction {
+                label_id: "photo_portrait".into(),
+                display_name: "人像".into(),
+                category_group: "scene".into(),
+                similarity: 0.8,
+                threshold: 0.5,
+                is_primary: true,
+            }],
+            embedding: Vec::new(),
+            raw_similarities: Vec::new(),
+        };
+        let subject_output = SubjectAnalysisOutput {
+            predictions: vec![crate::subject::SubjectPrediction {
+                label_id: "single_person".into(),
+                display_name: "单人".into(),
+                category_group: "subject".into(),
+                similarity: 0.99,
+                threshold: 0.45,
+            }],
+            person_crops: vec![crate::subject::PersonCrop {
+                path: PathBuf::from("cache/person-crop.jpg"),
+                subject_score: 0.99,
+            }],
+        };
+
+        let result = gate_portrait_topic(
+            &classifier,
+            &mut topic_output,
+            Some(&subject_output),
+            ExecutionBackend::Cpu,
+        );
+
+        assert!(
+            matches!(result, Err(SemanticError::Inference(message)) if message.contains("test failure"))
+        );
+        assert_eq!(
+            classifier.calls.lock().as_slice(),
+            &[vec![PathBuf::from("cache/person-crop.jpg")]]
+        );
     }
 
     struct BlockingClassifier {
@@ -1136,6 +1366,58 @@ mod tests {
         }
     }
 
+    struct BackendSwitchingClassifier {
+        backend: Mutex<ExecutionBackend>,
+        calls: Mutex<Vec<(ExecutionBackend, Vec<PathBuf>)>>,
+    }
+
+    impl SemanticClassifier for BackendSwitchingClassifier {
+        fn metadata(&self) -> ModelMetadata {
+            ModelMetadata {
+                name: "backend-switch-test-model".into(),
+                version: "test-version".into(),
+                analysis_version: "test-analysis".into(),
+                license: Some("test".into()),
+                installed: true,
+                model_size_bytes: None,
+                model_sha256: None,
+                supported_backends: vec![ExecutionBackend::Cpu, ExecutionBackend::DirectMl],
+            }
+        }
+
+        fn status(&self) -> SemanticRuntimeStatus {
+            SemanticRuntimeStatus {
+                status: "ready".into(),
+                message: "test".into(),
+                model: self.metadata(),
+                topic_model: None,
+                selected_backend: Some(*self.backend.lock()),
+            }
+        }
+
+        fn classify_batch(
+            &self,
+            images: &[PathBuf],
+            backend: ExecutionBackend,
+        ) -> Result<Vec<SemanticAnalysisOutput>, SemanticError> {
+            self.calls.lock().push((backend, images.to_vec()));
+            if backend == ExecutionBackend::DirectMl {
+                *self.backend.lock() = ExecutionBackend::Cpu;
+                return Err(SemanticError::Inference(
+                    "simulated DirectML inference failure".into(),
+                ));
+            }
+            Ok(images
+                .iter()
+                .map(|_| SemanticAnalysisOutput {
+                    predictions: Vec::new(),
+                    embedding: Vec::new(),
+                    raw_similarities: Vec::new(),
+                })
+                .collect())
+        }
+    }
+
     struct AdaptiveSubjectClassifier {
         calls: Mutex<Vec<Vec<PathBuf>>>,
         max_batch_size: usize,
@@ -1185,6 +1467,7 @@ mod tests {
                 .iter()
                 .map(|_| SubjectAnalysisOutput {
                     predictions: Vec::new(),
+                    person_crops: Vec::new(),
                 })
                 .collect())
         }
@@ -1203,6 +1486,112 @@ mod tests {
                 taxonomy_version: crate::semantic::TAXONOMY_VERSION.into(),
             })
             .collect()
+    }
+
+    #[test]
+    fn semantic_job_progress_reports_cpu_after_backend_fallback() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let repository = Repository::new(temp.path().join("database.sqlite3"));
+        repository.initialize().expect("initialize");
+        let library_root = temp.path().join("library");
+        std::fs::create_dir_all(&library_root).expect("library root");
+        let (library_id, _) = repository
+            .begin_scan(
+                library_root.to_string_lossy().as_ref(),
+                "semantic-backend-scan",
+            )
+            .expect("begin scan");
+        let source_path = library_root.join("photo.jpg");
+        let thumbnail_dir = temp.path().join("thumbnails");
+        std::fs::create_dir_all(&thumbnail_dir).expect("thumbnail directory");
+        let thumbnail_path =
+            thumbnail_dir.join(format!("asset-{}.jpg", crate::imaging::THUMBNAIL_SPEC));
+        std::fs::write(&thumbnail_path, b"thumbnail fixture").expect("thumbnail fixture");
+
+        let connection = repository.open_for_tests().expect("open database");
+        connection
+            .execute(
+                "INSERT INTO assets(
+                    library_id, asset_identity_key, absolute_path, relative_path, file_name,
+                    extension, file_size, modified_at, fingerprint, width, height, orientation,
+                    file_status, scan_status, analysis_status, first_seen_at, last_seen_at,
+                    last_seen_scan
+                 ) VALUES(?1, 'semantic-backend-asset', ?2, 'photo.jpg', 'photo.jpg', 'jpg',
+                          100, 1, 'semantic-backend-fingerprint', 1000, 800, 1,
+                          'present', 'indexed', 'completed', ?3, ?3, 1)",
+                params![
+                    library_id,
+                    source_path.to_string_lossy().into_owned(),
+                    "2026-09-14T00:00:00Z"
+                ],
+            )
+            .expect("insert asset");
+        let asset_id = connection.last_insert_rowid();
+        connection
+            .execute(
+                "INSERT INTO thumbnails(
+                    asset_id, cache_path, spec, source_modified_at, source_size,
+                    status, updated_at
+                 ) VALUES(?1, ?2, ?3, 1, 100, 'ready', ?4)",
+                params![
+                    asset_id,
+                    thumbnail_path.to_string_lossy().into_owned(),
+                    crate::imaging::THUMBNAIL_SPEC,
+                    "2026-09-14T00:00:00Z"
+                ],
+            )
+            .expect("insert semantic thumbnail");
+        connection
+            .execute(
+                "UPDATE libraries SET status='ready' WHERE id=?1",
+                [library_id],
+            )
+            .expect("finish seed library");
+        drop(connection);
+
+        let job_id = "semantic-backend-job";
+        let candidates = repository
+            .create_semantic_job(job_id, library_id, false, None)
+            .expect("create semantic job");
+        assert_eq!(candidates.len(), 1);
+        let classifier = Arc::new(BackendSwitchingClassifier {
+            backend: Mutex::new(ExecutionBackend::DirectMl),
+            calls: Mutex::new(Vec::new()),
+        });
+        let registry = Arc::new(SemanticTaskRegistry::default());
+        spawn_semantic_job(
+            repository.clone(),
+            classifier,
+            None,
+            registry,
+            job_id.into(),
+            library_id,
+            candidates,
+            thumbnail_dir,
+            1,
+            ExecutionBackend::DirectMl,
+            |_| {},
+        )
+        .expect("spawn semantic worker");
+
+        let completed = (0..200).find_map(|_| {
+            let progress = repository
+                .semantic_progress_by_job(job_id)
+                .expect("read semantic progress");
+            if progress
+                .as_ref()
+                .is_some_and(|progress| progress.status == "completed")
+            {
+                progress
+            } else {
+                std::thread::sleep(Duration::from_millis(5));
+                None
+            }
+        });
+        let completed = completed.expect("worker should complete the CPU retry");
+        assert_eq!(completed.execution_backend.as_deref(), Some("cpu"));
+        assert_eq!(completed.completed, 1);
+        assert_eq!(completed.failed, 0);
     }
 
     #[test]
@@ -1383,6 +1772,141 @@ mod tests {
     }
 
     #[test]
+    fn backend_fallback_retries_and_keeps_later_batches_on_cpu_thumbnails() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let thumbnail_dir = temp.path().join("cache");
+        std::fs::create_dir_all(&thumbnail_dir).expect("thumbnail directory");
+        let thumbnail_dir =
+            std::fs::canonicalize(thumbnail_dir).expect("canonical thumbnail directory");
+        let mut candidates = adaptive_candidates(2);
+        for candidate in &mut candidates {
+            candidate.analysis_path = thumbnail_dir.join(
+                candidate
+                    .analysis_path
+                    .file_name()
+                    .expect("thumbnail fixture filename"),
+            );
+            std::fs::write(&candidate.analysis_path, b"bounded thumbnail fixture")
+                .expect("thumbnail fixture");
+        }
+        let candidate_refs = candidates.iter().collect::<Vec<_>>();
+        let paths = candidates
+            .iter()
+            .map(|candidate| {
+                analysis_path(candidate, &thumbnail_dir)
+                    .expect("model input must be a validated application thumbnail")
+            })
+            .collect::<Vec<_>>();
+        let classifier = BackendSwitchingClassifier {
+            backend: Mutex::new(ExecutionBackend::DirectMl),
+            calls: Mutex::new(Vec::new()),
+        };
+
+        let first = classify_batch_with_fallback(
+            &classifier,
+            &candidate_refs[..1],
+            &paths[..1],
+            ExecutionBackend::DirectMl,
+        );
+        let later = classify_batch_with_fallback(
+            &classifier,
+            &candidate_refs[1..],
+            &paths[1..],
+            ExecutionBackend::DirectMl,
+        );
+
+        assert!(first.iter().all(Result::is_ok));
+        assert!(later.iter().all(Result::is_ok));
+        let calls = classifier.calls.lock();
+        assert_eq!(
+            calls
+                .iter()
+                .map(|(backend, _)| *backend)
+                .collect::<Vec<_>>(),
+            vec![
+                ExecutionBackend::DirectMl,
+                ExecutionBackend::Cpu,
+                ExecutionBackend::Cpu
+            ]
+        );
+        assert_eq!(calls[0].1, vec![candidates[0].analysis_path.clone()]);
+        assert_eq!(calls[1].1, vec![candidates[0].analysis_path.clone()]);
+        assert_eq!(calls[2].1, vec![candidates[1].analysis_path.clone()]);
+        assert!(calls.iter().flat_map(|(_, paths)| paths).all(|path| {
+            path.to_string_lossy().contains("grid-640-v1")
+                && !path.to_string_lossy().contains("original")
+        }));
+    }
+
+    #[test]
+    fn portrait_crop_gate_uses_cpu_after_directml_fallback() {
+        let candidate = adaptive_candidates(1)
+            .into_iter()
+            .next()
+            .expect("one candidate");
+        let classifier = BackendSwitchingClassifier {
+            backend: Mutex::new(ExecutionBackend::DirectMl),
+            calls: Mutex::new(Vec::new()),
+        };
+        let batch_output = classify_batch_with_fallback(
+            &classifier,
+            &[&candidate],
+            std::slice::from_ref(&candidate.analysis_path),
+            ExecutionBackend::DirectMl,
+        );
+        assert!(batch_output.iter().all(Result::is_ok));
+
+        let mut topic_output = SemanticAnalysisOutput {
+            predictions: vec![crate::semantic::SemanticPrediction {
+                label_id: "photo_portrait".into(),
+                display_name: "人像".into(),
+                category_group: "scene".into(),
+                similarity: 0.8,
+                threshold: 0.5,
+                is_primary: true,
+            }],
+            embedding: Vec::new(),
+            raw_similarities: Vec::new(),
+        };
+        let crop_path = PathBuf::from("cache/person-crop.jpg");
+        let subject_output = SubjectAnalysisOutput {
+            predictions: vec![crate::subject::SubjectPrediction {
+                label_id: "single_person".into(),
+                display_name: "单人".into(),
+                category_group: "subject".into(),
+                similarity: 0.99,
+                threshold: 0.45,
+            }],
+            person_crops: vec![crate::subject::PersonCrop {
+                path: crop_path.clone(),
+                subject_score: 0.99,
+            }],
+        };
+
+        gate_portrait_topic(
+            &classifier,
+            &mut topic_output,
+            Some(&subject_output),
+            ExecutionBackend::DirectMl,
+        )
+        .expect("crop gate should run on the selected CPU backend");
+
+        let calls = classifier.calls.lock();
+        assert_eq!(
+            calls
+                .iter()
+                .map(|(backend, _)| *backend)
+                .collect::<Vec<_>>(),
+            vec![
+                ExecutionBackend::DirectMl,
+                ExecutionBackend::Cpu,
+                ExecutionBackend::Cpu
+            ]
+        );
+        assert_eq!(calls[2].1, vec![crop_path]);
+    }
+
+    #[test]
     fn cpu_subject_batch_failure_recovers_each_thumbnail_individually() {
         let candidates = adaptive_candidates(4);
         let candidate_refs = candidates.iter().collect::<Vec<_>>();
@@ -1487,8 +2011,14 @@ mod tests {
 
     #[test]
     fn analysis_path_rejects_source_and_external_paths() {
-        let source = PathBuf::from("source/original.jpg");
-        let thumbnail = PathBuf::from("cache/asset-grid-640-v1.jpg");
+        let temp = tempfile::tempdir().expect("temp dir");
+        let thumbnail_dir = temp.path().join("cache");
+        let outside_dir = temp.path().join("cache-sibling");
+        std::fs::create_dir_all(&thumbnail_dir).expect("thumbnail directory");
+        std::fs::create_dir_all(&outside_dir).expect("outside directory");
+        let source = temp.path().join("source/original.jpg");
+        let thumbnail = thumbnail_dir.join("asset-grid-640-v1.jpg");
+        std::fs::write(&thumbnail, b"thumbnail fixture").expect("thumbnail fixture");
         let mut candidate = SemanticAssetCandidate {
             id: 1,
             absolute_path: source.clone(),
@@ -1501,15 +2031,74 @@ mod tests {
         };
 
         assert_eq!(
-            analysis_path(&candidate, Path::new("cache")),
-            Some(thumbnail)
+            analysis_path(&candidate, &thumbnail_dir),
+            Some(std::fs::canonicalize(&thumbnail).expect("canonical thumbnail"))
         );
 
         candidate.analysis_path = source;
-        assert!(analysis_path(&candidate, Path::new("cache")).is_none());
+        assert!(analysis_path(&candidate, &thumbnail_dir).is_none());
 
-        candidate.analysis_path = PathBuf::from("outside/asset-grid-640-v1.jpg");
-        assert!(analysis_path(&candidate, Path::new("cache")).is_none());
+        let outside = outside_dir.join("asset-grid-640-v1.jpg");
+        std::fs::write(&outside, b"outside thumbnail-shaped file").expect("outside fixture");
+        candidate.analysis_path = outside;
+        assert!(analysis_path(&candidate, &thumbnail_dir).is_none());
+
+        candidate.analysis_path = thumbnail_dir.join("../cache-sibling/asset-grid-640-v1.jpg");
+        assert!(analysis_path(&candidate, &thumbnail_dir).is_none());
+    }
+
+    #[test]
+    fn analysis_path_rejects_symlinked_thumbnail_roots_and_entries() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let thumbnail_dir = temp.path().join("thumbnails");
+        let outside_dir = temp.path().join("outside");
+        std::fs::create_dir_all(&thumbnail_dir).expect("thumbnail directory");
+        std::fs::create_dir_all(&outside_dir).expect("outside directory");
+        let outside_file = outside_dir.join("outside-grid-640-v1.jpg");
+        std::fs::write(&outside_file, b"outside thumbnail fixture").expect("outside fixture");
+        let source = temp.path().join("source/original.jpg");
+
+        let linked_file = thumbnail_dir.join("linked-grid-640-v1.jpg");
+        #[cfg(windows)]
+        std::os::windows::fs::symlink_file(&outside_file, &linked_file)
+            .expect("create thumbnail file symlink");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&outside_file, &linked_file)
+            .expect("create thumbnail file symlink");
+
+        let mut candidate = SemanticAssetCandidate {
+            id: 1,
+            absolute_path: source,
+            analysis_path: linked_file,
+            fingerprint: "fingerprint".into(),
+            model_name: "test-model".into(),
+            model_version: "test-version".into(),
+            analysis_version: "test-analysis".into(),
+            taxonomy_version: crate::semantic::TAXONOMY_VERSION.into(),
+        };
+        assert!(analysis_path(&candidate, &thumbnail_dir).is_none());
+
+        let linked_directory = thumbnail_dir.join("redirected");
+        #[cfg(windows)]
+        std::os::windows::fs::symlink_dir(&outside_dir, &linked_directory)
+            .expect("create thumbnail child directory symlink");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&outside_dir, &linked_directory)
+            .expect("create thumbnail child directory symlink");
+        candidate.analysis_path = linked_directory.join("outside-grid-640-v1.jpg");
+        assert!(analysis_path(&candidate, &thumbnail_dir).is_none());
+
+        let linked_root = temp.path().join("thumbnail-alias");
+        #[cfg(windows)]
+        std::os::windows::fs::symlink_dir(&thumbnail_dir, &linked_root)
+            .expect("create thumbnail directory symlink");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&thumbnail_dir, &linked_root)
+            .expect("create thumbnail directory symlink");
+        let owned_thumbnail = thumbnail_dir.join("owned-grid-640-v1.jpg");
+        std::fs::write(&owned_thumbnail, b"owned thumbnail fixture").expect("thumbnail fixture");
+        candidate.analysis_path = linked_root.join("owned-grid-640-v1.jpg");
+        assert!(analysis_path(&candidate, &linked_root).is_none());
     }
 
     #[test]
@@ -1534,6 +2123,7 @@ mod tests {
                 similarity: 0.91,
                 threshold: 0.45,
             }],
+            person_crops: Vec::new(),
         };
 
         let merged =
@@ -1583,6 +2173,7 @@ mod tests {
                 similarity: 0.88,
                 threshold: 0.45,
             }],
+            person_crops: Vec::new(),
         };
 
         let merged =

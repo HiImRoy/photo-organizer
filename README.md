@@ -14,7 +14,7 @@ PhotoOrganizer 是一个 Windows 优先、local-first 的桌面照片管理工�
 - 基于 SQLite 保存本地图库索引、分析结果和用户标记。
 - 亮度、对比度、饱和度、影调、主色和强调色提取。
 - SigLIP 2 Base INT8 本地语义分析，以及摄影题材、主体标签和环境属性筛选。
-- Windows 上可选 DirectML 推理；Provider 自检或模型会话失败时自动回退 CPU，GPU 选项不会把“检测到显卡”误报成可用。DirectML 的有效批大小按专用显存分级（最高 32），运行时失败会在同一后端自动降批。
+- Windows 上可选 DirectML 推理；Provider 自检或模型会话失败时自动回退 CPU，GPU 选项不会把“检测到显卡”误报成可用。DirectML 的有效批大小按专用显存分级（最高 32）；GPU 推理执行失败会一次性回退 CPU，只有 CPU 批次失败才递归降批。
 - 分析任务详情会显示实际后端：\`DirectML GPU\` 表示分类器会话已绑定 DirectML，\`CPU\` 表示当前任务走 CPU。任务前后显存没有明显变化不能单独证明未使用 GPU；DirectML/ONNX Runtime 可能复用已分配的模型显存，验收应同时看任务后端、GPU 计算占用和失败回退提示。
 - 物理本地来源与虚拟收藏夹分离；一张图片可以加入多个收藏夹。
 - 网格、单图预览、信息检查器、直方图、分组、星级和颜色标记。
@@ -49,7 +49,7 @@ PhotoOrganizer 的核心模型有两层：
 ## 开发环境
 
 - Windows 10/11
-- Node.js 22.13+
+- Node.js 22.13+（`package.json` 声明的版本；手动启动器会对较低版本提示警告并继续尝试）
 - Rust stable，MSVC toolchain
 - Microsoft C++ Build Tools
 - WebView2
@@ -67,8 +67,10 @@ npm.cmd install
 手动构建并启动桌面应用（推荐）：
 
 1. 双击项目根目录的 `启动 PhotoOrganizer.cmd`。
-2. 脚本会检查 Node.js、npm 和 Rust，并在 `package-lock.json` 变化时同步依赖。
-3. 前端构建通过后，脚本会启动原生 Tauri 桌面窗口。
+2. 脚本会检查 Node.js、npm、Rust MSVC toolchain、Microsoft C++ Build Tools、WebView2、配置文件和前端依赖状态。
+3. `package-lock.json` 与依赖 marker 不一致、marker 缺失或关键 CLI 缺失时，正常启动会运行 `npm install` 并刷新 marker。
+4. 前端构建通过后，脚本会使用手动 Tauri 配置启动桌面窗口。该配置将 `beforeDevCommand` 设为 `null`，并通过 `--no-dev-server` 禁止启动开发服务器；默认 WebView2 兼容参数不包含 `--no-sandbox`。
+5. 构建或桌面启动失败时，脚本会返回对应命令的非零退出码。
 
 也可以从终端运行：
 
@@ -82,7 +84,17 @@ npm.cmd run start:desktop
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts\manual-build-start.ps1 -CheckOnly
 ```
 
+`-CheckOnly` 只读取并报告环境与依赖状态，不安装依赖、不写入 marker、不构建也不启动应用。缺少必要工具或依赖未同步时会返回非零退出码。Node.js 低于 `package.json` 声明的 22.13 时会显示警告，但不会仅因版本号阻止手动启动；实际构建失败时会报告构建命令的退出码。
+
 开发环境默认使用 `%TEMP%\PhotoOrganizer-dev-data` 保存测试数据库、缩略图和日志，不会自动扫描个人照片目录。需要测试已有应用数据时，再显式设置 `PHOTO_ORGANIZER_DATA_DIR`。
+
+### 模型启动与失败恢复
+
+`启动 PhotoOrganizer.cmd` 负责检查环境、构建并启动桌面窗口；窗口创建后，应用再于后台准备随包模型，因此缺失或损坏的模型资源不会阻止图库打开。语义题材模型确实 ready 后才会恢复数据库中排队的语义任务。模型准备失败时，任务保持 queued，等待后续成功启动恢复，不会被假报为完成。
+
+当前包只包含 SigLIP 2 Base。直接请求仓库未提供资源的 SigLIP 2 SO400M/14-384 profile 会返回明确错误，不会拿 Base 目录尝试装载 SO400M 权重。
+
+语义分类运行期间若 DirectML 推理失败并回退到 CPU，语义状态和 GPU Provider 状态会同步反映回退结果，活动语义模型的数据库 backend 也会更新为 CPU；数据库同步失败会显示在语义状态中。后续同一会话的准备请求和下一次启动会沿用 CPU，避免不断重试已失败的 DirectML 路径。主体模型的 DirectML 回退则显示在主体状态及 GPU Provider 状态中。
 
 ## 质量检查
 

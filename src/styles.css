@@ -16728,3 +16728,60 @@ button.primary-action:active:not(:disabled) {
     font-size: 8px;
   }
 }
+
+/* Model retry and analysis are one action group and share identical control geometry. */
+.photo-app .topbar .topbar-action-controls .topbar-model-control {
+  display: inline-flex;
+  box-sizing: border-box;
+  height: var(--control-height-compact);
+  min-height: var(--control-height-compact);
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  margin: 0;
+  padding: 0 10px;
+  border: 0 !important;
+  border-radius: var(--control-radius) !important;
+  line-height: 1;
+  vertical-align: middle;
+}
+
+.photo-app .topbar-model-status {
+  flex: 0 1 220px;
+  min-width: 0;
+  max-width: min(26vw, 300px);
+  overflow: hidden;
+  color: var(--text-muted);
+  font-size: 11px;
+  line-height: 20px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.photo-app .topbar-model-retry-action {
+  flex: 0 0 auto;
+}
+
+@media (max-width: 1080px) {
+  .photo-app .topbar-model-status {
+    flex-basis: 150px;
+    max-width: 15vw;
+    font-size: 10px;
+  }
+
+  .photo-app .topbar .topbar-action-controls .topbar-model-control {
+    padding-inline: 8px;
+  }
+}
+
+@media (max-width: 820px) {
+  .photo-app .topbar-model-status {
+    flex-basis: 84px;
+    max-width: 84px;
+  }
+
+  .photo-app .topbar .topbar-action-controls .topbar-model-control {
+    padding-inline: 6px;
+    font-size: 10px;
+  }
+}

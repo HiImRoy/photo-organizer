@@ -47,10 +47,9 @@ pub fn run() {
             let paths = paths::AppPaths::initialize_with_resources(data_dir, resource_dir)?;
             let repository = db::Repository::new(&paths.database_path);
             repository.initialize()?;
-            // Keep first-run startup light: model sessions are loaded after the
-            // state is installed and the WebView can be created. Once a model
-            // has been explicitly prepared, ipc::restore_persisted_models
-            // restores it in the background on later launches.
+            // Model sessions are prepared after the state is installed and
+            // the WebView can be created, so missing bundled resources never
+            // prevent the gallery from opening.
             let semantic: std::sync::Arc<dyn semantic::SemanticClassifier> =
                 std::sync::Arc::new(semantic::UnavailableClassifier::default());
             let subject: std::sync::Arc<dyn subject::SubjectClassifier> =
@@ -80,10 +79,7 @@ pub fn run() {
                 }
                 window_builder.build()?;
             }
-            ipc::restore_persisted_models(
-                app.handle().clone(),
-                app.state::<ipc::AppState>().inner(),
-            );
+            ipc::prepare_bundled_models(app.handle().clone(), app.state::<ipc::AppState>().inner());
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![

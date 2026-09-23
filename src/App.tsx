@@ -216,6 +216,41 @@ function topicModelIdFromStatus(status: SemanticRuntimeStatus | null): string | 
   return null;
 }
 
+function modelRuntimeNotice(
+  label: string,
+  status: SemanticRuntimeStatus | SubjectRuntimeStatus | null,
+  statusReadError: string | null,
+  preparationError: string | null,
+) {
+  if (preparationError) return `${label}准备失败：${preparationError}`;
+  if (statusReadError) return `${label}状态读取失败：${statusReadError}`;
+  if (!status) return `${label}状态检查中`;
+  if (status.status === "ready" || (label === "主体模型" && status.status === "partial")) {
+    return null;
+  }
+  if (status.status === "loading") return `${label}准备中`;
+  if (status.status === "error") return `${label}准备失败：${status.message}`;
+  if (status.status === "runtime_unavailable") {
+    return `${label}运行时不可用：${status.message}`;
+  }
+  if (status.status === "model_unavailable") return `${label}尚未就绪：${status.message}`;
+  return `${label}状态：${status.message || status.status}`;
+}
+
+function modelRuntimeCanRetry(
+  status: SemanticRuntimeStatus | SubjectRuntimeStatus | null,
+  statusReadError: string | null,
+  preparationError: string | null,
+) {
+  return (
+    statusReadError !== null ||
+    preparationError !== null ||
+    status?.status === "error" ||
+    status?.status === "model_unavailable" ||
+    status?.status === "runtime_unavailable"
+  );
+}
+
 function readThemeMode(): AppThemeMode {
   if (typeof window === "undefined") return "dark";
   try {
@@ -317,8 +352,13 @@ export default function App() {
   const [cancellingScan, setCancellingScan] = useState(false);
   const [semanticControlBusy, setSemanticControlBusy] = useState(false);
   const [semanticStatus, setSemanticStatus] = useState<SemanticRuntimeStatus | null>(null);
+  const [semanticStatusReadError, setSemanticStatusReadError] = useState<string | null>(null);
+  const [semanticPreparationError, setSemanticPreparationError] = useState<string | null>(null);
   const [gpuCapabilities, setGpuCapabilities] = useState<GpuCapabilities | null>(null);
   const [subjectStatus, setSubjectStatus] = useState<SubjectRuntimeStatus | null>(null);
+  const [subjectStatusReadError, setSubjectStatusReadError] = useState<string | null>(null);
+  const [subjectPreparationError, setSubjectPreparationError] = useState<string | null>(null);
+  const [analysisActionBusy, setAnalysisActionBusy] = useState(false);
   const [refreshKey, setRefreshKey] = useState(0);
   const [workspaceMode, setWorkspaceMode] = useState<"library" | "organization">(
     visualOrganizationMode ? "organization" : "library",
@@ -354,6 +394,39 @@ export default function App() {
   const semanticControlTokenRef = useRef(0);
   const semanticControlRequestRef = useRef<{ jobId: string; token: number } | null>(null);
   const semanticProgressRevisionRef = useRef(0);
+  const semanticStatusRef = useRef<SemanticRuntimeStatus | null>(null);
+  const semanticStatusRevisionRef = useRef(0);
+  const subjectStatusRef = useRef<SubjectRuntimeStatus | null>(null);
+  const subjectStatusRevisionRef = useRef(0);
+  const analysisActionBusyRef = useRef(false);
+  const ensureAnalysisModelsRef = useRef<
+    | (() => Promise<{
+        nextSemanticStatus: SemanticRuntimeStatus | null;
+        requestedBackend: string;
+      }>)
+    | null
+  >(null);
+  const lastAutoPrepareKeyRef = useRef<string | null>(null);
+  const appSettingsRef = useRef(appSettings);
+  const gpuCapabilitiesRef = useRef(gpuCapabilities);
+  appSettingsRef.current = appSettings;
+  gpuCapabilitiesRef.current = gpuCapabilities;
+
+  function updateAppSettings(nextSettings: AppSettings) {
+    appSettingsRef.current = nextSettings;
+    setAppSettings(nextSettings);
+  }
+
+  const reportGpuFallback = useCallback((message: string) => {
+    const current = gpuCapabilitiesRef.current;
+    if (!current || current.directml.state !== "ready") return;
+    const next = {
+      ...current,
+      directml: { ...current.directml, state: "error", message },
+    };
+    gpuCapabilitiesRef.current = next;
+    setGpuCapabilities(next);
+  }, []);
 
   const aiSearchTriggerRef = useRef<HTMLButtonElement | null>(null);
   const assetsRef = useRef<AssetListItem[]>([]);
@@ -427,35 +500,45 @@ export default function App() {
     semanticProgressRef.current = progress;
     setSemanticProgress(progress);
   }, []);
-  const acceptSemanticProgress = useCallback((progress: SemanticProgress) => {
-    const current = semanticProgressRef.current;
-    if (retiredSemanticJobIdsRef.current.has(progress.jobId)) return false;
-    const switchingJob =
-      semanticJobIdRef.current !== null && semanticJobIdRef.current !== progress.jobId;
-    if (
-      (switchingJob && current !== null && !isTerminalSemanticStatus(current.status)) ||
-      semanticTerminalJobIdRef.current === progress.jobId ||
-      (current?.jobId === progress.jobId && isTerminalSemanticStatus(current.status))
-    ) {
-      return false;
-    }
-    if (switchingJob) {
-      retiredSemanticJobIdsRef.current.add(semanticJobIdRef.current as string);
-      semanticControlRequestRef.current = null;
-      semanticControlTokenRef.current += 1;
-      semanticTerminalJobIdRef.current = null;
-      setSemanticControlBusy(false);
-    }
-    semanticJobIdRef.current = progress.jobId;
-    semanticProgressRevisionRef.current += 1;
-    semanticProgressRef.current = progress;
-    if (isTerminalSemanticStatus(progress.status)) {
-      semanticTerminalJobIdRef.current = progress.jobId;
-      retiredSemanticJobIdsRef.current.add(progress.jobId);
-    }
-    setSemanticProgress(progress);
-    return true;
-  }, []);
+  const acceptSemanticProgress = useCallback(
+    (progress: SemanticProgress) => {
+      const current = semanticProgressRef.current;
+      if (retiredSemanticJobIdsRef.current.has(progress.jobId)) return false;
+      const switchingJob =
+        semanticJobIdRef.current !== null && semanticJobIdRef.current !== progress.jobId;
+      if (
+        (switchingJob && current !== null && !isTerminalSemanticStatus(current.status)) ||
+        semanticTerminalJobIdRef.current === progress.jobId ||
+        (current?.jobId === progress.jobId && isTerminalSemanticStatus(current.status))
+      ) {
+        return false;
+      }
+      if (switchingJob) {
+        retiredSemanticJobIdsRef.current.add(semanticJobIdRef.current as string);
+        semanticControlRequestRef.current = null;
+        semanticControlTokenRef.current += 1;
+        semanticTerminalJobIdRef.current = null;
+        setSemanticControlBusy(false);
+      }
+      semanticJobIdRef.current = progress.jobId;
+      semanticProgressRevisionRef.current += 1;
+      semanticProgressRef.current = progress;
+      if (isTerminalSemanticStatus(progress.status)) {
+        semanticTerminalJobIdRef.current = progress.jobId;
+        retiredSemanticJobIdsRef.current.add(progress.jobId);
+      }
+      setSemanticProgress(progress);
+      if (
+        progress.executionBackend === "cpu" &&
+        semanticStatusRef.current?.selectedBackend === "direct_ml" &&
+        appSettingsRef.current.gpuAccelerationEnabled
+      ) {
+        reportGpuFallback("DirectML 运行时不可用，当前分析已回退 CPU。");
+      }
+      return true;
+    },
+    [reportGpuFallback],
+  );
   const closeSettingsDialog = useCallback(() => {
     setSettingsOpen(false);
   }, []);
@@ -564,18 +647,57 @@ export default function App() {
     let active = true;
     let unlistenSemantic: (() => void) | null = null;
     let unlistenSubject: (() => void) | null = null;
-    void subscribeSemanticStatus((status) => {
+    const semanticSubscription = subscribeSemanticStatus((status) => {
       if (!active) return;
+      semanticStatusRevisionRef.current += 1;
+      semanticStatusRef.current = status;
       setSemanticStatus(status);
+      setSemanticStatusReadError(null);
+      setSemanticPreparationError(null);
     }).then((nextUnlisten) => {
       if (active) unlistenSemantic = nextUnlisten;
       else nextUnlisten();
     });
-    void subscribeSubjectStatus((status) => {
-      if (active) setSubjectStatus(status);
+    const subjectSubscription = subscribeSubjectStatus((status) => {
+      if (!active) return;
+      subjectStatusRevisionRef.current += 1;
+      subjectStatusRef.current = status;
+      setSubjectStatus(status);
+      setSubjectStatusReadError(null);
+      setSubjectPreparationError(null);
     }).then((nextUnlisten) => {
       if (active) unlistenSubject = nextUnlisten;
       else nextUnlisten();
+    });
+    void Promise.allSettled([semanticSubscription, subjectSubscription]).then(async () => {
+      if (!active) return;
+      const semanticRevision = semanticStatusRevisionRef.current;
+      const subjectRevision = subjectStatusRevisionRef.current;
+      const [semanticResult, subjectResult] = await Promise.allSettled([
+        fetchSemanticStatus(),
+        fetchSubjectStatus(),
+      ]);
+      if (!active) return;
+      if (semanticResult.status === "fulfilled") {
+        if (semanticRevision === semanticStatusRevisionRef.current) {
+          semanticStatusRevisionRef.current += 1;
+          semanticStatusRef.current = semanticResult.value;
+          setSemanticStatus(semanticResult.value);
+          setSemanticStatusReadError(null);
+        }
+      } else if (semanticRevision === semanticStatusRevisionRef.current) {
+        setSemanticStatusReadError(messageFrom(semanticResult.reason));
+      }
+      if (subjectResult.status === "fulfilled") {
+        if (subjectRevision === subjectStatusRevisionRef.current) {
+          subjectStatusRevisionRef.current += 1;
+          subjectStatusRef.current = subjectResult.value;
+          setSubjectStatus(subjectResult.value);
+          setSubjectStatusReadError(null);
+        }
+      } else if (subjectRevision === subjectStatusRevisionRef.current) {
+        setSubjectStatusReadError(messageFrom(subjectResult.reason));
+      }
     });
     return () => {
       active = false;
@@ -588,7 +710,10 @@ export default function App() {
     let active = true;
     void fetchGpuCapabilities()
       .then((capabilities) => {
-        if (active) setGpuCapabilities(capabilities);
+        if (active) {
+          gpuCapabilitiesRef.current = capabilities;
+          setGpuCapabilities(capabilities);
+        }
       })
       .catch(() => {
         // Hardware probing is diagnostic and must not block the main workspace.
@@ -799,6 +924,60 @@ export default function App() {
   const semanticRunning =
     semanticProgress !== null &&
     ["queued", "running", "paused", "cancelling", "interrupted"].includes(semanticProgress.status);
+  const preferredBackendForSettings = preferredAnalysisBackend(
+    gpuCapabilities,
+    appSettings.gpuAccelerationEnabled,
+  );
+  const previousPreferredBackendRef = useRef(preferredBackendForSettings);
+  useEffect(() => {
+    const backendChanged = previousPreferredBackendRef.current !== preferredBackendForSettings;
+    previousPreferredBackendRef.current = preferredBackendForSettings;
+    const loadedBackendMismatch =
+      semanticStatus?.status === "ready" &&
+      semanticStatus.selectedBackend !== preferredBackendForSettings;
+    if (!backendChanged && !loadedBackendMismatch) return;
+    if (semanticRunning || analysisActionBusy) return;
+    const autoPrepareKey = `${preferredBackendForSettings}:${semanticStatus?.status ?? "unknown"}:${semanticStatus?.selectedBackend ?? "none"}`;
+    if (!backendChanged && lastAutoPrepareKeyRef.current === autoPrepareKey) return;
+    lastAutoPrepareKeyRef.current = autoPrepareKey;
+
+    analysisActionBusyRef.current = true;
+    void Promise.resolve().then(async () => {
+      setAnalysisActionBusy(true);
+      try {
+        await ensureAnalysisModelsRef.current?.();
+      } catch (reason) {
+        setSemanticPreparationError(messageFrom(reason));
+      } finally {
+        analysisActionBusyRef.current = false;
+        setAnalysisActionBusy(false);
+      }
+    });
+  }, [
+    analysisActionBusy,
+    appSettings.gpuAccelerationEnabled,
+    gpuCapabilities,
+    preferredBackendForSettings,
+    semanticRunning,
+    semanticStatus?.selectedBackend,
+    semanticStatus?.status,
+  ]);
+  const semanticModelNotice = modelRuntimeNotice(
+    "题材模型",
+    semanticStatus,
+    semanticStatusReadError,
+    semanticPreparationError,
+  );
+  const subjectModelNotice = modelRuntimeNotice(
+    "主体模型",
+    subjectStatus,
+    subjectStatusReadError,
+    subjectPreparationError,
+  );
+  const modelCanRetry =
+    modelRuntimeCanRetry(semanticStatus, semanticStatusReadError, semanticPreparationError) ||
+    modelRuntimeCanRetry(subjectStatus, subjectStatusReadError, subjectPreparationError);
+  const modelPreparationLoading = semanticStatus?.status === "loading";
   const activeFilterCount = countActiveFilters(filter);
   const activeCollection = filter.favoriteOnly
     ? (collections.find((collection) => collection.systemKey === "default_favorites") ?? null)
@@ -886,44 +1065,28 @@ export default function App() {
       fetchLibraries(),
       fetchBrowseNodes(),
       fetchCollections(),
-      fetchSemanticStatus(),
-      fetchSubjectStatus(),
       fetchSemanticCatalog(),
       fetchClassificationRegistry(),
-    ]).then(
-      ([
-        libraryResult,
-        browseResult,
-        collectionsResult,
-        statusResult,
-        subjectResult,
-        catalogResult,
-        registryResult,
-      ]) => {
-        if (!active) return;
-        if (libraryResult.status === "fulfilled") {
-          setLibraries(libraryResult.value);
-          setCurrentLibraryId((current) =>
-            current !== null && libraryResult.value.some((library) => library.id === current)
-              ? current
-              : (libraryResult.value[0]?.id ?? null),
-          );
-        } else {
-          setError(messageFrom(libraryResult.reason));
-        }
-        if (browseResult.status === "fulfilled") setBrowseNodes(browseResult.value);
-        else setError(messageFrom(browseResult.reason));
-        if (collectionsResult.status === "fulfilled") setCollections(collectionsResult.value);
-        else setError(messageFrom(collectionsResult.reason));
-        if (statusResult.status === "fulfilled") {
-          setSemanticStatus(statusResult.value);
-        }
-        if (subjectResult.status === "fulfilled") setSubjectStatus(subjectResult.value);
-        if (catalogResult.status === "fulfilled") setSemanticCatalog(catalogResult.value);
-        if (registryResult.status === "fulfilled") setClassificationRegistry(registryResult.value);
-        setLoading(false);
-      },
-    );
+    ]).then(([libraryResult, browseResult, collectionsResult, catalogResult, registryResult]) => {
+      if (!active) return;
+      if (libraryResult.status === "fulfilled") {
+        setLibraries(libraryResult.value);
+        setCurrentLibraryId((current) =>
+          current !== null && libraryResult.value.some((library) => library.id === current)
+            ? current
+            : (libraryResult.value[0]?.id ?? null),
+        );
+      } else {
+        setError(messageFrom(libraryResult.reason));
+      }
+      if (browseResult.status === "fulfilled") setBrowseNodes(browseResult.value);
+      else setError(messageFrom(browseResult.reason));
+      if (collectionsResult.status === "fulfilled") setCollections(collectionsResult.value);
+      else setError(messageFrom(collectionsResult.reason));
+      if (catalogResult.status === "fulfilled") setSemanticCatalog(catalogResult.value);
+      if (registryResult.status === "fulfilled") setClassificationRegistry(registryResult.value);
+      setLoading(false);
+    });
     return () => {
       active = false;
     };
@@ -1197,96 +1360,152 @@ export default function App() {
   }
 
   async function ensureAnalysisModels() {
-    const requestedBackend = preferredAnalysisBackend(
-      gpuCapabilities,
-      appSettings.gpuAccelerationEnabled,
-    );
-    let nextSemanticStatus = semanticStatus;
-    let nextSubjectStatus = subjectStatus;
-    if (
-      nextSemanticStatus?.status !== "ready" ||
-      topicModelIdFromStatus(nextSemanticStatus) !== TOPIC_MODEL_ID ||
-      nextSemanticStatus.selectedBackend !== requestedBackend
-    ) {
-      nextSemanticStatus = await prepareSemanticModel(TOPIC_MODEL_ID, requestedBackend);
-      setSemanticStatus(nextSemanticStatus);
+    const currentRequestedBackend = () =>
+      preferredAnalysisBackend(
+        gpuCapabilitiesRef.current,
+        appSettingsRef.current.gpuAccelerationEnabled,
+      );
+    while (true) {
+      const requestedBackend = currentRequestedBackend();
+      let nextSemanticStatus = semanticStatusRef.current;
+      if (nextSemanticStatus?.status === "loading") {
+        return { nextSemanticStatus, requestedBackend };
+      }
       if (
-        requestedBackend === "direct_ml" &&
-        nextSemanticStatus &&
+        nextSemanticStatus?.status !== "ready" ||
+        topicModelIdFromStatus(nextSemanticStatus) !== TOPIC_MODEL_ID ||
         nextSemanticStatus.selectedBackend !== requestedBackend
       ) {
-        const fallbackMessage =
-          nextSemanticStatus.message || "DirectML 模型会话未通过，当前分析已回退 CPU。";
-        setGpuCapabilities((current) =>
-          current
-            ? {
-                ...current,
-                directml: {
-                  ...current.directml,
-                  state: "error",
-                  message: fallbackMessage,
-                },
-              }
-            : current,
-        );
+        const statusRevision = semanticStatusRevisionRef.current;
+        const preparedStatus = await prepareSemanticModel(TOPIC_MODEL_ID, requestedBackend);
+        if (currentRequestedBackend() !== requestedBackend) continue;
+        if (statusRevision === semanticStatusRevisionRef.current) {
+          semanticStatusRevisionRef.current += 1;
+          semanticStatusRef.current = preparedStatus;
+          setSemanticStatus(preparedStatus);
+          setSemanticStatusReadError(null);
+          setSemanticPreparationError(null);
+        }
+        nextSemanticStatus = semanticStatusRef.current;
+        if (
+          requestedBackend === "direct_ml" &&
+          nextSemanticStatus?.selectedBackend !== requestedBackend
+        ) {
+          reportGpuFallback(
+            nextSemanticStatus?.message || "DirectML 模型会话未通过，当前分析已回退 CPU。",
+          );
+        }
+        if (currentRequestedBackend() !== requestedBackend) continue;
       }
-    }
-    if (
-      nextSubjectStatus &&
-      ((nextSubjectStatus.status !== "ready" && nextSubjectStatus.status !== "partial") ||
-        nextSubjectStatus.selectedBackend !== requestedBackend)
-    ) {
-      try {
-        nextSubjectStatus = await prepareSubjectModel(requestedBackend);
-        setSubjectStatus(nextSubjectStatus);
-      } catch {
-        // Subject analysis is optional; the scene workflow remains usable
-        // when the optional detector cannot be prepared.
+
+      nextSemanticStatus = semanticStatusRef.current;
+      if (nextSemanticStatus?.status === "loading" || nextSemanticStatus?.status !== "ready") {
+        return { nextSemanticStatus, requestedBackend };
       }
+
+      const nextSubjectStatus = subjectStatusRef.current;
+      const subjectNeedsPreparation =
+        nextSubjectStatus === null ||
+        (nextSubjectStatus.status !== "ready" && nextSubjectStatus.status !== "partial") ||
+        nextSubjectStatus.selectedBackend !== requestedBackend;
+      if (nextSubjectStatus?.status !== "loading" && subjectNeedsPreparation) {
+        const statusRevision = subjectStatusRevisionRef.current;
+        try {
+          const preparedStatus = await prepareSubjectModel(requestedBackend);
+          if (currentRequestedBackend() !== requestedBackend) continue;
+          if (statusRevision === subjectStatusRevisionRef.current) {
+            subjectStatusRevisionRef.current += 1;
+            subjectStatusRef.current = preparedStatus;
+            setSubjectStatus(preparedStatus);
+            setSubjectStatusReadError(null);
+            setSubjectPreparationError(null);
+          }
+        } catch (reason) {
+          if (currentRequestedBackend() !== requestedBackend) continue;
+          if (statusRevision === subjectStatusRevisionRef.current) {
+            setSubjectPreparationError(messageFrom(reason));
+          }
+        }
+      }
+      if (currentRequestedBackend() !== requestedBackend) continue;
+      return { nextSemanticStatus, requestedBackend };
     }
-    return { nextSemanticStatus, requestedBackend };
   }
 
+  ensureAnalysisModelsRef.current = ensureAnalysisModels;
+
   async function prepareOrAnalyze() {
+    if (analysisActionBusyRef.current) return;
+    analysisActionBusyRef.current = true;
+    setAnalysisActionBusy(true);
     setError(null);
+    let preparingModels = true;
     try {
       const { nextSemanticStatus } = await ensureAnalysisModels();
+      preparingModels = false;
       if (nextSemanticStatus?.status !== "ready") {
         return;
       }
       if (currentLibraryId === null) return;
       const { jobId } = await startSemanticAnalysis(currentLibraryId, false, {
         batchSize: effectiveAnalysisBatchSize(
-          appSettings.analysisBatchSize,
-          gpuCapabilities,
+          appSettingsRef.current.analysisBatchSize,
+          gpuCapabilitiesRef.current,
           nextSemanticStatus.selectedBackend === "direct_ml",
         ),
       });
       beginSemanticProgress(pendingSemanticProgress(jobId, currentLibraryId, nextSemanticStatus));
     } catch (reason) {
-      setError(messageFrom(reason));
+      const message = messageFrom(reason);
+      if (preparingModels) setSemanticPreparationError(message);
+      setError(message);
+    } finally {
+      analysisActionBusyRef.current = false;
+      setAnalysisActionBusy(false);
     }
   }
 
-  const loadedTopicModel = topicModelIdFromStatus(semanticStatus);
-  const semanticReadyForSelection =
-    semanticStatus?.status === "ready" && loadedTopicModel === TOPIC_MODEL_ID;
+  async function retryModelPreparation() {
+    if (analysisActionBusyRef.current) return;
+    analysisActionBusyRef.current = true;
+    setAnalysisActionBusy(true);
+    setSemanticPreparationError(null);
+    setSubjectPreparationError(null);
+    try {
+      await ensureAnalysisModels();
+    } catch (reason) {
+      setSemanticPreparationError(messageFrom(reason));
+    } finally {
+      analysisActionBusyRef.current = false;
+      setAnalysisActionBusy(false);
+    }
+  }
 
   async function analyzeOne(asset: AssetListItem) {
+    if (analysisActionBusyRef.current) return;
+    analysisActionBusyRef.current = true;
+    setAnalysisActionBusy(true);
     setError(null);
+    let preparingModels = true;
     try {
       const { nextSemanticStatus } = await ensureAnalysisModels();
+      preparingModels = false;
       if (nextSemanticStatus?.status !== "ready") return;
       const { jobId } = await reanalyzeAsset(asset.libraryId, asset.id, {
         batchSize: effectiveAnalysisBatchSize(
-          appSettings.analysisBatchSize,
-          gpuCapabilities,
+          appSettingsRef.current.analysisBatchSize,
+          gpuCapabilitiesRef.current,
           nextSemanticStatus.selectedBackend === "direct_ml",
         ),
       });
       beginSemanticProgress(pendingSemanticProgress(jobId, asset.libraryId, nextSemanticStatus));
     } catch (reason) {
-      setError(messageFrom(reason));
+      const message = messageFrom(reason);
+      if (preparingModels) setSemanticPreparationError(message);
+      setError(message);
+    } finally {
+      analysisActionBusyRef.current = false;
+      setAnalysisActionBusy(false);
     }
   }
 
@@ -2304,14 +2523,36 @@ export default function App() {
             </button>
           </div>
           <div className="topbar-action-controls" role="group" aria-label="图库操作">
+            {semanticModelNotice || subjectModelNotice ? (
+              <span
+                className="topbar-model-status"
+                role="status"
+                aria-live={modelCanRetry ? "assertive" : "polite"}
+                title={[semanticModelNotice, subjectModelNotice].filter(Boolean).join("；")}
+              >
+                {[semanticModelNotice, subjectModelNotice].filter(Boolean).join("；")}
+              </span>
+            ) : null}
+            {modelCanRetry ? (
+              <button
+                className="tool-button topbar-model-control topbar-model-retry-action"
+                type="button"
+                onClick={() => void retryModelPreparation()}
+                disabled={analysisActionBusy || modelPreparationLoading}
+              >
+                重试模型准备
+              </button>
+            ) : null}
             <button
-              className="primary-action topbar-analysis-action"
+              className="primary-action topbar-analysis-action topbar-model-control"
               type="button"
               onClick={() => void prepareOrAnalyze()}
-              disabled={!selectedLibrary || semanticRunning}
+              disabled={
+                !selectedLibrary || semanticRunning || analysisActionBusy || modelPreparationLoading
+              }
             >
               <PlayIcon width="14" height="14" />
-              {semanticReadyForSelection ? "分析" : "装载模型"}
+              分析
             </button>
           </div>
         </div>
@@ -2789,10 +3030,10 @@ export default function App() {
           settings={appSettings}
           gpuCapabilities={gpuCapabilities}
           themeMode={themeMode}
-          onChange={setAppSettings}
+          onChange={updateAppSettings}
           onThemeChange={setThemeMode}
           onReset={() => {
-            setAppSettings(normalizeAppSettings(DEFAULT_APP_SETTINGS));
+            updateAppSettings(normalizeAppSettings(DEFAULT_APP_SETTINGS));
             setThemeMode("dark");
           }}
           onClose={closeSettingsDialog}

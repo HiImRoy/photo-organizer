@@ -4,7 +4,14 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import App from "./App";
 import { emptyEffectiveClassification } from "./types";
-import type { AssetListItem, LibrarySummary, ScanProgress, SemanticProgress } from "./types";
+import type {
+  AssetListItem,
+  LibrarySummary,
+  ScanProgress,
+  SemanticProgress,
+  SemanticRuntimeStatus,
+  SubjectRuntimeStatus,
+} from "./types";
 
 const api = vi.hoisted(() => ({
   chooseLibraryFolder: vi.fn(),
@@ -202,6 +209,30 @@ const thirdAsset: AssetListItem = {
 
 let progressListener: ((progress: ScanProgress) => void) | undefined;
 let semanticProgressListener: ((progress: SemanticProgress) => void) | undefined;
+let semanticStatusListener: ((status: SemanticRuntimeStatus) => void) | undefined;
+let subjectStatusListener: ((status: SubjectRuntimeStatus) => void) | undefined;
+
+function semanticRuntimeStatus(
+  status: string,
+  selectedBackend: string | null,
+  message = status,
+): SemanticRuntimeStatus {
+  return {
+    status,
+    message,
+    model: {
+      name: "SigLIP2-Base-Patch16-224",
+      version: "test",
+      analysisVersion: "test",
+      license: "Apache-2.0",
+      installed: true,
+      modelSizeBytes: 1,
+      modelSha256: "test",
+      supportedBackends: ["cpu", "direct_ml"],
+    },
+    selectedBackend,
+  };
+}
 
 beforeEach(() => {
   vi.clearAllMocks();
@@ -209,6 +240,8 @@ beforeEach(() => {
   window.localStorage.removeItem("photo-organizer-settings");
   progressListener = undefined;
   semanticProgressListener = undefined;
+  semanticStatusListener = undefined;
+  subjectStatusListener = undefined;
   api.chooseLibraryFolder.mockResolvedValue(null);
   api.fetchLibraries.mockResolvedValue([]);
   api.fetchAssets.mockResolvedValue({ items: [], total: 0, page: 1, pageSize: 200 });
@@ -319,8 +352,18 @@ beforeEach(() => {
     },
     selectedBackend: "cpu",
   });
-  api.subscribeSemanticStatus.mockResolvedValue(() => undefined);
-  api.subscribeSubjectStatus.mockResolvedValue(() => undefined);
+  api.subscribeSemanticStatus.mockImplementation(
+    async (listener: (status: SemanticRuntimeStatus) => void) => {
+      semanticStatusListener = listener;
+      return vi.fn();
+    },
+  );
+  api.subscribeSubjectStatus.mockImplementation(
+    async (listener: (status: SubjectRuntimeStatus) => void) => {
+      subjectStatusListener = listener;
+      return vi.fn();
+    },
+  );
   api.prepareSubjectModel.mockResolvedValue({
     status: "ready",
     message: "ready",
@@ -424,7 +467,7 @@ describe("PhotoOrganizer application shell", () => {
     expect(within(actionGroup).queryByRole("button", { name: "打开设置" })).not.toBeInTheDocument();
     expect(screen.getByRole("navigation", { name: "工作区导航" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "打开设置" })).toBeInTheDocument();
-    expect(within(actionGroup).getAllByRole("button").at(-1)).toHaveTextContent(/分析|装载模型/);
+    expect(within(actionGroup).getAllByRole("button").at(-1)).toHaveTextContent("分析");
   });
 
   it("shows the first-run empty state and import action", async () => {
@@ -1087,13 +1130,298 @@ describe("PhotoOrganizer application shell", () => {
     await waitFor(() => expect(api.fetchThumbnail).toHaveBeenCalledWith(12));
   });
 
-  it("loads SigLIP 2 when the default topic model is prepared", async () => {
+  it("subscribes to model status before fetching snapshots and keeps newer events", async () => {
+    let resolveSemanticSnapshot: ((status: SemanticRuntimeStatus) => void) | undefined;
+    api.fetchSemanticStatus.mockImplementation(() => {
+      expect(semanticStatusListener).toBeDefined();
+      expect(subjectStatusListener).toBeDefined();
+      return new Promise<SemanticRuntimeStatus>((resolve) => {
+        resolveSemanticSnapshot = resolve;
+      });
+    });
+    render(<App />);
+
+    await waitFor(() => expect(api.fetchSemanticStatus).toHaveBeenCalledOnce());
+    expect(semanticStatusListener).toBeDefined();
+    expect(subjectStatusListener).toBeDefined();
+    act(() => {
+      semanticStatusListener?.(semanticRuntimeStatus("loading", "cpu", "正在准备题材模型"));
+    });
+    expect(screen.getByText(/题材模型准备中/)).toBeInTheDocument();
+
+    await act(async () => {
+      resolveSemanticSnapshot?.(semanticRuntimeStatus("ready", "cpu"));
+      await Promise.resolve();
+    });
+    expect(screen.getByText(/题材模型准备中/)).toBeInTheDocument();
+  });
+
+  it("shows model preparation errors and retries preparation from the status action", async () => {
+    const user = userEvent.setup();
+    api.fetchLibraries.mockResolvedValue([library]);
+    api.fetchSemanticStatus.mockResolvedValue(
+      semanticRuntimeStatus("error", null, "weights unavailable"),
+    );
+    render(<App />);
+
+    const actionGroup = await screen.findByRole("group", { name: "图库操作" });
+    await waitFor(() =>
+      expect(within(actionGroup).getByRole("status")).toHaveTextContent(
+        "题材模型准备失败：weights unavailable",
+      ),
+    );
+    await user.click(await screen.findByRole("button", { name: "重试模型准备" }));
+    await waitFor(() =>
+      expect(api.prepareSemanticModel).toHaveBeenCalledWith("siglip2-base", "cpu"),
+    );
+    await waitFor(() =>
+      expect(screen.queryByRole("button", { name: "重试模型准备" })).not.toBeInTheDocument(),
+    );
+    expect(screen.getByRole("button", { name: "分析" })).toBeInTheDocument();
+  });
+
+  it("offers model retry when runtime recovery reports runtime_unavailable", async () => {
+    api.fetchSemanticStatus.mockResolvedValue(
+      semanticRuntimeStatus("runtime_unavailable", "cpu", "CPU fallback failed"),
+    );
+    render(<App />);
+
+    const actions = await screen.findByRole("group", { name: "图库操作" });
+    await waitFor(() =>
+      expect(within(actions).getByRole("status")).toHaveTextContent(
+        "题材模型运行时不可用：CPU fallback failed",
+      ),
+    );
+    expect(within(actions).getByRole("button", { name: "重试模型准备" })).toBeEnabled();
+  });
+
+  it("distinguishes status lookup failures from model preparation failures", async () => {
+    const user = userEvent.setup();
+    api.fetchSemanticStatus.mockRejectedValue(new Error("status endpoint offline"));
+    render(<App />);
+
+    const actions = await screen.findByRole("group", { name: "图库操作" });
+    await waitFor(() =>
+      expect(within(actions).getByRole("status")).toHaveTextContent(
+        "题材模型状态读取失败：status endpoint offline",
+      ),
+    );
+    await user.click(within(actions).getByRole("button", { name: "重试模型准备" }));
+    await waitFor(() =>
+      expect(api.prepareSemanticModel).toHaveBeenCalledWith("siglip2-base", "cpu"),
+    );
+    await waitFor(() => expect(within(actions).queryByRole("status")).not.toBeInTheDocument());
+  });
+
+  it("ignores repeated analysis clicks while model preparation is pending", async () => {
+    api.fetchLibraries.mockResolvedValue([library]);
+    let resolvePreparation: ((status: SemanticRuntimeStatus) => void) | undefined;
+    api.prepareSemanticModel.mockImplementationOnce(
+      () =>
+        new Promise<SemanticRuntimeStatus>((resolve) => {
+          resolvePreparation = resolve;
+        }),
+    );
+    render(<App />);
+    await waitFor(() => expect(api.fetchSemanticStatus).toHaveBeenCalledOnce());
+    const analyzeButton = await screen.findByRole("button", { name: "分析" });
+
+    act(() => {
+      fireEvent.click(analyzeButton);
+      fireEvent.click(analyzeButton);
+    });
+    await waitFor(() => expect(api.prepareSemanticModel).toHaveBeenCalledOnce());
+    expect(analyzeButton).toBeDisabled();
+
+    await act(async () => {
+      resolvePreparation?.(semanticRuntimeStatus("ready", "cpu"));
+      await Promise.resolve();
+    });
+    await waitFor(() => expect(api.startSemanticAnalysis).toHaveBeenCalledOnce());
+  });
+
+  it("re-prepares for a GPU setting changed while CPU preparation is in flight", async () => {
+    const user = userEvent.setup();
+    api.fetchLibraries.mockResolvedValue([library]);
+    api.fetchGpuCapabilities.mockResolvedValue({
+      status: "ready",
+      message: "独立 GPU 可用",
+      adapters: [],
+      selectedAdapterIndex: 0,
+      dedicatedGpuAvailable: true,
+      recommendedAnalysisBatchSize: 8,
+      directml: { id: "directml", state: "ready", message: "ready" },
+    });
+    let resolveCpuPreparation: ((status: SemanticRuntimeStatus) => void) | undefined;
+    api.prepareSemanticModel
+      .mockImplementationOnce(
+        () =>
+          new Promise<SemanticRuntimeStatus>((resolve) => {
+            resolveCpuPreparation = resolve;
+          }),
+      )
+      .mockResolvedValueOnce(semanticRuntimeStatus("ready", "direct_ml"));
+    render(<App />);
+    await waitFor(() => expect(api.fetchSemanticStatus).toHaveBeenCalledOnce());
+    await user.click(await screen.findByRole("button", { name: "分析" }));
+    await waitFor(() =>
+      expect(api.prepareSemanticModel).toHaveBeenNthCalledWith(1, "siglip2-base", "cpu"),
+    );
+
+    await user.click(screen.getByRole("button", { name: "打开设置" }));
+    const settings = screen.getByRole("dialog", { name: "设置" });
+    await user.click(within(settings).getByRole("tab", { name: /处理/ }));
+    await user.click(within(settings).getByRole("checkbox", { name: "启用 GPU 加速" }));
+    await act(async () => {
+      resolveCpuPreparation?.(semanticRuntimeStatus("ready", "cpu"));
+      await Promise.resolve();
+    });
+
+    await waitFor(() =>
+      expect(api.prepareSemanticModel).toHaveBeenNthCalledWith(2, "siglip2-base", "direct_ml"),
+    );
+    await waitFor(() => expect(api.startSemanticAnalysis).toHaveBeenCalledOnce());
+    expect(api.startSemanticAnalysis).toHaveBeenCalledWith(
+      library.id,
+      false,
+      expect.objectContaining({ batchSize: 4 }),
+    );
+  });
+
+  it("prepares the selected backend after changing GPU settings without starting analysis", async () => {
+    const user = userEvent.setup();
+    api.fetchLibraries.mockResolvedValue([library]);
+    api.fetchSemanticStatus.mockResolvedValue(semanticRuntimeStatus("ready", "cpu"));
+    api.fetchGpuCapabilities.mockResolvedValue({
+      status: "ready",
+      message: "独立 GPU 可用",
+      adapters: [],
+      selectedAdapterIndex: 0,
+      dedicatedGpuAvailable: true,
+      recommendedAnalysisBatchSize: 8,
+      directml: { id: "directml", state: "ready", message: "ready" },
+    });
+    render(<App />);
+    await waitFor(() => expect(api.fetchSemanticStatus).toHaveBeenCalledOnce());
+    await waitFor(() => expect(api.fetchGpuCapabilities).toHaveBeenCalledOnce());
+    expect(api.prepareSemanticModel).not.toHaveBeenCalled();
+
+    await user.click(screen.getByRole("button", { name: "打开设置" }));
+    const settings = screen.getByRole("dialog", { name: "设置" });
+    await user.click(within(settings).getByRole("tab", { name: /处理/ }));
+    await user.click(within(settings).getByRole("checkbox", { name: "启用 GPU 加速" }));
+
+    await waitFor(() =>
+      expect(api.prepareSemanticModel).toHaveBeenCalledWith("siglip2-base", "direct_ml"),
+    );
+    expect(api.startSemanticAnalysis).not.toHaveBeenCalled();
+    expect(within(settings).getByRole("checkbox", { name: "启用 GPU 加速" })).toBeChecked();
+  });
+
+  it("remembers a runtime CPU fallback and does not retry DirectML on the next analysis", async () => {
+    const user = userEvent.setup();
+    window.localStorage.setItem(
+      "photo-organizer-settings",
+      JSON.stringify({ gpuAccelerationEnabled: true }),
+    );
+    api.fetchLibraries.mockResolvedValue([library]);
+    api.fetchGpuCapabilities.mockResolvedValue({
+      status: "ready",
+      message: "独立 GPU 可用",
+      adapters: [],
+      selectedAdapterIndex: 0,
+      dedicatedGpuAvailable: true,
+      recommendedAnalysisBatchSize: 8,
+      directml: { id: "directml", state: "ready", message: "ready" },
+    });
+    api.prepareSemanticModel.mockImplementation((_modelId: string, backend: string) =>
+      Promise.resolve(semanticRuntimeStatus("ready", backend)),
+    );
+    api.startSemanticAnalysis
+      .mockResolvedValueOnce({ jobId: "semantic-gpu" })
+      .mockResolvedValueOnce({ jobId: "semantic-cpu" });
+    render(<App />);
+    await waitFor(() => expect(api.fetchSemanticStatus).toHaveBeenCalledOnce());
+    const analyzeButton = await screen.findByRole("button", { name: "分析" });
+    await waitFor(() => expect(analyzeButton).toBeEnabled());
+    await user.click(analyzeButton);
+    await waitFor(() => expect(api.startSemanticAnalysis).toHaveBeenCalledOnce());
+    await waitFor(() => expect(semanticProgressListener).toBeDefined());
+
+    act(() => {
+      semanticProgressListener?.({
+        jobId: "semantic-gpu",
+        libraryId: library.id,
+        status: "running",
+        total: 2,
+        processed: 0,
+        completed: 0,
+        failed: 0,
+        skipped: 0,
+        currentAssetId: null,
+        currentPath: null,
+        executionBackend: "cpu",
+        modelName: "SigLIP2",
+        modelVersion: "test",
+        error: null,
+      });
+    });
+    act(() => {
+      semanticProgressListener?.({
+        jobId: "semantic-gpu",
+        libraryId: library.id,
+        status: "completed",
+        total: 2,
+        processed: 2,
+        completed: 2,
+        failed: 0,
+        skipped: 0,
+        currentAssetId: null,
+        currentPath: null,
+        executionBackend: "cpu",
+        modelName: "SigLIP2",
+        modelVersion: "test",
+        error: null,
+      });
+    });
+
+    await waitFor(() =>
+      expect(api.prepareSemanticModel).toHaveBeenCalledWith("siglip2-base", "cpu"),
+    );
+    await waitFor(() => expect(screen.getByRole("button", { name: "分析" })).toBeEnabled());
+    await user.click(screen.getByRole("button", { name: "分析" }));
+    await waitFor(() => expect(api.startSemanticAnalysis).toHaveBeenCalledTimes(2));
+    expect(api.prepareSemanticModel.mock.calls.map(([, backend]) => backend)).toEqual([
+      "direct_ml",
+      "cpu",
+    ]);
+  });
+
+  it("uses shared responsive control geometry for model retry and analysis", async () => {
+    api.fetchLibraries.mockResolvedValue([library]);
+    api.fetchSemanticStatus.mockResolvedValue(
+      semanticRuntimeStatus("error", null, "weights unavailable"),
+    );
+    render(<App />);
+
+    const actions = await screen.findByRole("group", { name: "图库操作" });
+    const retryButton = await within(actions).findByRole("button", { name: "重试模型准备" });
+    const analyzeButton = within(actions).getByRole("button", { name: "分析" });
+    const status = within(actions).getByRole("status");
+    expect(retryButton).toHaveClass("topbar-model-control", "topbar-model-retry-action");
+    expect(analyzeButton).toHaveClass("topbar-model-control", "topbar-analysis-action");
+    expect(retryButton.parentElement).toBe(analyzeButton.parentElement);
+    expect(status).toHaveClass("topbar-model-status");
+    expect(status).toHaveAttribute("title", expect.stringContaining("weights unavailable"));
+  });
+
+  it("loads SigLIP 2 when analysis is requested before the model is ready", async () => {
     const user = userEvent.setup();
     api.fetchLibraries.mockResolvedValue([library]);
     api.fetchAssets.mockResolvedValue({ items: [asset], total: 1, page: 1, pageSize: 200 });
     render(<App />);
 
-    await user.click(await screen.findByRole("button", { name: "装载模型" }));
+    await user.click(await screen.findByRole("button", { name: "分析" }));
 
     await waitFor(() =>
       expect(api.prepareSemanticModel).toHaveBeenCalledWith("siglip2-base", "cpu"),

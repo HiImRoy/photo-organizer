@@ -43,6 +43,20 @@ pub const SIGLIP2_MODEL_SHA256: &str =
     "bfe28fe2ccdb685874586648035ea349593e487ce33bd0939b28813681a8f167";
 pub const SIGLIP2_TOKENIZER_SHA256: &str =
     "cb9140fae3ac5122c972d37adf83e1248471a38147ad76f8215c8872c6fd8322";
+pub const SIGLIP2_SO400M14_384_MODEL_NAME: &str = "SigLIP2-SO400M-Patch14-384";
+pub const SIGLIP2_SO400M14_384_MODEL_VERSION: &str = "onnx-int8-onnx-community-52dd3f8";
+pub const SIGLIP2_SO400M14_384_ANALYSIS_VERSION: &str =
+    "photo-organizer-semantic-topic-candidates-siglip2-so400m14-384-v1";
+pub const SIGLIP2_SO400M14_384_RESOURCE_DIR: &str = "siglip2-so400m-patch14-384";
+pub const SIGLIP2_SO400M14_384_VISION_FILE: &str = "vision_model_int8.onnx";
+pub const SIGLIP2_SO400M14_384_TEXT_FILE: &str = "text_model_int8.onnx";
+pub const SIGLIP2_SO400M14_384_TOKENIZER_FILE: &str = "tokenizer.json";
+pub const SIGLIP2_SO400M14_384_VISION_SHA256: &str =
+    "75aafa7f17d15cf3c7ab9335ac87832f7e01b7391fdfa33263d4b1e80eff51ce";
+pub const SIGLIP2_SO400M14_384_TEXT_SHA256: &str =
+    "3423f71ad99e102bf3c389fb0ebafd181faec6dedef9e28ddf17ecc6852e0397";
+pub const SIGLIP2_SO400M14_384_SOURCE_URL: &str =
+    "https://huggingface.co/onnx-community/siglip2-so400m-patch14-384-ONNX";
 pub const MOBILECLIP_MODEL_NAME: &str = "MobileCLIP-S0";
 pub const MOBILECLIP_MODEL_VERSION: &str = "onnx-int8-2026-08-11";
 pub const MOBILECLIP_ANALYSIS_VERSION: &str =
@@ -83,6 +97,7 @@ const MOBILECLIP_PAD_TOKEN_ID: u32 = 0;
 pub enum TopicModelKind {
     Tinyclip,
     Siglip2Base,
+    Siglip2So400m14_384,
     MobileclipS0,
 }
 
@@ -92,6 +107,10 @@ impl TopicModelKind {
     pub fn parse(value: &str) -> Option<Self> {
         match value.trim().to_ascii_lowercase().as_str() {
             "siglip2" | "siglip2-base" | "siglip2-base-patch16-224" => Some(Self::Siglip2Base),
+            "siglip2-so400m-14-384"
+            | "siglip2-so400m-patch14-384"
+            | "siglip2-so400m-patch14-384-onnx"
+            | "siglip2-so400m14-384" => Some(Self::Siglip2So400m14_384),
             _ => None,
         }
     }
@@ -100,6 +119,7 @@ impl TopicModelKind {
         match self {
             Self::Tinyclip => "tinyclip",
             Self::Siglip2Base => "siglip2-base",
+            Self::Siglip2So400m14_384 => "siglip2-so400m-patch14-384",
             Self::MobileclipS0 => "mobileclip-s0",
         }
     }
@@ -108,6 +128,7 @@ impl TopicModelKind {
         match self {
             Self::Tinyclip => "TinyCLIP INT8",
             Self::Siglip2Base => "SigLIP 2 Base INT8",
+            Self::Siglip2So400m14_384 => "SigLIP 2 SO400M/14-384 INT8",
             Self::MobileclipS0 => "MobileCLIP-S0 INT8",
         }
     }
@@ -116,6 +137,7 @@ impl TopicModelKind {
         match self {
             Self::Tinyclip => TINYCLIP_MODEL_NAME,
             Self::Siglip2Base => SIGLIP2_MODEL_NAME,
+            Self::Siglip2So400m14_384 => SIGLIP2_SO400M14_384_MODEL_NAME,
             Self::MobileclipS0 => MOBILECLIP_MODEL_NAME,
         }
     }
@@ -124,9 +146,228 @@ impl TopicModelKind {
         match self {
             Self::Tinyclip => ANALYSIS_VERSION,
             Self::Siglip2Base => SIGLIP2_ANALYSIS_VERSION,
+            Self::Siglip2So400m14_384 => SIGLIP2_SO400M14_384_ANALYSIS_VERSION,
             Self::MobileclipS0 => MOBILECLIP_ANALYSIS_VERSION,
         }
     }
+
+    pub const fn version(self) -> &'static str {
+        match self {
+            Self::Tinyclip => TINYCLIP_MODEL_VERSION,
+            Self::Siglip2Base => SIGLIP2_MODEL_VERSION,
+            Self::Siglip2So400m14_384 => SIGLIP2_SO400M14_384_MODEL_VERSION,
+            Self::MobileclipS0 => MOBILECLIP_MODEL_VERSION,
+        }
+    }
+
+    pub fn from_model_metadata(name: &str, version: &str, analysis_version: &str) -> Option<Self> {
+        [Self::Siglip2Base, Self::Siglip2So400m14_384]
+            .into_iter()
+            .find(|profile| {
+                profile.model_name() == name
+                    && profile.version() == version
+                    && profile.analysis_version() == analysis_version
+            })
+    }
+
+    pub const fn manifest(self) -> Option<&'static TopicModelManifest> {
+        match self {
+            Self::Siglip2Base => Some(&SIGLIP2_BASE_MANIFEST),
+            Self::Siglip2So400m14_384 => Some(&SIGLIP2_SO400M14_384_MANIFEST),
+            Self::Tinyclip | Self::MobileclipS0 => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TopicModelGraph {
+    Joint,
+    Split,
+}
+
+/// Immutable resource and ONNX contract for one selectable topic profile.
+///
+/// A manifest is configuration only: it never downloads a model and it never
+/// treats a missing file as installed. The So400M profile intentionally keeps
+/// primary labels disabled until a separately versioned photography
+/// calibration record exists.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TopicModelManifest {
+    pub profile_id: &'static str,
+    pub display_name: &'static str,
+    pub model_name: &'static str,
+    pub version: &'static str,
+    pub analysis_version: &'static str,
+    pub resource_dir_name: &'static str,
+    pub graph: TopicModelGraph,
+    pub vision_file: &'static str,
+    pub text_file: Option<&'static str>,
+    pub tokenizer_file: &'static str,
+    pub vision_sha256: Option<&'static str>,
+    pub text_sha256: Option<&'static str>,
+    pub tokenizer_sha256: Option<&'static str>,
+    pub source_url: &'static str,
+    pub license: &'static str,
+    pub image_size: usize,
+    pub token_length: usize,
+    pub pad_token_id: u32,
+    pub pad_token: &'static str,
+    pub embedding_dimensions: usize,
+    pub primary_labels_enabled: bool,
+}
+
+const SIGLIP2_BASE_MANIFEST: TopicModelManifest = TopicModelManifest {
+    profile_id: "siglip2-base",
+    display_name: "SigLIP 2 Base INT8",
+    model_name: SIGLIP2_MODEL_NAME,
+    version: SIGLIP2_MODEL_VERSION,
+    analysis_version: SIGLIP2_ANALYSIS_VERSION,
+    resource_dir_name: "siglip2-base-patch16-224",
+    graph: TopicModelGraph::Joint,
+    vision_file: SIGLIP2_MODEL_FILE,
+    text_file: None,
+    tokenizer_file: SIGLIP2_TOKENIZER_FILE,
+    vision_sha256: Some(SIGLIP2_MODEL_SHA256),
+    text_sha256: None,
+    tokenizer_sha256: Some(SIGLIP2_TOKENIZER_SHA256),
+    source_url: "https://huggingface.co/onnx-community/siglip2-base-patch16-224-ONNX",
+    license: "Apache-2.0",
+    image_size: 224,
+    token_length: 64,
+    pad_token_id: 0,
+    pad_token: "<pad>",
+    embedding_dimensions: 768,
+    primary_labels_enabled: true,
+};
+
+const SIGLIP2_SO400M14_384_MANIFEST: TopicModelManifest = TopicModelManifest {
+    profile_id: "siglip2-so400m-patch14-384",
+    display_name: "SigLIP 2 SO400M/14-384 INT8",
+    model_name: SIGLIP2_SO400M14_384_MODEL_NAME,
+    version: SIGLIP2_SO400M14_384_MODEL_VERSION,
+    analysis_version: SIGLIP2_SO400M14_384_ANALYSIS_VERSION,
+    resource_dir_name: SIGLIP2_SO400M14_384_RESOURCE_DIR,
+    graph: TopicModelGraph::Split,
+    vision_file: SIGLIP2_SO400M14_384_VISION_FILE,
+    text_file: Some(SIGLIP2_SO400M14_384_TEXT_FILE),
+    tokenizer_file: SIGLIP2_SO400M14_384_TOKENIZER_FILE,
+    vision_sha256: Some(SIGLIP2_SO400M14_384_VISION_SHA256),
+    text_sha256: Some(SIGLIP2_SO400M14_384_TEXT_SHA256),
+    // The upstream model card does not publish a tokenizer SHA-256 in the
+    // repository metadata. Keep this unset instead of inventing one; a future
+    // packaged resource must pin it before it is marked fully verified.
+    tokenizer_sha256: None,
+    source_url: SIGLIP2_SO400M14_384_SOURCE_URL,
+    license: "Apache-2.0",
+    image_size: 384,
+    token_length: 64,
+    pad_token_id: 0,
+    pad_token: "<pad>",
+    embedding_dimensions: 1152,
+    primary_labels_enabled: false,
+};
+
+pub const TOPIC_MODEL_MANIFESTS: &[TopicModelManifest] =
+    &[SIGLIP2_BASE_MANIFEST, SIGLIP2_SO400M14_384_MANIFEST];
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct SemanticModelProfile {
+    pub id: String,
+    pub display_name: String,
+    pub model_name: String,
+    pub version: String,
+    pub analysis_version: String,
+    pub source_url: String,
+    pub license: String,
+    pub graph: String,
+    pub image_size: u32,
+    pub embedding_dimensions: u32,
+    pub installed: bool,
+    pub primary_labels_enabled: bool,
+    pub diagnostic: Option<String>,
+}
+
+pub fn topic_model_resource_dir(base_dir: &Path, topic_model: TopicModelKind) -> PathBuf {
+    let Some(manifest) = topic_model.manifest() else {
+        return base_dir.to_path_buf();
+    };
+    if manifest.resource_dir_name == SIGLIP2_BASE_MANIFEST.resource_dir_name {
+        return base_dir.to_path_buf();
+    }
+    base_dir
+        .parent()
+        .map(|parent| parent.join(manifest.resource_dir_name))
+        .unwrap_or_else(|| PathBuf::from(manifest.resource_dir_name))
+}
+
+pub fn topic_model_registration_paths(
+    base_dir: &Path,
+    topic_model: TopicModelKind,
+) -> Option<(PathBuf, PathBuf)> {
+    let manifest = topic_model.manifest()?;
+    let resource_dir = topic_model_resource_dir(base_dir, topic_model);
+    Some((
+        resource_dir.join(manifest.vision_file),
+        resource_dir.join(manifest.tokenizer_file),
+    ))
+}
+
+pub fn list_topic_model_profiles(base_dir: &Path) -> Vec<SemanticModelProfile> {
+    TOPIC_MODEL_MANIFESTS
+        .iter()
+        .map(|manifest| {
+            let profile = if manifest.profile_id == SIGLIP2_BASE_MANIFEST.profile_id {
+                TopicModelKind::Siglip2Base
+            } else {
+                TopicModelKind::Siglip2So400m14_384
+            };
+            let resource_dir = topic_model_resource_dir(base_dir, profile);
+            let mut missing = Vec::new();
+            let vision_path = resource_dir.join(manifest.vision_file);
+            if !vision_path.is_file() {
+                missing.push(manifest.vision_file);
+            }
+            if let Some(text_file) = manifest.text_file
+                && !resource_dir.join(text_file).is_file()
+            {
+                missing.push(text_file);
+            }
+            if !resource_dir.join(manifest.tokenizer_file).is_file() {
+                missing.push(manifest.tokenizer_file);
+            }
+            let diagnostic = if missing.is_empty() {
+                (!manifest.primary_labels_enabled).then(|| {
+                    "profile 已安装，但尚未登记摄影题材校准；仅提供候选证据，不生成主题标签。"
+                        .into()
+                })
+            } else {
+                Some(format!(
+                    "profile 资源未安装；缺少 {}。应用不会下载或伪造权重。",
+                    missing.join(", ")
+                ))
+            };
+            SemanticModelProfile {
+                id: manifest.profile_id.into(),
+                display_name: manifest.display_name.into(),
+                model_name: manifest.model_name.into(),
+                version: manifest.version.into(),
+                analysis_version: manifest.analysis_version.into(),
+                source_url: manifest.source_url.into(),
+                license: manifest.license.into(),
+                graph: match manifest.graph {
+                    TopicModelGraph::Joint => "joint",
+                    TopicModelGraph::Split => "split",
+                }
+                .into(),
+                image_size: manifest.image_size as u32,
+                embedding_dimensions: manifest.embedding_dimensions as u32,
+                installed: missing.is_empty(),
+                primary_labels_enabled: manifest.primary_labels_enabled && missing.is_empty(),
+                diagnostic,
+            }
+        })
+        .collect()
 }
 
 static ORT_RUNTIME: OnceLock<Result<PathBuf, String>> = OnceLock::new();
@@ -479,7 +720,7 @@ pub fn known_display_name_for_label_id(label_id: &str) -> Option<&'static str> {
         .iter()
         .find(|label| label.id == label_id)
         .map(|label| label.display_name)
-        .or_else(|| match label_id {
+        .or(match label_id {
             "single_person" => Some("单人"),
             "multiple_people" => Some("多人"),
             "animal" => Some("动物"),
@@ -545,25 +786,38 @@ impl SemanticClassifier for UnavailableClassifier {
 }
 
 pub struct Places365Classifier {
-    session: Mutex<Session>,
+    runtime: Mutex<Places365Runtime>,
     input_name: String,
     output_name: String,
     categories: Vec<String>,
     leaf_cluster_indexes: Vec<usize>,
     outdoor_by_leaf: Vec<bool>,
     model_size_bytes: u64,
+    model_dir: PathBuf,
+    topic_model_dir: PathBuf,
+    runtime_path: PathBuf,
+    topic_model: TopicModelKind,
+}
+
+struct Places365Runtime {
+    session: Option<Session>,
     topic_classifier: Option<Box<dyn SemanticClassifier>>,
+    topic_diagnostic: Option<String>,
     backend: ExecutionBackend,
+    error: Option<String>,
 }
 
 impl std::fmt::Debug for Places365Classifier {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let runtime = self.runtime.lock();
         formatter
             .debug_struct("Places365Classifier")
             .field("model", &MODEL_NAME)
             .field("version", &MODEL_VERSION)
             .field("categories", &self.categories.len())
-            .field("has_topic_classifier", &self.topic_classifier.is_some())
+            .field("has_topic_classifier", &runtime.topic_classifier.is_some())
+            .field("backend", &runtime.backend)
+            .field("error", &runtime.error)
             .finish_non_exhaustive()
     }
 }
@@ -641,23 +895,30 @@ impl Places365Classifier {
             })
             .collect::<Result<Vec<_>, _>>()?;
 
-        let topic_classifier =
+        let (topic_classifier, topic_diagnostic) =
             match load_topic_classifier(topic_model, topic_model_dir, runtime_path, backend) {
-                Ok(classifier) => Some(classifier),
+                Ok(classifier) => (Some(classifier), None),
                 Err(error) if backend.is_gpu() => {
                     return Err(error);
                 }
                 Err(error) => {
-                    log::warn!(
+                    let diagnostic = format!(
                         "{} topic adapter unavailable: {error}",
                         topic_model.display_name()
                     );
-                    None
+                    log::warn!("{diagnostic}");
+                    (None, Some(diagnostic))
                 }
             };
 
         Ok(Self {
-            session: Mutex::new(session),
+            runtime: Mutex::new(Places365Runtime {
+                session: Some(session),
+                topic_classifier,
+                topic_diagnostic,
+                backend,
+                error: None,
+            }),
             input_name,
             output_name,
             categories,
@@ -666,82 +927,52 @@ impl Places365Classifier {
             model_size_bytes: std::fs::metadata(model_path)
                 .map_err(|error| SemanticError::Inference(error.to_string()))?
                 .len(),
-            topic_classifier,
-            backend,
+            model_dir: model_dir.to_path_buf(),
+            topic_model_dir: topic_model_dir.to_path_buf(),
+            runtime_path: runtime_path.to_path_buf(),
+            topic_model,
         })
     }
 
     pub fn model_contract(&self) -> (String, String) {
         (self.input_name.clone(), self.output_name.clone())
     }
-}
 
-impl SemanticClassifier for Places365Classifier {
-    fn metadata(&self) -> ModelMetadata {
-        ModelMetadata {
-            name: MODEL_NAME.into(),
-            version: MODEL_VERSION.into(),
-            analysis_version: ANALYSIS_VERSION.into(),
-            license: Some("MIT".into()),
-            installed: true,
-            model_size_bytes: Some(self.model_size_bytes),
-            model_sha256: Some(MODEL_SHA256.into()),
-            supported_backends: model_backends(),
-        }
-    }
-
-    fn status(&self) -> SemanticRuntimeStatus {
-        let message = if self.topic_classifier.is_some() {
-            format!(
-                "Places365 ResNet-18 已就绪；环境证据与摄影题材候选已启用 {}。",
-                self.topic_classifier
-                    .as_ref()
-                    .map(|classifier| classifier.metadata().name)
-                    .unwrap_or_default()
-            )
-        } else {
-            "Places365 ResNet-18 已就绪；环境证据可用，但题材候选模型未就绪。".into()
-        };
-        SemanticRuntimeStatus {
-            status: "ready".into(),
-            message,
-            model: self.metadata(),
-            topic_model: self
-                .topic_classifier
-                .as_ref()
-                .map(|classifier| classifier.metadata()),
-            selected_backend: Some(self.backend),
-        }
-    }
-
-    fn result_metadata(&self) -> ModelMetadata {
-        self.topic_classifier
-            .as_ref()
-            .map(|classifier| classifier.metadata())
-            .unwrap_or_else(|| self.metadata())
-    }
-
-    fn encode_text(&self, queries: &[String]) -> Result<Vec<Vec<f32>>, SemanticError> {
-        self.topic_classifier
-            .as_ref()
-            .ok_or(SemanticError::ModelUnavailable)?
-            .encode_text(queries)
-    }
-
-    fn classify_batch(
+    fn rebuild_cpu_runtime(
         &self,
-        images: &[PathBuf],
-        backend: ExecutionBackend,
-    ) -> Result<Vec<SemanticAnalysisOutput>, SemanticError> {
-        if !backend_matches(self.backend, backend) {
-            return Err(SemanticError::BackendUnavailable(backend));
+        require_topic_classifier: bool,
+    ) -> Result<Places365Runtime, SemanticError> {
+        let rebuilt = Self::load_with_topic_model_with_backend(
+            &self.model_dir,
+            &self.topic_model_dir,
+            &self.runtime_path,
+            self.topic_model,
+            ExecutionBackend::Cpu,
+        )?;
+        let runtime = rebuilt.runtime.into_inner();
+        if require_topic_classifier && runtime.topic_classifier.is_none() {
+            return Err(SemanticError::Inference(
+                runtime.topic_diagnostic.unwrap_or_else(|| {
+                    "topic model could not be rebuilt on CPU after DirectML failure".into()
+                }),
+            ));
         }
-        if images.is_empty() {
-            return Ok(Vec::new());
-        }
+        Ok(runtime)
+    }
 
+    fn classify_with_runtime(
+        &self,
+        runtime: &mut Places365Runtime,
+        images: &[PathBuf],
+    ) -> Result<Vec<SemanticAnalysisOutput>, SemanticError> {
+        if let Some(error) = runtime.error.as_ref() {
+            return Err(SemanticError::Inference(error.clone()));
+        }
+        let session = runtime
+            .session
+            .as_mut()
+            .ok_or_else(|| SemanticError::Inference("Places365 runtime is unavailable".into()))?;
         let image_count = images.len();
-        let mut session = self.session.lock();
         let leaf_count = self.categories.len();
         let mut probability_rows = Vec::with_capacity(image_count);
         for image in images {
@@ -767,25 +998,14 @@ impl SemanticClassifier for Places365Classifier {
             }
             probability_rows.push(softmax(&data));
         }
-        drop(session);
 
-        let embedding_outputs = self.topic_classifier.as_ref().and_then(|classifier| {
-            match classifier.classify_batch(images, self.backend) {
-                Ok(outputs) if outputs.len() == image_count => Some(outputs),
-                Ok(outputs) => {
-                    log::warn!(
-                        "topic model returned {} embeddings for {} images",
-                        outputs.len(),
-                        image_count
-                    );
-                    None
-                }
-                Err(error) => {
-                    log::warn!("topic model embedding batch failed: {error}");
-                    None
-                }
-            }
-        });
+        let embedding_outputs = match runtime.topic_classifier.as_ref() {
+            Some(classifier) => Some(topic_outputs_for_batch(
+                classifier.classify_batch(images, runtime.backend),
+                image_count,
+            )?),
+            None => None,
+        };
         let mut results = Vec::with_capacity(image_count);
         for (image_index, probabilities) in probability_rows.into_iter().enumerate() {
             let topic_output = embedding_outputs
@@ -810,9 +1030,7 @@ impl SemanticClassifier for Places365Classifier {
                     .then(left.label_id.cmp(&right.label_id))
             });
             raw_similarities.truncate(MAX_LABELS);
-            let embedding = embedding_outputs
-                .as_ref()
-                .and_then(|outputs| outputs.get(image_index))
+            let embedding = topic_output
                 .map(|output| output.embedding.clone())
                 .unwrap_or_default();
             results.push(SemanticAnalysisOutput {
@@ -822,6 +1040,150 @@ impl SemanticClassifier for Places365Classifier {
             });
         }
         Ok(results)
+    }
+}
+
+fn cpu_fallback_backend(
+    backend: ExecutionBackend,
+    error: &SemanticError,
+) -> Option<ExecutionBackend> {
+    (backend.is_gpu() && matches!(error, SemanticError::Inference(_)))
+        .then_some(ExecutionBackend::Cpu)
+}
+
+fn topic_outputs_for_batch(
+    outputs: Result<Vec<SemanticAnalysisOutput>, SemanticError>,
+    image_count: usize,
+) -> Result<Vec<SemanticAnalysisOutput>, SemanticError> {
+    let outputs = outputs?;
+    if outputs.len() != image_count {
+        return Err(SemanticError::Inference(format!(
+            "topic model returned {} embeddings for {} images",
+            outputs.len(),
+            image_count
+        )));
+    }
+    Ok(outputs)
+}
+
+impl SemanticClassifier for Places365Classifier {
+    fn metadata(&self) -> ModelMetadata {
+        ModelMetadata {
+            name: MODEL_NAME.into(),
+            version: MODEL_VERSION.into(),
+            analysis_version: ANALYSIS_VERSION.into(),
+            license: Some("MIT".into()),
+            installed: true,
+            model_size_bytes: Some(self.model_size_bytes),
+            model_sha256: Some(MODEL_SHA256.into()),
+            supported_backends: model_backends(),
+        }
+    }
+
+    fn status(&self) -> SemanticRuntimeStatus {
+        let runtime = self.runtime.lock();
+        let message = if let Some(error) = runtime.error.as_ref() {
+            format!("Places365 semantic runtime unavailable after CPU fallback: {error}")
+        } else if runtime.topic_classifier.is_some() {
+            format!(
+                "Places365 ResNet-18 已就绪；环境证据与摄影题材候选已启用 {}。",
+                runtime
+                    .topic_classifier
+                    .as_ref()
+                    .map(|classifier| classifier.metadata().name)
+                    .unwrap_or_default()
+            )
+        } else {
+            format!(
+                "Places365 ResNet-18 已就绪；环境证据可用，但题材候选模型未就绪。{}",
+                runtime
+                    .topic_diagnostic
+                    .as_deref()
+                    .map(|diagnostic| format!(" 诊断：{diagnostic}"))
+                    .unwrap_or_default()
+            )
+        };
+        SemanticRuntimeStatus {
+            status: if runtime.error.is_some() {
+                "runtime_unavailable"
+            } else {
+                "ready"
+            }
+            .into(),
+            message,
+            model: self.metadata(),
+            topic_model: runtime
+                .topic_classifier
+                .as_ref()
+                .map(|classifier| classifier.metadata()),
+            selected_backend: Some(runtime.backend),
+        }
+    }
+
+    fn result_metadata(&self) -> ModelMetadata {
+        self.runtime
+            .lock()
+            .topic_classifier
+            .as_ref()
+            .map(|classifier| classifier.metadata())
+            .unwrap_or_else(|| self.metadata())
+    }
+
+    fn encode_text(&self, queries: &[String]) -> Result<Vec<Vec<f32>>, SemanticError> {
+        self.runtime
+            .lock()
+            .topic_classifier
+            .as_ref()
+            .ok_or(SemanticError::ModelUnavailable)?
+            .encode_text(queries)
+    }
+
+    fn classify_batch(
+        &self,
+        images: &[PathBuf],
+        backend: ExecutionBackend,
+    ) -> Result<Vec<SemanticAnalysisOutput>, SemanticError> {
+        let mut runtime = self.runtime.lock();
+        if !backend_matches(runtime.backend, backend) {
+            return Err(SemanticError::BackendUnavailable(backend));
+        }
+        if images.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let first_result = self.classify_with_runtime(&mut runtime, images);
+        if let Err(error) = first_result {
+            let Some(cpu_backend) = cpu_fallback_backend(runtime.backend, &error) else {
+                return Err(error);
+            };
+
+            let require_topic_classifier = runtime.topic_classifier.is_some();
+            let original_error = error.to_string();
+            // Disable DirectML before rebuilding so later calls cannot retry a
+            // failed GPU runtime if the CPU rebuild itself is unsuccessful.
+            runtime.backend = cpu_backend;
+            runtime.session = None;
+            runtime.topic_classifier = None;
+            runtime.error = Some("CPU fallback rebuild is in progress".into());
+            match self.rebuild_cpu_runtime(require_topic_classifier) {
+                Ok(cpu_runtime) => *runtime = cpu_runtime,
+                Err(rebuild_error) => {
+                    let message = format!(
+                        "DirectML inference failed: {original_error}; CPU runtime rebuild failed: {rebuild_error}"
+                    );
+                    runtime.error = Some(message.clone());
+                    return Err(SemanticError::Inference(message));
+                }
+            }
+            return self
+                .classify_with_runtime(&mut runtime, images)
+                .map_err(|retry_error| {
+                    SemanticError::Inference(format!(
+                        "DirectML inference failed: {original_error}; CPU retry failed: {retry_error}"
+                    ))
+                });
+        }
+        first_result
     }
 }
 
@@ -1076,6 +1438,7 @@ impl SemanticClassifier for TinyClipClassifier {
 #[derive(Debug, Clone, Copy)]
 enum OpenClipVariant {
     Siglip2Base,
+    Siglip2So400m14_384,
     MobileclipS0,
 }
 
@@ -1083,6 +1446,7 @@ impl OpenClipVariant {
     const fn topic_model(self) -> TopicModelKind {
         match self {
             Self::Siglip2Base => TopicModelKind::Siglip2Base,
+            Self::Siglip2So400m14_384 => TopicModelKind::Siglip2So400m14_384,
             Self::MobileclipS0 => TopicModelKind::MobileclipS0,
         }
     }
@@ -1090,27 +1454,28 @@ impl OpenClipVariant {
     const fn image_size(self) -> usize {
         match self {
             Self::Siglip2Base => SIGLIP_IMAGE_SIZE,
+            Self::Siglip2So400m14_384 => 384,
             Self::MobileclipS0 => MOBILECLIP_IMAGE_SIZE,
         }
     }
 
     const fn token_length(self) -> usize {
         match self {
-            Self::Siglip2Base => SIGLIP_TOKEN_LENGTH,
+            Self::Siglip2Base | Self::Siglip2So400m14_384 => SIGLIP_TOKEN_LENGTH,
             Self::MobileclipS0 => MOBILECLIP_TOKEN_LENGTH,
         }
     }
 
     const fn pad_token_id(self) -> u32 {
         match self {
-            Self::Siglip2Base => SIGLIP_PAD_TOKEN_ID,
+            Self::Siglip2Base | Self::Siglip2So400m14_384 => SIGLIP_PAD_TOKEN_ID,
             Self::MobileclipS0 => MOBILECLIP_PAD_TOKEN_ID,
         }
     }
 
     const fn pad_token(self) -> &'static str {
         match self {
-            Self::Siglip2Base => "<pad>",
+            Self::Siglip2Base | Self::Siglip2So400m14_384 => "<pad>",
             Self::MobileclipS0 => "!",
         }
     }
@@ -1118,7 +1483,19 @@ impl OpenClipVariant {
     const fn embedding_dimensions(self) -> usize {
         match self {
             Self::Siglip2Base => 768,
+            Self::Siglip2So400m14_384 => 1152,
             Self::MobileclipS0 => 512,
+        }
+    }
+
+    const fn manifest(self) -> Option<&'static TopicModelManifest> {
+        self.topic_model().manifest()
+    }
+
+    const fn primary_labels_enabled(self) -> bool {
+        match self.manifest() {
+            Some(manifest) => manifest.primary_labels_enabled,
+            None => true,
         }
     }
 }
@@ -1176,6 +1553,7 @@ impl OpenVocabularyClipClassifier {
     ) -> Result<Self, SemanticError> {
         let variant = match topic_model {
             TopicModelKind::Siglip2Base => OpenClipVariant::Siglip2Base,
+            TopicModelKind::Siglip2So400m14_384 => OpenClipVariant::Siglip2So400m14_384,
             TopicModelKind::MobileclipS0 => OpenClipVariant::MobileclipS0,
             TopicModelKind::Tinyclip => {
                 return Err(SemanticError::Inference(
@@ -1188,6 +1566,7 @@ impl OpenVocabularyClipClassifier {
 
         let tokenizer_path = model_dir.join(match variant {
             OpenClipVariant::Siglip2Base => SIGLIP2_TOKENIZER_FILE,
+            OpenClipVariant::Siglip2So400m14_384 => SIGLIP2_SO400M14_384_TOKENIZER_FILE,
             OpenClipVariant::MobileclipS0 => MOBILECLIP_TOKENIZER_FILE,
         });
         let model_size_bytes = match variant {
@@ -1197,6 +1576,17 @@ impl OpenVocabularyClipClassifier {
                 std::fs::metadata(&model_path)
                     .map_err(|error| SemanticError::Integrity(error.to_string()))?
                     .len()
+            }
+            OpenClipVariant::Siglip2So400m14_384 => {
+                let vision_path = model_dir.join(SIGLIP2_SO400M14_384_VISION_FILE);
+                let text_path = model_dir.join(SIGLIP2_SO400M14_384_TEXT_FILE);
+                verify_sha256(&vision_path, SIGLIP2_SO400M14_384_VISION_SHA256)?;
+                verify_sha256(&text_path, SIGLIP2_SO400M14_384_TEXT_SHA256)?;
+                std::fs::metadata(&vision_path)
+                    .and_then(|vision| {
+                        std::fs::metadata(&text_path).map(|text| vision.len() + text.len())
+                    })
+                    .map_err(|error| SemanticError::Integrity(error.to_string()))?
             }
             OpenClipVariant::MobileclipS0 => {
                 let vision_path = model_dir.join(MOBILECLIP_VISION_FILE);
@@ -1210,11 +1600,15 @@ impl OpenVocabularyClipClassifier {
                     .map_err(|error| SemanticError::Integrity(error.to_string()))?
             }
         };
-        verify_sha256(
+        verify_optional_sha256(
             &tokenizer_path,
             match variant {
-                OpenClipVariant::Siglip2Base => SIGLIP2_TOKENIZER_SHA256,
-                OpenClipVariant::MobileclipS0 => MOBILECLIP_TOKENIZER_SHA256,
+                OpenClipVariant::Siglip2Base => Some(SIGLIP2_TOKENIZER_SHA256),
+                // The upstream So400M repository does not publish a tokenizer
+                // digest. Its graph files remain pinned and verified; this
+                // profile still requires the tokenizer file to exist and parse.
+                OpenClipVariant::Siglip2So400m14_384 => None,
+                OpenClipVariant::MobileclipS0 => Some(MOBILECLIP_TOKENIZER_SHA256),
             },
         )?;
 
@@ -1243,6 +1637,19 @@ impl OpenVocabularyClipClassifier {
                 let session = build_optimized_session(&model_path, "SigLIP 2", backend)?;
                 validate_siglip2_model_contract(&session)?;
                 OpenClipGraph::Joint(Mutex::new(session))
+            }
+            OpenClipVariant::Siglip2So400m14_384 => {
+                let vision_path = model_dir.join(SIGLIP2_SO400M14_384_VISION_FILE);
+                let text_path = model_dir.join(SIGLIP2_SO400M14_384_TEXT_FILE);
+                let vision =
+                    build_optimized_session(&vision_path, "SigLIP 2 SO400M vision", backend)?;
+                let text = build_optimized_session(&text_path, "SigLIP 2 SO400M text", backend)?;
+                validate_siglip2_split_vision_contract(&vision)?;
+                validate_siglip2_split_text_contract(&text)?;
+                OpenClipGraph::Split {
+                    vision: Mutex::new(vision),
+                    text: Mutex::new(text),
+                }
             }
             OpenClipVariant::MobileclipS0 => {
                 let vision_path = model_dir.join(MOBILECLIP_VISION_FILE);
@@ -1414,15 +1821,14 @@ impl SemanticClassifier for OpenVocabularyClipClassifier {
         let topic_model = self.variant.topic_model();
         let (model_sha256, license) = match self.variant {
             OpenClipVariant::Siglip2Base => (SIGLIP2_MODEL_SHA256, "Apache-2.0"),
+            OpenClipVariant::Siglip2So400m14_384 => {
+                (SIGLIP2_SO400M14_384_VISION_SHA256, "Apache-2.0")
+            }
             OpenClipVariant::MobileclipS0 => (MOBILECLIP_VISION_SHA256, "Apple AMLR 2.0"),
         };
         ModelMetadata {
             name: topic_model.model_name().into(),
-            version: match self.variant {
-                OpenClipVariant::Siglip2Base => SIGLIP2_MODEL_VERSION,
-                OpenClipVariant::MobileclipS0 => MOBILECLIP_MODEL_VERSION,
-            }
-            .into(),
+            version: topic_model.version().into(),
             analysis_version: topic_model.analysis_version().into(),
             license: Some(license.into()),
             installed: true,
@@ -1434,12 +1840,20 @@ impl SemanticClassifier for OpenVocabularyClipClassifier {
 
     fn status(&self) -> SemanticRuntimeStatus {
         let metadata = self.metadata();
-        SemanticRuntimeStatus {
-            status: "ready".into(),
-            message: format!(
+        let message = if self.variant.primary_labels_enabled() {
+            format!(
                 "{} 已通过完整性校验，可用于摄影题材候选和本地文本/相似搜索。",
                 self.variant.topic_model().display_name()
-            ),
+            )
+        } else {
+            format!(
+                "{} 已通过完整性校验；当前 profile 仅提供向量与候选证据，未启用主主题标签（需摄影校准）。",
+                self.variant.topic_model().display_name()
+            )
+        };
+        SemanticRuntimeStatus {
+            status: "ready".into(),
+            message,
             model: metadata.clone(),
             topic_model: Some(metadata),
             selected_backend: Some(self.backend),
@@ -1453,7 +1867,9 @@ impl SemanticClassifier for OpenVocabularyClipClassifier {
         let prompts = queries
             .iter()
             .map(|query| match self.variant {
-                OpenClipVariant::Siglip2Base => format!("This is a photo of {query}."),
+                OpenClipVariant::Siglip2Base | OpenClipVariant::Siglip2So400m14_384 => {
+                    format!("This is a photo of {query}.")
+                }
                 OpenClipVariant::MobileclipS0 => format!("a photo of {query}"),
             })
             .collect::<Vec<_>>();
@@ -1507,13 +1923,19 @@ impl SemanticClassifier for OpenVocabularyClipClassifier {
                             .map(|score| score * 100.0)
                             .collect::<Vec<_>>(),
                     ),
-                    OpenClipVariant::Siglip2Base => cosine_scores,
+                    OpenClipVariant::Siglip2Base | OpenClipVariant::Siglip2So400m14_384 => {
+                        cosine_scores
+                    }
                 }
             };
             let scores =
                 topics::aggregate_prompt_scores(&prompt_scores, &self.prompt_label_indexes);
             results.push(SemanticAnalysisOutput {
-                predictions: select_topic_predictions(&scores),
+                predictions: if self.variant.primary_labels_enabled() {
+                    select_topic_predictions(&scores)
+                } else {
+                    Vec::new()
+                },
                 embedding,
                 raw_similarities: rank_topic_similarities(&scores),
             });
@@ -1534,7 +1956,9 @@ fn load_topic_classifier(
             runtime_path,
             backend,
         )?)),
-        TopicModelKind::Siglip2Base | TopicModelKind::MobileclipS0 => {
+        TopicModelKind::Siglip2Base
+        | TopicModelKind::Siglip2So400m14_384
+        | TopicModelKind::MobileclipS0 => {
             Ok(Box::new(OpenVocabularyClipClassifier::load_with_backend(
                 topic_model,
                 model_dir,
@@ -1598,6 +2022,44 @@ fn validate_mobileclip_vision_contract(session: &Session) -> Result<(), Semantic
     if !input_names.contains(&"pixel_values") || !output_names.contains(&"image_embeds") {
         return Err(SemanticError::Inference(
             "MobileCLIP vision graph must expose pixel_values and image_embeds".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_siglip2_split_vision_contract(session: &Session) -> Result<(), SemanticError> {
+    let input_names = session
+        .inputs()
+        .iter()
+        .map(|input| input.name())
+        .collect::<Vec<_>>();
+    let output_names = session
+        .outputs()
+        .iter()
+        .map(|output| output.name())
+        .collect::<Vec<_>>();
+    if !input_names.contains(&"pixel_values") || !output_names.contains(&"image_embeds") {
+        return Err(SemanticError::Inference(
+            "SigLIP 2 SO400M vision graph must expose pixel_values and image_embeds".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_siglip2_split_text_contract(session: &Session) -> Result<(), SemanticError> {
+    let input_names = session
+        .inputs()
+        .iter()
+        .map(|input| input.name())
+        .collect::<Vec<_>>();
+    let output_names = session
+        .outputs()
+        .iter()
+        .map(|output| output.name())
+        .collect::<Vec<_>>();
+    if !input_names.contains(&"input_ids") || !output_names.contains(&"text_embeds") {
+        return Err(SemanticError::Inference(
+            "SigLIP 2 SO400M text graph must expose input_ids and text_embeds".into(),
         ));
     }
     Ok(())
@@ -1912,6 +2374,15 @@ pub(crate) fn verify_sha256(path: &Path, expected: &str) -> Result<(), SemanticE
     }
 }
 
+fn verify_optional_sha256(path: &Path, expected: Option<&str>) -> Result<(), SemanticError> {
+    match expected {
+        Some(expected) => verify_sha256(path, expected),
+        None => File::open(path)
+            .map(|_| ())
+            .map_err(|error| SemanticError::Integrity(format!("{}: {error}", path.display()))),
+    }
+}
+
 type TokenizedTopicPrompts = (Vec<i64>, Vec<i64>, Vec<usize>);
 
 fn tokenize_topic_prompts(tokenizer: &Tokenizer) -> Result<TokenizedTopicPrompts, SemanticError> {
@@ -1930,7 +2401,9 @@ fn tokenize_topic_prompts_for_variant(
     variant: OpenClipVariant,
 ) -> Result<TokenizedTopicPrompts, SemanticError> {
     let template = match variant {
-        OpenClipVariant::Siglip2Base => Some("This is a photo of {label}."),
+        OpenClipVariant::Siglip2Base | OpenClipVariant::Siglip2So400m14_384 => {
+            Some("This is a photo of {label}.")
+        }
         OpenClipVariant::MobileclipS0 => None,
     };
     tokenize_topic_prompts_for_template(tokenizer, variant.token_length(), template)
@@ -2058,7 +2531,7 @@ fn preprocess_open_clip_images(
             )));
         }
         let cropped = match variant {
-            OpenClipVariant::Siglip2Base => {
+            OpenClipVariant::Siglip2Base | OpenClipVariant::Siglip2So400m14_384 => {
                 image::imageops::resize(&image, image_size, image_size, FilterType::CatmullRom)
             }
             OpenClipVariant::MobileclipS0 => {
@@ -2085,7 +2558,9 @@ fn preprocess_open_clip_images(
             for pixel in cropped.pixels() {
                 let value = f32::from(pixel[channel]) / 255.0;
                 let value = match variant {
-                    OpenClipVariant::Siglip2Base => (value - 0.5) / 0.5,
+                    OpenClipVariant::Siglip2Base | OpenClipVariant::Siglip2So400m14_384 => {
+                        (value - 0.5) / 0.5
+                    }
                     OpenClipVariant::MobileclipS0 => value,
                 };
                 values.push(value);
@@ -2445,6 +2920,42 @@ mod tests {
                 })
                 .collect())
         }
+    }
+
+    #[test]
+    fn directml_inference_failure_selects_cpu_once() {
+        let inference_error = SemanticError::Inference("DirectML device failure".into());
+        let backend = cpu_fallback_backend(ExecutionBackend::DirectMl, &inference_error)
+            .expect("DirectML should fall back to CPU");
+        assert_eq!(backend, ExecutionBackend::Cpu);
+        assert_eq!(
+            cpu_fallback_backend(backend, &inference_error),
+            None,
+            "a CPU runtime must not trigger another GPU fallback"
+        );
+        assert_eq!(
+            cpu_fallback_backend(
+                ExecutionBackend::DirectMl,
+                &SemanticError::InvalidInput("not a runtime failure".into())
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn topic_model_inference_errors_are_not_dropped() {
+        let result = topic_outputs_for_batch(
+            Err(SemanticError::Inference("topic runtime failed".into())),
+            1,
+        );
+        assert!(matches!(
+            result,
+            Err(SemanticError::Inference(message)) if message == "topic runtime failed"
+        ));
+        assert!(matches!(
+            topic_outputs_for_batch(Ok(Vec::new()), 1),
+            Err(SemanticError::Inference(_))
+        ));
     }
 
     #[test]

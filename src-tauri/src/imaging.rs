@@ -191,6 +191,12 @@ pub fn process_image_from_cached_thumbnail(
 /// decoder here makes the pixel-size boundary explicit at every model call,
 /// including recovered jobs or a corrupted cache entry.
 pub fn load_analysis_thumbnail(path: &Path) -> AppResult<image::RgbImage> {
+    if !is_analysis_thumbnail_path(path) {
+        return Err(AppError::InvalidArgument(format!(
+            "analysis input must be an application-owned {THUMBNAIL_SPEC} thumbnail: {}",
+            path.display()
+        )));
+    }
     let mut reader = image::ImageReader::open(path)?.with_guessed_format()?;
     reader.limits(decode_limits_for(ANALYSIS_THUMBNAIL_MAX_DIMENSION));
     let image = reader.decode()?.to_rgb8();
@@ -200,6 +206,12 @@ pub fn load_analysis_thumbnail(path: &Path) -> AppResult<image::RgbImage> {
         ));
     }
     Ok(image)
+}
+
+pub fn is_analysis_thumbnail_path(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name.ends_with(&format!("-{THUMBNAIL_SPEC}.jpg")))
 }
 
 fn decode_limits() -> Limits {
@@ -466,6 +478,23 @@ fn write_thumbnail_once(image: &RgbaImage, target: &Path) -> AppResult<()> {
             // Thumbnails are rebuildable application cache. Avoid forcing a
             // physical disk flush for every source file during import.
         }
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+        Err(error) => return Err(AppError::Io(error)),
+    }
+    Ok(())
+}
+
+/// Write a rebuildable application-owned JPEG without overwriting an existing
+/// cache entry. Callers must choose a target inside the thumbnail cache.
+pub fn write_owned_thumbnail_once(image: &image::RgbImage, target: &Path) -> AppResult<()> {
+    if target.is_file() {
+        return Ok(());
+    }
+
+    let mut encoded = Vec::new();
+    JpegEncoder::new_with_quality(&mut encoded, 84).encode_image(image)?;
+    match OpenOptions::new().write(true).create_new(true).open(target) {
+        Ok(mut file) => file.write_all(&encoded)?,
         Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
         Err(error) => return Err(AppError::Io(error)),
     }

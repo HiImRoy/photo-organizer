@@ -16,6 +16,7 @@ pub struct TopicLabelDefinition {
 pub const TAXONOMY_VERSION: &str = "photo-organizer-photography-topics-v5";
 pub const SCORE_MARGIN: f32 = 0.035;
 pub const MAX_RAW_CANDIDATES: usize = 16;
+pub const PORTRAIT_SUBJECT_SCORE_THRESHOLD: f32 = 0.55;
 
 const PORTRAIT_PROMPTS: &[&str] = &[
     "a portrait photograph",
@@ -181,6 +182,15 @@ pub fn label_index(label_id: &str) -> Option<usize> {
     TOPIC_LABELS.iter().position(|label| label.id == label_id)
 }
 
+pub fn portrait_gate_allows(subject_score: f32, crop_topic_score: f32, crop_margin: f32) -> bool {
+    subject_score.is_finite()
+        && crop_topic_score.is_finite()
+        && crop_margin.is_finite()
+        && subject_score >= PORTRAIT_SUBJECT_SCORE_THRESHOLD
+        && crop_topic_score >= TOPIC_LABELS[label_index("photo_portrait").unwrap()].threshold
+        && crop_margin >= SCORE_MARGIN
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -269,6 +279,14 @@ mod tests {
                 .iter()
                 .any(|label| label.id == "photo_document")
         );
+    }
+
+    #[test]
+    fn portrait_gate_requires_detection_crop_score_and_margin() {
+        assert!(portrait_gate_allows(0.80, 0.30, 0.08));
+        assert!(!portrait_gate_allows(0.54, 0.30, 0.08));
+        assert!(!portrait_gate_allows(0.80, 0.21, 0.08));
+        assert!(!portrait_gate_allows(0.80, 0.30, 0.034));
     }
 
     #[test]

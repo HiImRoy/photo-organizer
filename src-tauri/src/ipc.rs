@@ -1,11 +1,12 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use base64::Engine;
 use image::codecs::jpeg::JpegEncoder;
 use image::imageops::FilterType;
-use parking_lot::RwLock;
+use parking_lot::{Mutex, RwLock};
 use tauri::{Emitter, State};
 
 use crate::classification::registry_descriptors;
@@ -26,7 +27,7 @@ use crate::scanner::{
 use crate::semantic::{
     ExecutionBackend, Places365Classifier, SIGLIP2_ANALYSIS_VERSION, SIGLIP2_MODEL_NAME,
     SIGLIP2_MODEL_VERSION, SemanticClassifier, SemanticLabelDescriptor, SemanticRuntimeStatus,
-    TopicModelKind, semantic_catalog,
+    TopicModelKind, default_topic_model_metadata, semantic_catalog,
 };
 use crate::semantic_tasks::{SEMANTIC_BATCH_SIZE, spawn_semantic_job};
 use crate::subject::{SubjectClassifier, SubjectModel, SubjectRuntimeStatus};
@@ -49,6 +50,11 @@ pub struct AppState {
     pub semantic_tasks: Arc<SemanticTaskRegistry>,
     pub semantic: Arc<RwLock<Arc<dyn SemanticClassifier>>>,
     pub subject: Arc<RwLock<Arc<dyn SubjectClassifier>>>,
+    semantic_status: Arc<RwLock<SemanticRuntimeStatus>>,
+    subject_status: Arc<RwLock<SubjectRuntimeStatus>>,
+    semantic_preparation: Arc<Mutex<()>>,
+    subject_preparation: Arc<Mutex<()>>,
+    startup_preparation_started: AtomicBool,
     pub gpu_provider: Arc<RwLock<Option<crate::gpu::GpuProviderStatus>>>,
 }
 
@@ -59,6 +65,9 @@ impl AppState {
         semantic: Arc<dyn SemanticClassifier>,
         subject: Arc<dyn SubjectClassifier>,
     ) -> Self {
+        let semantic_status = semantic_loading_status(semantic.status());
+        let subject_status = subject_loading_status(subject.status());
+        let model_preparation = Arc::new(Mutex::new(()));
         Self {
             repository,
             paths,
@@ -67,35 +76,570 @@ impl AppState {
             semantic_tasks: Arc::new(SemanticTaskRegistry::default()),
             semantic: Arc::new(RwLock::new(semantic)),
             subject: Arc::new(RwLock::new(subject)),
+            semantic_status: Arc::new(RwLock::new(semantic_status)),
+            subject_status: Arc::new(RwLock::new(subject_status)),
+            semantic_preparation: model_preparation.clone(),
+            subject_preparation: model_preparation,
+            startup_preparation_started: AtomicBool::new(false),
             gpu_provider: Arc::new(RwLock::new(None)),
         }
     }
+
+    fn claim_startup_preparation(&self) -> bool {
+        !self
+            .startup_preparation_started
+            .swap(true, Ordering::AcqRel)
+    }
 }
 
-/// Restore a model that was explicitly prepared in an earlier session.
-///
-/// Loading is intentionally performed after the Tauri state has been
-/// installed and on a background thread. This keeps the WebView responsive on
-/// cold start while allowing the next session to reuse the user's last model
-/// choice without another button click.
-pub fn restore_persisted_models(app: tauri::AppHandle, state: &AppState) {
-    let active_model = match state.repository.active_semantic_model_key() {
+fn semantic_loading_status(mut status: SemanticRuntimeStatus) -> SemanticRuntimeStatus {
+    status.status = "loading".into();
+    status.message = "正在后台准备本地语义模型；图库可继续使用。".into();
+    status
+}
+
+fn semantic_error_status(
+    mut status: SemanticRuntimeStatus,
+    message: impl std::fmt::Display,
+) -> SemanticRuntimeStatus {
+    status.status = "error".into();
+    status.message = format!("本地语义模型准备失败：{message}");
+    status
+}
+
+fn subject_loading_status(mut status: SubjectRuntimeStatus) -> SubjectRuntimeStatus {
+    status.status = "loading".into();
+    status.message = "正在后台准备本地主体模型；图库可继续使用。".into();
+    status
+}
+
+fn subject_error_status(
+    mut status: SubjectRuntimeStatus,
+    message: impl std::fmt::Display,
+) -> SubjectRuntimeStatus {
+    status.status = "error".into();
+    status.message = format!("本地主体模型准备失败：{message}");
+    status
+}
+
+fn current_semantic_status(state: &AppState) -> SemanticRuntimeStatus {
+    observe_semantic_runtime(
+        &state.repository,
+        &state.paths,
+        &state.semantic,
+        &state.semantic_status,
+        &state.gpu_provider,
+    )
+    .0
+}
+
+fn current_subject_status(state: &AppState) -> SubjectRuntimeStatus {
+    observe_subject_runtime(&state.subject, &state.subject_status, &state.gpu_provider).0
+}
+
+struct SemanticPreparationContext<'a> {
+    paths: &'a AppPaths,
+    repository: &'a Repository,
+    classifier_slot: &'a Arc<RwLock<Arc<dyn SemanticClassifier>>>,
+    published_status: &'a Arc<RwLock<SemanticRuntimeStatus>>,
+    preparation: &'a Arc<Mutex<()>>,
+    gpu_provider: &'a Arc<RwLock<Option<crate::gpu::GpuProviderStatus>>>,
+}
+
+fn observe_semantic_runtime(
+    repository: &Repository,
+    paths: &AppPaths,
+    classifier_slot: &Arc<RwLock<Arc<dyn SemanticClassifier>>>,
+    published_status: &Arc<RwLock<SemanticRuntimeStatus>>,
+    gpu_provider: &Arc<RwLock<Option<crate::gpu::GpuProviderStatus>>>,
+) -> (SemanticRuntimeStatus, bool) {
+    let classifier = classifier_slot.read().clone();
+    let live = classifier.status();
+    let mut published = published_status.write();
+    let previous = published.clone();
+
+    if previous.status == "loading"
+        || (previous.status == "error" && previous.selected_backend == live.selected_backend)
+    {
+        return (previous, false);
+    }
+
+    let fell_back_to_cpu = previous
+        .selected_backend
+        .is_some_and(ExecutionBackend::is_gpu)
+        && live.selected_backend == Some(ExecutionBackend::Cpu);
+    let already_fell_back = live.selected_backend == Some(ExecutionBackend::Cpu)
+        && previous.message.contains("DirectML")
+        && previous.message.contains("回退 CPU");
+    let mut observed = live;
+    if fell_back_to_cpu {
+        observed.message = format!(
+            "DirectML 推理失败，已回退 CPU；后续语义任务固定使用 CPU。{}",
+            observed.message
+        );
+    } else if already_fell_back {
+        observed.message = if observed.status == previous.status {
+            previous.message.clone()
+        } else {
+            format!(
+                "DirectML 已回退 CPU；后续语义任务固定使用 CPU。{}",
+                observed.message
+            )
+        };
+    }
+    let changed = *published != observed;
+    *published = observed.clone();
+    drop(published);
+
+    if fell_back_to_cpu {
+        let message = format!(
+            "语义模型运行时 DirectML 失败，已回退 CPU：{}",
+            observed.message
+        );
+        *gpu_provider.write() = Some(crate::gpu::GpuProviderStatus {
+            id: "directml".into(),
+            state: "error".into(),
+            message,
+        });
+        if let Err(error) = persist_semantic_backend_after_fallback(repository, paths, &observed) {
+            log::error!("could not persist semantic CPU fallback: {error}");
+            observed
+                .message
+                .push_str(&format!(" 活动模型数据库 backend 同步失败：{error}"));
+            *published_status.write() = observed.clone();
+        }
+    }
+    (observed, changed)
+}
+
+fn observe_subject_runtime(
+    classifier_slot: &Arc<RwLock<Arc<dyn SubjectClassifier>>>,
+    published_status: &Arc<RwLock<SubjectRuntimeStatus>>,
+    gpu_provider: &Arc<RwLock<Option<crate::gpu::GpuProviderStatus>>>,
+) -> (SubjectRuntimeStatus, bool) {
+    let classifier = classifier_slot.read().clone();
+    let live = classifier.status();
+    let mut published = published_status.write();
+    let previous = published.clone();
+
+    if previous.status == "loading"
+        || (previous.status == "error" && previous.selected_backend == live.selected_backend)
+    {
+        return (previous, false);
+    }
+
+    let fell_back_to_cpu = previous
+        .selected_backend
+        .is_some_and(ExecutionBackend::is_gpu)
+        && live.selected_backend == Some(ExecutionBackend::Cpu);
+    let observed = live;
+    let changed = *published != observed;
+    *published = observed.clone();
+    drop(published);
+
+    if fell_back_to_cpu {
+        *gpu_provider.write() = Some(crate::gpu::GpuProviderStatus {
+            id: "directml".into(),
+            state: "error".into(),
+            message: format!(
+                "主体模型 DirectML 执行失败，已回退 CPU：{}",
+                observed.message
+            ),
+        });
+    }
+    (observed, changed)
+}
+
+fn persist_semantic_backend_after_fallback(
+    repository: &Repository,
+    paths: &AppPaths,
+    status: &SemanticRuntimeStatus,
+) -> Result<(), String> {
+    let active_model = match repository.active_semantic_model_key() {
         Ok(active_model) => active_model,
-        Err(error) => {
-            log::warn!("could not inspect persisted semantic model: {error}");
-            return;
+        Err(error) => return Err(format!("could not read active model: {error}")),
+    };
+    let fallback_metadata = default_topic_model_metadata();
+    let metadata = match status.topic_model.as_ref() {
+        Some(metadata)
+            if metadata.name == SIGLIP2_MODEL_NAME
+                && metadata.version == SIGLIP2_MODEL_VERSION
+                && metadata.analysis_version == SIGLIP2_ANALYSIS_VERSION =>
+        {
+            metadata.clone()
+        }
+        Some(_) => {
+            return Err("loaded topic profile is not the bundled SigLIP 2 Base".into());
+        }
+        None => {
+            let active_is_bundled_base =
+                active_model
+                    .as_ref()
+                    .is_some_and(|(name, version, analysis_version, _)| {
+                        name == SIGLIP2_MODEL_NAME
+                            && version == SIGLIP2_MODEL_VERSION
+                            && analysis_version == SIGLIP2_ANALYSIS_VERSION
+                    });
+            if !active_is_bundled_base {
+                return Err("could not identify the active bundled topic model".into());
+            }
+            fallback_metadata
         }
     };
-    let Some((name, version, analysis_version, persisted_backend)) = active_model else {
-        return;
+
+    if let Some((name, version, analysis_version, backend)) = active_model.as_ref() {
+        if name != &metadata.name
+            || version != &metadata.version
+            || analysis_version != &metadata.analysis_version
+        {
+            return Err("active semantic profile changed during CPU fallback".into());
+        }
+        if backend.as_str() == ExecutionBackend::Cpu.id() {
+            return Ok(());
+        }
+    }
+
+    let model_path = paths
+        .siglip2_model_dir
+        .join(crate::semantic::SIGLIP2_MODEL_FILE);
+    let tokenizer_path = paths
+        .siglip2_model_dir
+        .join(crate::semantic::SIGLIP2_TOKENIZER_FILE);
+    repository
+        .register_active_semantic_model(
+            &metadata,
+            &model_path,
+            &tokenizer_path,
+            "https://huggingface.co/onnx-community/siglip2-base-patch16-224-ONNX",
+            ExecutionBackend::Cpu,
+        )
+        .map_err(|error| format!("could not write active model backend: {error}"))
+}
+
+fn backend_satisfies_request(
+    selected_backend: Option<ExecutionBackend>,
+    requested_backend: ExecutionBackend,
+    previous_message: &str,
+) -> bool {
+    selected_backend == Some(requested_backend)
+        || (requested_backend.is_gpu()
+            && selected_backend == Some(ExecutionBackend::Cpu)
+            && previous_message.contains("DirectML")
+            && previous_message.contains("回退 CPU"))
+}
+
+fn set_semantic_failure(
+    classifier: &Arc<RwLock<Arc<dyn SemanticClassifier>>>,
+    published_status: &Arc<RwLock<SemanticRuntimeStatus>>,
+    message: impl std::fmt::Display,
+) -> SemanticRuntimeStatus {
+    let status = semantic_error_status(classifier.read().status(), message);
+    *published_status.write() = status.clone();
+    status
+}
+
+fn set_subject_failure(
+    classifier: &Arc<RwLock<Arc<dyn SubjectClassifier>>>,
+    published_status: &Arc<RwLock<SubjectRuntimeStatus>>,
+    message: impl std::fmt::Display,
+) -> SubjectRuntimeStatus {
+    let status = subject_error_status(classifier.read().status(), message);
+    *published_status.write() = status.clone();
+    status
+}
+
+fn prepare_semantic_runtime(
+    context: SemanticPreparationContext<'_>,
+    topic_model: TopicModelKind,
+    requested_backend: ExecutionBackend,
+) -> Result<SemanticRuntimeStatus, String> {
+    let SemanticPreparationContext {
+        paths,
+        repository,
+        classifier_slot,
+        published_status,
+        preparation,
+        gpu_provider,
+    } = context;
+    if topic_model != TopicModelKind::Siglip2Base {
+        return Err(format!(
+            "{} 尚无 bundled 模型资源；当前只打包了 SigLIP 2 Base，不会尝试从 Base 目录装载该 profile。",
+            topic_model.display_name()
+        ));
+    }
+
+    let _guard = preparation.lock();
+    let current = classifier_slot.read().clone();
+    let current_status = current.status();
+    let previous_status = published_status.read().clone();
+    let current_topic_matches = current_status
+        .topic_model
+        .as_ref()
+        .is_some_and(|model| model.name == topic_model.model_name());
+    if current_status.status == "ready"
+        && current.metadata().installed
+        && current_topic_matches
+        && backend_satisfies_request(
+            current_status.selected_backend,
+            requested_backend,
+            &previous_status.message,
+        )
+    {
+        let mut status = previous_status;
+        if status.status == "loading" || status.status == "error" {
+            status = current_status;
+        }
+        *published_status.write() = status.clone();
+        return Ok(status);
+    }
+
+    *published_status.write() = semantic_loading_status(current_status.clone());
+    let loaded = Places365Classifier::load_with_topic_model_with_backend(
+        &paths.semantic_model_dir,
+        &paths.siglip2_model_dir,
+        &paths.onnx_runtime_path,
+        topic_model,
+        requested_backend,
+    );
+    let (classifier, mut status) = match loaded {
+        Ok(classifier) => {
+            let status = classifier.status();
+            (classifier, status)
+        }
+        Err(error) if requested_backend.is_gpu() => {
+            log::warn!(
+                "DirectML semantic model initialization failed; falling back to CPU: {error}"
+            );
+            *gpu_provider.write() = Some(crate::gpu::GpuProviderStatus {
+                id: "directml".into(),
+                state: "error".into(),
+                message: format!("模型会话自检失败，已回退 CPU：{error}"),
+            });
+            if current.metadata().installed
+                && current_status.selected_backend == Some(ExecutionBackend::Cpu)
+            {
+                let mut status = current_status;
+                status.message = format!("DirectML 初始化失败，继续使用已就绪的 CPU 模型：{error}");
+                *published_status.write() = status.clone();
+                return Ok(status);
+            }
+            match Places365Classifier::load_with_topic_model_with_backend(
+                &paths.semantic_model_dir,
+                &paths.siglip2_model_dir,
+                &paths.onnx_runtime_path,
+                topic_model,
+                ExecutionBackend::Cpu,
+            ) {
+                Ok(classifier) => {
+                    let mut status = classifier.status();
+                    status.message = format!("DirectML 初始化失败，已回退 CPU：{error}");
+                    (classifier, status)
+                }
+                Err(fallback_error) => {
+                    let message = format!(
+                        "{} DirectML 初始化失败（{error}），CPU 回退也失败：{fallback_error}",
+                        topic_model.display_name()
+                    );
+                    set_semantic_failure(classifier_slot, published_status, &message);
+                    return Err(message);
+                }
+            }
+        }
+        Err(error) => {
+            let message = format!("{} 加载失败：{error}", topic_model.display_name());
+            set_semantic_failure(classifier_slot, published_status, &message);
+            return Err(message);
+        }
     };
-    let requested_backend = ExecutionBackend::parse(Some(&persisted_backend));
-    if name != SIGLIP2_MODEL_NAME
-        || version != SIGLIP2_MODEL_VERSION
-        || analysis_version != SIGLIP2_ANALYSIS_VERSION
+
+    if status
+        .topic_model
+        .as_ref()
+        .is_none_or(|model| model.name != topic_model.model_name())
+    {
+        let message = format!(
+            "{} 未能装载；请检查 bundled 模型资源和 ONNX Runtime。{}",
+            topic_model.display_name(),
+            status.message
+        );
+        set_semantic_failure(classifier_slot, published_status, &message);
+        return Err(message);
+    }
+
+    if requested_backend.is_gpu() && status.selected_backend == Some(requested_backend) {
+        *gpu_provider.write() = Some(crate::gpu::GpuProviderStatus {
+            id: "directml".into(),
+            state: "ready".into(),
+            message: "DirectML 模型会话自检通过。".into(),
+        });
+    }
+
+    if let Err(error) = repository.register_semantic_model(
+        &paths.semantic_model_dir.join(crate::semantic::MODEL_FILE),
+        &paths
+            .semantic_model_dir
+            .join(crate::semantic::TOKENIZER_FILE),
+    ) {
+        log::warn!("could not persist Places365 model metadata: {error}");
+        status
+            .message
+            .push_str(&format!(" 模型元数据未写入数据库：{error}"));
+    }
+    if let Some(topic_metadata) = status.topic_model.as_ref() {
+        let model_path = paths
+            .siglip2_model_dir
+            .join(crate::semantic::SIGLIP2_MODEL_FILE);
+        let tokenizer_path = paths
+            .siglip2_model_dir
+            .join(crate::semantic::SIGLIP2_TOKENIZER_FILE);
+        if let Err(error) = repository.register_active_semantic_model(
+            topic_metadata,
+            &model_path,
+            &tokenizer_path,
+            "https://huggingface.co/onnx-community/siglip2-base-patch16-224-ONNX",
+            status.selected_backend.unwrap_or(ExecutionBackend::Cpu),
+        ) {
+            log::warn!("could not persist active semantic model: {error}");
+            status
+                .message
+                .push_str(&format!(" 活动模型状态未写入数据库：{error}"));
+        }
+    }
+
+    *classifier_slot.write() = Arc::new(classifier);
+    *published_status.write() = status.clone();
+    Ok(status)
+}
+
+fn prepare_subject_runtime(
+    paths: &AppPaths,
+    classifier_slot: &Arc<RwLock<Arc<dyn SubjectClassifier>>>,
+    published_status: &Arc<RwLock<SubjectRuntimeStatus>>,
+    preparation: &Arc<Mutex<()>>,
+    gpu_provider: &Arc<RwLock<Option<crate::gpu::GpuProviderStatus>>>,
+    requested_backend: ExecutionBackend,
+) -> Result<SubjectRuntimeStatus, String> {
+    let _guard = preparation.lock();
+    let current = classifier_slot.read().clone();
+    let current_status = current.status();
+    let previous_status = published_status.read().clone();
+    if matches!(current_status.status.as_str(), "ready" | "partial")
+        && current.metadata().installed
+        && backend_satisfies_request(
+            current_status.selected_backend,
+            requested_backend,
+            &previous_status.message,
+        )
+    {
+        let mut status = previous_status;
+        if status.status == "loading" || status.status == "error" {
+            status = current_status;
+        }
+        *published_status.write() = status.clone();
+        return Ok(status);
+    }
+
+    *published_status.write() = subject_loading_status(current_status.clone());
+    let loaded = SubjectModel::load_with_backend(
+        &paths.subject_model_dir,
+        &paths.face_model_dir,
+        &paths.onnx_runtime_path,
+        requested_backend,
+    );
+    let (classifier, status) = match loaded {
+        Ok(classifier) => {
+            let status = classifier.status();
+            (classifier, status)
+        }
+        Err(error) if requested_backend.is_gpu() => {
+            log::warn!(
+                "DirectML subject model initialization failed; falling back to CPU: {error}"
+            );
+            *gpu_provider.write() = Some(crate::gpu::GpuProviderStatus {
+                id: "directml".into(),
+                state: "error".into(),
+                message: format!("主体模型会话自检失败，已回退 CPU：{error}"),
+            });
+            if current.metadata().installed
+                && current_status.selected_backend == Some(ExecutionBackend::Cpu)
+            {
+                let mut status = current_status;
+                status.message =
+                    format!("DirectML 初始化失败，继续使用已就绪的 CPU 主体模型：{error}");
+                *published_status.write() = status.clone();
+                return Ok(status);
+            }
+            match SubjectModel::load_with_backend(
+                &paths.subject_model_dir,
+                &paths.face_model_dir,
+                &paths.onnx_runtime_path,
+                ExecutionBackend::Cpu,
+            ) {
+                Ok(classifier) => {
+                    let mut status = classifier.status();
+                    status.message = format!("DirectML 初始化失败，主体模型已回退 CPU：{error}");
+                    (classifier, status)
+                }
+                Err(fallback_error) => {
+                    let message = format!(
+                        "PicoDet 主体模型 DirectML 初始化失败（{error}），CPU 回退也失败：{fallback_error}"
+                    );
+                    set_subject_failure(classifier_slot, published_status, &message);
+                    return Err(message);
+                }
+            }
+        }
+        Err(error) => {
+            let message = format!("PicoDet 主体模型加载失败：{error}");
+            set_subject_failure(classifier_slot, published_status, &message);
+            return Err(message);
+        }
+    };
+
+    if !status.model.installed {
+        let message = format!("主体模型未能装载：{}", status.message);
+        set_subject_failure(classifier_slot, published_status, &message);
+        return Err(message);
+    }
+    if requested_backend.is_gpu() && status.selected_backend == Some(requested_backend) {
+        *gpu_provider.write() = Some(crate::gpu::GpuProviderStatus {
+            id: "directml".into(),
+            state: "ready".into(),
+            message: "DirectML 主体模型会话自检通过。".into(),
+        });
+    }
+    *classifier_slot.write() = Arc::new(classifier);
+    *published_status.write() = status.clone();
+    Ok(status)
+}
+
+/// Load the bundled classifiers after the window can be shown. Both models
+/// use the same persisted backend choice when available; a new installation
+/// starts on CPU. No image analysis is started here.
+pub fn prepare_bundled_models(app: tauri::AppHandle, state: &AppState) {
+    if !state.claim_startup_preparation() {
+        return;
+    }
+    let (requested_backend, active_model) = match state.repository.active_semantic_model_key() {
+        Ok(active_model) => {
+            let backend = active_model
+                .as_ref()
+                .map(|(_, _, _, backend)| ExecutionBackend::parse(Some(backend)))
+                .unwrap_or(ExecutionBackend::Cpu);
+            (backend, active_model)
+        }
+        Err(error) => {
+            log::warn!("could not inspect persisted semantic model; starting on CPU: {error}");
+            (ExecutionBackend::Cpu, None)
+        }
+    };
+    if let Some((name, version, analysis_version, _)) = active_model
+        && (name != SIGLIP2_MODEL_NAME
+            || version != SIGLIP2_MODEL_VERSION
+            || analysis_version != SIGLIP2_ANALYSIS_VERSION)
     {
         log::warn!(
-            "migrating persisted semantic model {name} {version} {analysis_version} to the bundled SigLIP 2 model"
+            "migrating persisted semantic model {name} {version} {analysis_version} to bundled SigLIP 2 Base"
         );
     }
 
@@ -106,125 +650,100 @@ pub fn restore_persisted_models(app: tauri::AppHandle, state: &AppState) {
     let semantic_tasks = state.semantic_tasks.clone();
     let semantic = state.semantic.clone();
     let subject = state.subject.clone();
+    let semantic_status = state.semantic_status.clone();
+    let subject_status = state.subject_status.clone();
+    let semantic_preparation = state.semantic_preparation.clone();
+    let subject_preparation = state.subject_preparation.clone();
     let gpu_provider = state.gpu_provider.clone();
     let thread_app = app.clone();
     if let Err(error) = std::thread::Builder::new()
-        .name("restore-photo-models".into())
+        .name("prepare-bundled-photo-models".into())
         .spawn(move || {
-            let (classifier, semantic_status) =
-                match Places365Classifier::load_with_topic_model_with_backend(
-                    &paths.semantic_model_dir,
-                    &paths.siglip2_model_dir,
-                    &paths.onnx_runtime_path,
-                    TopicModelKind::Siglip2Base,
-                    requested_backend,
-                ) {
-                    Ok(classifier) => {
-                        let status = classifier.status();
-                        if requested_backend.is_gpu()
-                            && status.selected_backend == Some(requested_backend)
-                        {
-                            *gpu_provider.write() = Some(crate::gpu::GpuProviderStatus {
-                                id: "directml".into(),
-                                state: "ready".into(),
-                                message: "DirectML 模型会话自检通过。".into(),
-                            });
-                        }
-                        (classifier, status)
-                    }
-                    Err(error) if requested_backend.is_gpu() => {
-                        log::warn!(
-                            "DirectML semantic model restore failed; falling back to CPU: {error}"
-                        );
-                        *gpu_provider.write() = Some(crate::gpu::GpuProviderStatus {
-                            id: "directml".into(),
-                            state: "error".into(),
-                            message: format!("模型会话自检失败，已回退 CPU：{error}"),
-                        });
-                        let classifier =
-                            match Places365Classifier::load_with_topic_model_with_backend(
-                                &paths.semantic_model_dir,
-                                &paths.siglip2_model_dir,
-                                &paths.onnx_runtime_path,
-                                TopicModelKind::Siglip2Base,
-                                ExecutionBackend::Cpu,
-                            ) {
-                                Ok(classifier) => classifier,
-                                Err(fallback_error) => {
-                                    log::warn!(
-                                        "could not restore semantic model after CPU fallback: \
-                                         {fallback_error}"
-                                    );
-                                    return;
-                                }
-                            };
-                        let mut status = classifier.status();
-                        status.message = format!("DirectML 初始化失败，已回退 CPU：{error}");
-                        (classifier, status)
-                    }
-                    Err(error) => {
-                        log::warn!("could not restore persisted semantic model: {error}");
-                        return;
-                    }
-                };
-            if let Some(topic_model) = semantic_status.topic_model.as_ref() {
-                let model_path = paths
-                    .siglip2_model_dir
-                    .join(crate::semantic::SIGLIP2_MODEL_FILE);
-                let tokenizer_path = paths
-                    .siglip2_model_dir
-                    .join(crate::semantic::SIGLIP2_TOKENIZER_FILE);
-                if let Err(error) = repository.register_active_semantic_model(
-                    topic_model,
-                    &model_path,
-                    &tokenizer_path,
-                    "https://huggingface.co/onnx-community/siglip2-base-patch16-224-ONNX",
-                    semantic_status
-                        .selected_backend
-                        .unwrap_or(ExecutionBackend::Cpu),
-                ) {
-                    log::warn!("could not persist restored semantic model: {error}");
-                }
-            }
-            *semantic.write() = Arc::new(classifier);
-            if let Err(error) = thread_app.emit("semantic-status", semantic_status) {
-                log::warn!("could not emit restored semantic status: {error}");
-            }
-
-            match SubjectModel::load(
-                &paths.subject_model_dir,
-                &paths.face_model_dir,
-                &paths.onnx_runtime_path,
-            ) {
-                Ok(classifier) => {
-                    let subject_status = classifier.status();
-                    *subject.write() = Arc::new(classifier);
-                    if let Err(error) = thread_app.emit("subject-status", subject_status) {
-                        log::warn!("could not emit restored subject status: {error}");
-                    }
-                }
+            let semantic_result = prepare_semantic_runtime(
+                SemanticPreparationContext {
+                    paths: &paths,
+                    repository: &repository,
+                    classifier_slot: &semantic,
+                    published_status: &semantic_status,
+                    preparation: &semantic_preparation,
+                    gpu_provider: &gpu_provider,
+                },
+                TopicModelKind::Siglip2Base,
+                requested_backend,
+            );
+            let semantic_state = match semantic_result {
+                Ok(status) => status,
                 Err(error) => {
-                    log::warn!("could not restore persisted subject model: {error}");
+                    log::warn!("could not prepare bundled semantic model: {error}");
+                    semantic_status.read().clone()
                 }
+            };
+            if let Err(error) = thread_app.emit("semantic-status", semantic_state) {
+                log::warn!("could not emit semantic model status: {error}");
             }
 
-            // Pending jobs must be resumed only after the classifier has been
-            // restored; otherwise the old startup path would mark them as
-            // failed against the unavailable placeholder.
-            let resume_state = AppState {
-                repository,
-                paths,
-                tasks,
-                source_scans,
-                semantic_tasks,
-                semantic,
-                subject,
-                gpu_provider,
+            let subject_result = prepare_subject_runtime(
+                &paths,
+                &subject,
+                &subject_status,
+                &subject_preparation,
+                &gpu_provider,
+                requested_backend,
+            );
+            let subject_state = match subject_result {
+                Ok(status) => status,
+                Err(error) => {
+                    log::warn!("could not prepare bundled subject model: {error}");
+                    subject_status.read().clone()
+                }
             };
-            resume_pending_semantic_jobs(thread_app, &resume_state);
+            if let Err(error) = thread_app.emit("subject-status", subject_state) {
+                log::warn!("could not emit subject model status: {error}");
+            }
+
+            let live_semantic_status = semantic.read().status();
+            if !resume_pending_semantic_jobs_if_ready(&live_semantic_status, move || {
+                let resume_state = AppState {
+                    repository,
+                    paths,
+                    tasks,
+                    source_scans,
+                    semantic_tasks,
+                    semantic,
+                    subject,
+                    semantic_status,
+                    subject_status,
+                    semantic_preparation,
+                    subject_preparation,
+                    startup_preparation_started: AtomicBool::new(true),
+                    gpu_provider,
+                };
+                resume_pending_semantic_jobs(thread_app, &resume_state);
+            }) {
+                log::warn!(
+                    "leaving queued semantic jobs recoverable because the semantic topic model is not ready: {}",
+                    live_semantic_status.message
+                );
+            }
         })
     {
-        log::error!("could not start persisted model restore thread: {error}");
+        let semantic_state = set_semantic_failure(
+            &state.semantic,
+            &state.semantic_status,
+            format!("无法启动模型后台准备线程：{error}"),
+        );
+        let subject_state = set_subject_failure(
+            &state.subject,
+            &state.subject_status,
+            format!("无法启动模型后台准备线程：{error}"),
+        );
+        log::error!("could not start bundled model preparation thread: {error}");
+        if let Err(emit_error) = app.emit("semantic-status", semantic_state) {
+            log::warn!("could not emit semantic model error status: {emit_error}");
+        }
+        if let Err(emit_error) = app.emit("subject-status", subject_state) {
+            log::warn!("could not emit subject model error status: {emit_error}");
+        }
     }
 }
 
@@ -690,7 +1209,7 @@ pub fn open_library_in_explorer(library_id: i64, state: State<'_, AppState>) -> 
 
 #[tauri::command]
 pub fn get_semantic_status(state: State<'_, AppState>) -> Result<SemanticRuntimeStatus, String> {
-    Ok(state.semantic.read().status())
+    Ok(current_semantic_status(&state))
 }
 
 #[tauri::command]
@@ -720,93 +1239,23 @@ pub fn prepare_semantic_model(
     )
     .ok_or_else(|| "不支持的题材模型，当前 MVP 仅支持 SigLIP 2 Base。".to_string())?;
     let requested_backend = crate::semantic::ExecutionBackend::parse(backend.as_deref());
-    let (classifier, status) = match Places365Classifier::load_with_topic_model_with_backend(
-        &state.paths.semantic_model_dir,
-        &state.paths.siglip2_model_dir,
-        &state.paths.onnx_runtime_path,
+    prepare_semantic_runtime(
+        SemanticPreparationContext {
+            paths: &state.paths,
+            repository: &state.repository,
+            classifier_slot: &state.semantic,
+            published_status: &state.semantic_status,
+            preparation: &state.semantic_preparation,
+            gpu_provider: &state.gpu_provider,
+        },
         topic_model,
         requested_backend,
-    ) {
-        Ok(classifier) => {
-            let status = classifier.status();
-            (classifier, status)
-        }
-        Err(error) if requested_backend.is_gpu() => {
-            log::warn!(
-                "DirectML semantic model initialization failed; falling back to CPU: {error}"
-            );
-            *state.gpu_provider.write() = Some(crate::gpu::GpuProviderStatus {
-                id: "directml".into(),
-                state: "error".into(),
-                message: format!("模型会话自检失败，已回退 CPU：{error}"),
-            });
-            let classifier = Places365Classifier::load_with_topic_model_with_backend(
-                &state.paths.semantic_model_dir,
-                &state.paths.siglip2_model_dir,
-                &state.paths.onnx_runtime_path,
-                topic_model,
-                crate::semantic::ExecutionBackend::Cpu,
-            )
-            .map_err(|fallback_error| {
-                format!("DirectML 初始化失败，且 CPU 回退也失败：{fallback_error}")
-            })?;
-            let mut status = classifier.status();
-            status.message = format!("DirectML 初始化失败，已回退 CPU：{error}");
-            (classifier, status)
-        }
-        Err(error) => return Err(error.to_string()),
-    };
-    let selected_topic_model = status
-        .topic_model
-        .as_ref()
-        .ok_or_else(|| "题材模型未能装载，请检查模型资源和 ONNX Runtime。".to_string())?;
-    if requested_backend.is_gpu() && status.selected_backend == Some(requested_backend) {
-        *state.gpu_provider.write() = Some(crate::gpu::GpuProviderStatus {
-            id: "directml".into(),
-            state: "ready".into(),
-            message: "DirectML 模型会话自检通过。".into(),
-        });
-    }
-    state
-        .repository
-        .register_semantic_model(
-            &state
-                .paths
-                .semantic_model_dir
-                .join(crate::semantic::MODEL_FILE),
-            &state
-                .paths
-                .semantic_model_dir
-                .join(crate::semantic::TOKENIZER_FILE),
-        )
-        .map_err(ipc_error)?;
-    let model_path = state
-        .paths
-        .siglip2_model_dir
-        .join(crate::semantic::SIGLIP2_MODEL_FILE);
-    let tokenizer_path = state
-        .paths
-        .siglip2_model_dir
-        .join(crate::semantic::SIGLIP2_TOKENIZER_FILE);
-    let source_url = "https://huggingface.co/onnx-community/siglip2-base-patch16-224-ONNX";
-    state
-        .repository
-        .register_active_semantic_model(
-            selected_topic_model,
-            &model_path,
-            &tokenizer_path,
-            source_url,
-            status.selected_backend.unwrap_or(ExecutionBackend::Cpu),
-        )
-        .map_err(ipc_error)?;
-    let classifier: Arc<dyn SemanticClassifier> = Arc::new(classifier);
-    *state.semantic.write() = classifier;
-    Ok(status)
+    )
 }
 
 #[tauri::command]
 pub fn get_subject_status(state: State<'_, AppState>) -> Result<SubjectRuntimeStatus, String> {
-    Ok(state.subject.read().status())
+    Ok(current_subject_status(&state))
 }
 
 #[tauri::command]
@@ -815,50 +1264,14 @@ pub fn prepare_subject_model(
     state: State<'_, AppState>,
 ) -> Result<SubjectRuntimeStatus, String> {
     let requested_backend = crate::semantic::ExecutionBackend::parse(backend.as_deref());
-    let (classifier, status) = match SubjectModel::load_with_backend(
-        &state.paths.subject_model_dir,
-        &state.paths.face_model_dir,
-        &state.paths.onnx_runtime_path,
+    prepare_subject_runtime(
+        &state.paths,
+        &state.subject,
+        &state.subject_status,
+        &state.subject_preparation,
+        &state.gpu_provider,
         requested_backend,
-    ) {
-        Ok(classifier) => {
-            let status = classifier.status();
-            (classifier, status)
-        }
-        Err(error) if requested_backend.is_gpu() => {
-            log::warn!(
-                "DirectML subject model initialization failed; falling back to CPU: {error}"
-            );
-            *state.gpu_provider.write() = Some(crate::gpu::GpuProviderStatus {
-                id: "directml".into(),
-                state: "error".into(),
-                message: format!("主体模型会话自检失败，已回退 CPU：{error}"),
-            });
-            let classifier = SubjectModel::load_with_backend(
-                &state.paths.subject_model_dir,
-                &state.paths.face_model_dir,
-                &state.paths.onnx_runtime_path,
-                crate::semantic::ExecutionBackend::Cpu,
-            )
-            .map_err(|fallback_error| {
-                format!("DirectML 初始化失败，且主体模型 CPU 回退也失败：{fallback_error}")
-            })?;
-            let mut status = classifier.status();
-            status.message = format!("DirectML 初始化失败，主体模型已回退 CPU：{error}");
-            (classifier, status)
-        }
-        Err(error) => return Err(error.to_string()),
-    };
-    if requested_backend.is_gpu() && status.selected_backend == Some(requested_backend) {
-        *state.gpu_provider.write() = Some(crate::gpu::GpuProviderStatus {
-            id: "directml".into(),
-            state: "ready".into(),
-            message: "DirectML 主体模型会话自检通过。".into(),
-        });
-    }
-    let classifier: Arc<dyn SubjectClassifier> = Arc::new(classifier);
-    *state.subject.write() = classifier;
-    Ok(status)
+    )
 }
 
 #[tauri::command]
@@ -1504,6 +1917,26 @@ pub fn resume_pending_semantic_jobs(app: tauri::AppHandle, state: &AppState) {
     }
 }
 
+fn semantic_status_ready_for_jobs(status: &SemanticRuntimeStatus) -> bool {
+    status.status == "ready"
+        && status.model.installed
+        && status
+            .topic_model
+            .as_ref()
+            .is_some_and(|model| model.installed)
+}
+
+fn resume_pending_semantic_jobs_if_ready(
+    status: &SemanticRuntimeStatus,
+    resume: impl FnOnce(),
+) -> bool {
+    if !semantic_status_ready_for_jobs(status) {
+        return false;
+    }
+    resume();
+    true
+}
+
 fn start_semantic_job(
     library_id: i64,
     force: bool,
@@ -1550,6 +1983,13 @@ fn spawn_with_app(
     candidates: Vec<crate::db::SemanticAssetCandidate>,
     batch_size: usize,
 ) -> Result<(), String> {
+    let repository = state.repository.clone();
+    let paths = state.paths.clone();
+    let semantic_slot = state.semantic.clone();
+    let subject_slot = state.subject.clone();
+    let semantic_status = state.semantic_status.clone();
+    let subject_status = state.subject_status.clone();
+    let gpu_provider = state.gpu_provider.clone();
     let classifier = state.semantic.read().clone();
     let backend = classifier
         .status()
@@ -1571,6 +2011,23 @@ fn spawn_with_app(
         batch_size,
         backend,
         move |progress| {
+            let (semantic_state, semantic_changed) = observe_semantic_runtime(
+                &repository,
+                &paths,
+                &semantic_slot,
+                &semantic_status,
+                &gpu_provider,
+            );
+            if semantic_changed && let Err(error) = app.emit("semantic-status", semantic_state) {
+                log::warn!("could not emit updated semantic runtime status: {error}");
+            }
+
+            let (subject_state, subject_changed) =
+                observe_subject_runtime(&subject_slot, &subject_status, &gpu_provider);
+            if subject_changed && let Err(error) = app.emit("subject-status", subject_state) {
+                log::warn!("could not emit updated subject runtime status: {error}");
+            }
+
             if let Err(error) = app.emit("semantic-progress", progress) {
                 log::warn!("could not emit semantic progress: {error}");
             }
@@ -1722,6 +2179,533 @@ fn ipc_error(error: impl std::fmt::Display) -> String {
 mod tests {
     use super::*;
     use rusqlite::params;
+
+    #[test]
+    fn fresh_app_state_publishes_loading_status_without_an_active_model() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let repository = Repository::new(temp.path().join("database.sqlite3"));
+        repository.initialize().expect("initialize");
+        assert!(
+            repository
+                .active_semantic_model_key()
+                .expect("read active semantic model")
+                .is_none()
+        );
+        let mut paths = AppPaths::initialize_with_resources(
+            temp.path().join("app-data"),
+            temp.path().join("resources"),
+        )
+        .expect("initialize app paths");
+        paths.semantic_model_dir = temp.path().join("missing/places365");
+        paths.siglip2_model_dir = temp.path().join("missing/siglip2-base");
+        paths.subject_model_dir = temp.path().join("missing/picodet");
+        paths.face_model_dir = temp.path().join("missing/yunet");
+        paths.onnx_runtime_path = temp.path().join("missing/onnxruntime.dll");
+        let state = AppState::new(
+            repository,
+            paths,
+            Arc::new(crate::semantic::UnavailableClassifier::default()),
+            Arc::new(crate::subject::UnavailableSubjectClassifier::default()),
+        );
+
+        assert_eq!(current_semantic_status(&state).status, "loading");
+        assert_eq!(current_subject_status(&state).status, "loading");
+
+        let semantic_result = prepare_semantic_runtime(
+            SemanticPreparationContext {
+                paths: &state.paths,
+                repository: &state.repository,
+                classifier_slot: &state.semantic,
+                published_status: &state.semantic_status,
+                preparation: &state.semantic_preparation,
+                gpu_provider: &state.gpu_provider,
+            },
+            TopicModelKind::Siglip2Base,
+            ExecutionBackend::Cpu,
+        );
+        let subject_result = prepare_subject_runtime(
+            &state.paths,
+            &state.subject,
+            &state.subject_status,
+            &state.subject_preparation,
+            &state.gpu_provider,
+            ExecutionBackend::Cpu,
+        );
+        let semantic_error = semantic_result.expect_err("missing bundled semantic resources");
+        let subject_error = subject_result.expect_err("missing bundled subject resources");
+        let semantic_status = current_semantic_status(&state);
+        let subject_status = current_subject_status(&state);
+        assert_eq!(semantic_status.status, "error");
+        assert!(semantic_status.message.contains("SigLIP"));
+        assert_eq!(subject_status.status, "error");
+        assert!(subject_status.message.contains("主体模型"));
+        assert!(semantic_error.contains("SigLIP"));
+        assert!(subject_error.contains("PicoDet"));
+    }
+
+    #[test]
+    fn startup_preparation_is_claimed_once_and_model_loads_share_a_gate() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let repository = Repository::new(temp.path().join("database.sqlite3"));
+        repository.initialize().expect("initialize");
+        let paths = AppPaths::initialize_with_resources(
+            temp.path().join("app-data"),
+            temp.path().join("resources"),
+        )
+        .expect("initialize app paths");
+        let state = AppState::new(
+            repository,
+            paths,
+            Arc::new(crate::semantic::UnavailableClassifier::default()),
+            Arc::new(crate::subject::UnavailableSubjectClassifier::default()),
+        );
+
+        assert!(Arc::ptr_eq(
+            &state.semantic_preparation,
+            &state.subject_preparation
+        ));
+        assert!(state.claim_startup_preparation());
+        assert!(!state.claim_startup_preparation());
+    }
+
+    #[test]
+    fn directml_cpu_fallback_satisfies_repeated_prepare_request() {
+        let fallback_message = "DirectML 初始化失败，已回退 CPU：provider unavailable";
+        assert!(backend_satisfies_request(
+            Some(ExecutionBackend::Cpu),
+            ExecutionBackend::DirectMl,
+            fallback_message,
+        ));
+        assert!(backend_satisfies_request(
+            Some(ExecutionBackend::DirectMl),
+            ExecutionBackend::DirectMl,
+            "ready",
+        ));
+        assert!(!backend_satisfies_request(
+            Some(ExecutionBackend::Cpu),
+            ExecutionBackend::DirectMl,
+            "CPU 模型已就绪",
+        ));
+        assert!(!backend_satisfies_request(
+            Some(ExecutionBackend::DirectMl),
+            ExecutionBackend::Cpu,
+            fallback_message,
+        ));
+        assert!(backend_satisfies_request(
+            Some(ExecutionBackend::Cpu),
+            ExecutionBackend::DirectMl,
+            "DirectML 推理失败，已回退 CPU；后续语义任务固定使用 CPU。",
+        ));
+    }
+
+    #[test]
+    fn unsupported_so400m_profile_is_rejected_before_using_the_base_directory() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let repository = Repository::new(temp.path().join("database.sqlite3"));
+        repository.initialize().expect("initialize");
+        let mut paths = AppPaths::initialize_with_resources(
+            temp.path().join("app-data"),
+            temp.path().join("resources"),
+        )
+        .expect("initialize app paths");
+        paths.semantic_model_dir = temp.path().join("missing/places365");
+        paths.siglip2_model_dir = temp.path().join("models/siglip2-base");
+        paths.onnx_runtime_path = temp.path().join("missing/onnxruntime.dll");
+        let state = AppState::new(
+            repository,
+            paths,
+            Arc::new(crate::semantic::UnavailableClassifier::default()),
+            Arc::new(crate::subject::UnavailableSubjectClassifier::default()),
+        );
+
+        let error = prepare_semantic_runtime(
+            SemanticPreparationContext {
+                paths: &state.paths,
+                repository: &state.repository,
+                classifier_slot: &state.semantic,
+                published_status: &state.semantic_status,
+                preparation: &state.semantic_preparation,
+                gpu_provider: &state.gpu_provider,
+            },
+            TopicModelKind::Siglip2So400m14_384,
+            ExecutionBackend::Cpu,
+        )
+        .expect_err("SO400M is not bundled");
+
+        assert!(error.contains("SO400M"));
+        assert!(error.contains("不会尝试从 Base 目录"));
+        assert_eq!(current_semantic_status(&state).status, "loading");
+        assert!(
+            state
+                .repository
+                .active_semantic_model_key()
+                .expect("read active model")
+                .is_none()
+        );
+    }
+
+    struct MutableSemanticClassifier {
+        status: parking_lot::RwLock<SemanticRuntimeStatus>,
+    }
+
+    impl SemanticClassifier for MutableSemanticClassifier {
+        fn metadata(&self) -> crate::semantic::ModelMetadata {
+            self.status.read().model.clone()
+        }
+
+        fn status(&self) -> SemanticRuntimeStatus {
+            self.status.read().clone()
+        }
+
+        fn result_metadata(&self) -> crate::semantic::ModelMetadata {
+            let status = self.status.read();
+            status
+                .topic_model
+                .clone()
+                .unwrap_or_else(|| status.model.clone())
+        }
+
+        fn classify_batch(
+            &self,
+            _images: &[PathBuf],
+            _backend: ExecutionBackend,
+        ) -> Result<Vec<crate::semantic::SemanticAnalysisOutput>, crate::semantic::SemanticError>
+        {
+            Err(crate::semantic::SemanticError::ModelUnavailable)
+        }
+    }
+
+    #[test]
+    fn semantic_runtime_unavailable_is_reloaded_instead_of_reused() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let repository = Repository::new(temp.path().join("database.sqlite3"));
+        repository.initialize().expect("initialize");
+        let mut paths = AppPaths::initialize_with_resources(
+            temp.path().join("app-data"),
+            temp.path().join("resources"),
+        )
+        .expect("initialize app paths");
+        paths.semantic_model_dir = temp.path().join("missing/places365");
+        paths.siglip2_model_dir = temp.path().join("missing/siglip2-base");
+        paths.onnx_runtime_path = temp.path().join("missing/onnxruntime.dll");
+
+        let topic_metadata = default_topic_model_metadata();
+        let unavailable = SemanticRuntimeStatus {
+            status: "runtime_unavailable".into(),
+            message: "CPU runtime rebuild failed".into(),
+            model: topic_metadata.clone(),
+            topic_model: Some(topic_metadata),
+            selected_backend: Some(ExecutionBackend::Cpu),
+        };
+        let classifier = Arc::new(MutableSemanticClassifier {
+            status: parking_lot::RwLock::new(unavailable.clone()),
+        });
+        let state = AppState::new(
+            repository,
+            paths,
+            classifier,
+            Arc::new(crate::subject::UnavailableSubjectClassifier::default()),
+        );
+        *state.semantic_status.write() = unavailable;
+
+        let error = prepare_semantic_runtime(
+            SemanticPreparationContext {
+                paths: &state.paths,
+                repository: &state.repository,
+                classifier_slot: &state.semantic,
+                published_status: &state.semantic_status,
+                preparation: &state.semantic_preparation,
+                gpu_provider: &state.gpu_provider,
+            },
+            TopicModelKind::Siglip2Base,
+            ExecutionBackend::Cpu,
+        )
+        .expect_err("unavailable runtime must attempt a fresh load");
+
+        assert!(error.contains("加载失败"));
+        assert_eq!(state.semantic_status.read().status, "error");
+        assert!(state.semantic_status.read().message.contains("加载失败"));
+    }
+
+    #[test]
+    fn semantic_cpu_runtime_fallback_updates_status_provider_and_active_model() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let repository = Repository::new(temp.path().join("database.sqlite3"));
+        repository.initialize().expect("initialize");
+        let mut paths = AppPaths::initialize_with_resources(
+            temp.path().join("app-data"),
+            temp.path().join("resources"),
+        )
+        .expect("initialize app paths");
+        let model_dir = temp.path().join("models/siglip2-base");
+        std::fs::create_dir_all(&model_dir).expect("create model directory");
+        let model_path = model_dir.join(crate::semantic::SIGLIP2_MODEL_FILE);
+        let tokenizer_path = model_dir.join(crate::semantic::SIGLIP2_TOKENIZER_FILE);
+        std::fs::write(&tokenizer_path, b"test tokenizer").expect("write tokenizer");
+        paths.siglip2_model_dir = model_dir;
+        let topic_metadata = default_topic_model_metadata();
+        repository
+            .register_active_semantic_model(
+                &topic_metadata,
+                &model_path,
+                &tokenizer_path,
+                "https://huggingface.co/onnx-community/siglip2-base-patch16-224-ONNX",
+                ExecutionBackend::DirectMl,
+            )
+            .expect("register DirectML model");
+
+        let initial = SemanticRuntimeStatus {
+            status: "ready".into(),
+            message: "DirectML model ready".into(),
+            model: topic_metadata.clone(),
+            topic_model: Some(topic_metadata),
+            selected_backend: Some(ExecutionBackend::DirectMl),
+        };
+        let classifier = Arc::new(MutableSemanticClassifier {
+            status: parking_lot::RwLock::new(initial.clone()),
+        });
+        let classifier_slot: Arc<RwLock<Arc<dyn SemanticClassifier>>> =
+            Arc::new(RwLock::new(classifier.clone()));
+        let published_status = Arc::new(RwLock::new(initial));
+        let gpu_provider = Arc::new(RwLock::new(Some(crate::gpu::GpuProviderStatus {
+            id: "directml".into(),
+            state: "ready".into(),
+            message: "DirectML ready".into(),
+        })));
+        {
+            let mut runtime = classifier.status.write();
+            runtime.selected_backend = Some(ExecutionBackend::Cpu);
+            runtime.message = "CPU runtime ready".into();
+        }
+
+        let (status, changed) = observe_semantic_runtime(
+            &repository,
+            &paths,
+            &classifier_slot,
+            &published_status,
+            &gpu_provider,
+        );
+        assert!(changed);
+        assert_eq!(status.selected_backend, Some(ExecutionBackend::Cpu));
+        assert!(status.message.contains("DirectML 推理失败"));
+        assert_eq!(
+            gpu_provider
+                .read()
+                .as_ref()
+                .expect("cached provider status")
+                .state,
+            "error"
+        );
+        assert_eq!(
+            repository
+                .active_semantic_model_key()
+                .expect("read active model")
+                .expect("active model")
+                .3,
+            "cpu"
+        );
+
+        let (status_again, changed_again) = observe_semantic_runtime(
+            &repository,
+            &paths,
+            &classifier_slot,
+            &published_status,
+            &gpu_provider,
+        );
+        assert!(!changed_again);
+        assert!(status_again.message.contains("回退 CPU"));
+        assert!(backend_satisfies_request(
+            status_again.selected_backend,
+            ExecutionBackend::DirectMl,
+            &status_again.message,
+        ));
+    }
+
+    struct MutableSubjectClassifier {
+        status: parking_lot::RwLock<SubjectRuntimeStatus>,
+    }
+
+    impl SubjectClassifier for MutableSubjectClassifier {
+        fn metadata(&self) -> crate::semantic::ModelMetadata {
+            self.status.read().model.clone()
+        }
+
+        fn face_metadata(&self) -> crate::semantic::ModelMetadata {
+            self.status.read().face_model.clone()
+        }
+
+        fn status(&self) -> SubjectRuntimeStatus {
+            self.status.read().clone()
+        }
+
+        fn classify_batch(
+            &self,
+            _images: &[PathBuf],
+            _backend: ExecutionBackend,
+        ) -> Result<Vec<crate::subject::SubjectAnalysisOutput>, crate::semantic::SemanticError>
+        {
+            Err(crate::semantic::SemanticError::ModelUnavailable)
+        }
+    }
+
+    #[test]
+    fn subject_error_status_is_reloaded_instead_of_reused() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let repository = Repository::new(temp.path().join("database.sqlite3"));
+        repository.initialize().expect("initialize");
+        let mut paths = AppPaths::initialize_with_resources(
+            temp.path().join("app-data"),
+            temp.path().join("resources"),
+        )
+        .expect("initialize app paths");
+        paths.subject_model_dir = temp.path().join("missing/picodet");
+        paths.face_model_dir = temp.path().join("missing/yunet");
+        paths.onnx_runtime_path = temp.path().join("missing/onnxruntime.dll");
+
+        let metadata = default_topic_model_metadata();
+        let failed = SubjectRuntimeStatus {
+            status: "error".into(),
+            message: "previous subject load failed".into(),
+            model: metadata.clone(),
+            face_model: metadata,
+            selected_backend: Some(ExecutionBackend::Cpu),
+        };
+        let classifier = Arc::new(MutableSubjectClassifier {
+            status: parking_lot::RwLock::new(failed.clone()),
+        });
+        let state = AppState::new(
+            repository,
+            paths,
+            Arc::new(crate::semantic::UnavailableClassifier::default()),
+            classifier,
+        );
+        *state.subject_status.write() = failed;
+
+        let error = prepare_subject_runtime(
+            &state.paths,
+            &state.subject,
+            &state.subject_status,
+            &state.subject_preparation,
+            &state.gpu_provider,
+            ExecutionBackend::Cpu,
+        )
+        .expect_err("failed subject runtime must attempt a fresh load");
+
+        assert!(error.contains("主体模型加载失败"));
+        assert!(error.contains("PicoDet"));
+        assert_eq!(state.subject_status.read().status, "error");
+    }
+
+    #[test]
+    fn subject_status_query_publishes_live_cpu_fallback_and_gpu_failure() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let repository = Repository::new(temp.path().join("database.sqlite3"));
+        repository.initialize().expect("initialize");
+        let paths = AppPaths::initialize_with_resources(
+            temp.path().join("app-data"),
+            temp.path().join("resources"),
+        )
+        .expect("initialize app paths");
+        let metadata = default_topic_model_metadata();
+        let initial = SubjectRuntimeStatus {
+            status: "ready".into(),
+            message: "DirectML subject ready".into(),
+            model: metadata.clone(),
+            face_model: metadata,
+            selected_backend: Some(ExecutionBackend::DirectMl),
+        };
+        let classifier = Arc::new(MutableSubjectClassifier {
+            status: parking_lot::RwLock::new(initial.clone()),
+        });
+        let state = AppState::new(
+            repository,
+            paths,
+            Arc::new(crate::semantic::UnavailableClassifier::default()),
+            classifier.clone(),
+        );
+        *state.subject_status.write() = initial;
+        let model = classifier.metadata();
+        let face_model = classifier.face_metadata();
+        *classifier.status.write() = SubjectRuntimeStatus {
+            status: "ready".into(),
+            message: "DirectML 执行失败（test），已一次性回退 CPU。".into(),
+            model,
+            face_model,
+            selected_backend: Some(ExecutionBackend::Cpu),
+        };
+
+        let status = current_subject_status(&state);
+        assert_eq!(status.selected_backend, Some(ExecutionBackend::Cpu));
+        assert!(status.message.contains("回退 CPU"));
+        assert_eq!(
+            state
+                .gpu_provider
+                .read()
+                .as_ref()
+                .expect("cached provider status")
+                .state,
+            "error"
+        );
+    }
+
+    #[test]
+    fn pending_semantic_jobs_resume_only_with_a_ready_topic_model() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let repository = Repository::new(temp.path().join("database.sqlite3"));
+        repository.initialize().expect("initialize");
+        repository
+            .open_for_tests()
+            .expect("open database")
+            .execute(
+                "INSERT INTO analysis_jobs(
+                    id, job_type, status, progress_current, progress_total, created_at, updated_at
+                 ) VALUES(?1, 'semantic_classification', 'queued', 0, 1, ?2, ?2)",
+                params!["pending-recovery", "2026-09-23T00:00:00Z"],
+            )
+            .expect("insert recoverable job");
+
+        let mut status = crate::semantic::UnavailableClassifier::default().status();
+        status.model.installed = true;
+        status.topic_model = Some(crate::semantic::default_topic_model_metadata());
+        status.selected_backend = Some(ExecutionBackend::Cpu);
+
+        let mut resumed = false;
+        status.status = "loading".into();
+        assert!(!resume_pending_semantic_jobs_if_ready(&status, || {
+            resumed = true
+        }));
+        assert!(!resumed, "loading models must leave jobs queued");
+
+        status.status = "runtime_unavailable".into();
+        assert!(!resume_pending_semantic_jobs_if_ready(&status, || {
+            resumed = true
+        }));
+        assert!(!resumed, "failed runtimes must leave jobs queued");
+        let persisted_status: String = repository
+            .open_for_tests()
+            .expect("open database")
+            .query_row(
+                "SELECT status FROM analysis_jobs WHERE id=?1",
+                ["pending-recovery"],
+                |row| row.get(0),
+            )
+            .expect("read queued job status");
+        assert_eq!(persisted_status, "queued");
+
+        status.status = "ready".into();
+        status.topic_model = None;
+        assert!(!resume_pending_semantic_jobs_if_ready(&status, || {
+            resumed = true
+        }));
+        assert!(
+            !resumed,
+            "a ready Places365 shell is insufficient without topics"
+        );
+
+        status.topic_model = Some(crate::semantic::default_topic_model_metadata());
+        assert!(resume_pending_semantic_jobs_if_ready(&status, || resumed = true));
+        assert!(resumed, "queued jobs resume after the topic model is ready");
+    }
 
     #[test]
     fn persisted_terminal_semantic_job_rejects_registry_absent_cancel() {

@@ -5,12 +5,13 @@ use ort::session::Session;
 use ort::value::Tensor;
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 use crate::semantic::{ExecutionBackend, ModelMetadata, SemanticError, SemanticLabelDescriptor};
 
 pub const MODEL_NAME: &str = "PicoDet-S-COCO";
 pub const MODEL_VERSION: &str = "onnx-2026-08-10";
-pub const ANALYSIS_VERSION: &str = "photo-organizer-subject-picodet-yunet-v2";
+pub const ANALYSIS_VERSION: &str = "photo-organizer-subject-picodet-yunet-v3";
 pub const TAXONOMY_VERSION: &str = "photo-organizer-subject-tags-v4";
 pub const MODEL_FILE: &str = "picodet_s_320_lcnet_postprocessed.onnx";
 pub const LABELS_FILE: &str = "coco80.txt";
@@ -27,6 +28,10 @@ const FACE_IMAGE_SIZE: usize = 640;
 const DETECTION_SCORE_THRESHOLD: f32 = 0.40;
 const PERSON_SCORE_THRESHOLD: f32 = 0.45;
 const FACE_SCORE_THRESHOLD: f32 = 0.65;
+const MAX_PERSON_CROPS: usize = 4;
+const PERSON_CROP_CACHE_VERSION: &str = "person-crop-v2";
+const PERSON_CROP_MARGIN_RATIO: f32 = 0.12;
+const MIN_PERSON_CROP_DIMENSION: u32 = 24;
 const COCO_LABEL_COUNT: usize = 80;
 const YUNET_STRIDES: [usize; 3] = [8, 16, 32];
 const YUNET_OUTPUT_NAMES: [&str; 12] = [
@@ -54,6 +59,14 @@ pub struct SubjectPrediction {
 #[serde(rename_all = "camelCase")]
 pub struct SubjectAnalysisOutput {
     pub predictions: Vec<SubjectPrediction>,
+    #[serde(skip)]
+    pub(crate) person_crops: Vec<PersonCrop>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct PersonCrop {
+    pub(crate) path: PathBuf,
+    pub(crate) subject_score: f32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -297,6 +310,7 @@ pub struct SubjectModel {
     face_detector: Option<Mutex<Session>>,
     face_input_name: Option<String>,
     face_output_names: Option<Vec<String>>,
+    face_status_detail: Option<String>,
     model_size_bytes: u64,
     face_model_size_bytes: Option<u64>,
     detector_model_path: PathBuf,
@@ -352,29 +366,38 @@ impl SubjectModel {
             validate_picodet_contract(&detector)?;
 
         let face_model_path = face_model_dir.join(FACE_MODEL_FILE);
-        let (face_detector, face_input_name, face_output_names, face_model_size_bytes) =
-            match crate::semantic::verify_sha256(&face_model_path, FACE_MODEL_SHA256)
-                .and_then(|_| create_session(&face_model_path, "YuNet", backend))
-                .and_then(|session| {
+        let face_load = crate::semantic::verify_sha256(&face_model_path, FACE_MODEL_SHA256)
+            .and_then(|_| {
+                load_face_session_with_fallback(backend, |face_backend| {
+                    let session = create_session(&face_model_path, "YuNet", face_backend)?;
                     let (input, outputs) = validate_yunet_contract(&session)?;
                     Ok((session, input, outputs))
-                }) {
-                Ok((session, input, outputs)) => {
-                    let size = std::fs::metadata(&face_model_path)
-                        .map_err(|error| SemanticError::Inference(error.to_string()))?
-                        .len();
-                    (
-                        Some(Mutex::new(session)),
-                        Some(input),
-                        Some(outputs),
-                        Some(size),
-                    )
-                }
-                Err(error) => {
-                    log::warn!("YuNet face helper unavailable: {error}");
-                    (None, None, None, None)
-                }
-            };
+                })
+            });
+        let (
+            face_detector,
+            face_input_name,
+            face_output_names,
+            face_model_size_bytes,
+            face_status_detail,
+        ) = match face_load {
+            Ok(((session, input, outputs), _face_backend, detail)) => {
+                let size = std::fs::metadata(&face_model_path)
+                    .map_err(|error| SemanticError::Inference(error.to_string()))?
+                    .len();
+                (
+                    Some(Mutex::new(session)),
+                    Some(input),
+                    Some(outputs),
+                    Some(size),
+                    detail,
+                )
+            }
+            Err(error) => {
+                log::warn!("YuNet face helper unavailable: {error}");
+                (None, None, None, None, Some(error.to_string()))
+            }
+        };
 
         let model_size_bytes = std::fs::metadata(&model_path)
             .map_err(|error| SemanticError::Inference(error.to_string()))?
@@ -389,6 +412,7 @@ impl SubjectModel {
             face_detector,
             face_input_name,
             face_output_names,
+            face_status_detail,
             model_size_bytes,
             face_model_size_bytes,
             detector_model_path: model_path,
@@ -534,7 +558,10 @@ impl SubjectModel {
                 }
                 _ => 0.0,
             };
-            results.push(aggregate_subjects(&detections, face_score));
+            let mut output = aggregate_subjects(&detections, face_score);
+            output.person_crops =
+                build_person_crops(&rgb, path, &distinct_person_detections(&detections));
+            results.push(output);
         }
         Ok(results)
     }
@@ -562,7 +589,7 @@ impl SubjectClassifier for SubjectModel {
             )
         };
         let backend_state = self.backend_state.lock().clone();
-        let (status, message) = match &backend_state {
+        let (status, mut message) = match &backend_state {
             SubjectBackendState::Active(_) => (base_status, base_message.to_owned()),
             SubjectBackendState::SwitchingToCpu { reason } => (
                 base_status,
@@ -581,6 +608,9 @@ impl SubjectClassifier for SubjectModel {
                 ),
             ),
         };
+        if let Some(detail) = &self.face_status_detail {
+            message.push_str(&format!(" YuNet 状态：{detail}"));
+        }
         SubjectRuntimeStatus {
             status: status.into(),
             message,
@@ -611,6 +641,31 @@ impl SubjectClassifier for SubjectModel {
             || self.rebuild_cpu_sessions(),
             || self.classify_batch_once(images),
         )
+    }
+}
+
+fn load_face_session_with_fallback<T>(
+    backend: ExecutionBackend,
+    mut load: impl FnMut(ExecutionBackend) -> Result<T, SemanticError>,
+) -> Result<(T, ExecutionBackend, Option<String>), SemanticError> {
+    if backend != ExecutionBackend::DirectMl {
+        return load(backend).map(|session| (session, backend, None));
+    }
+
+    match load(ExecutionBackend::DirectMl) {
+        Ok(session) => Ok((session, ExecutionBackend::DirectMl, None)),
+        Err(directml_error) => match load(ExecutionBackend::Cpu) {
+            Ok(session) => Ok((
+                session,
+                ExecutionBackend::Cpu,
+                Some(format!(
+                    "DirectML 初始化失败，已单独回退 CPU：{directml_error}"
+                )),
+            )),
+            Err(cpu_error) => Err(SemanticError::Inference(format!(
+                "YuNet DirectML 初始化失败：{directml_error}；YuNet CPU 回退也失败：{cpu_error}"
+            ))),
+        },
     }
 }
 
@@ -865,22 +920,10 @@ fn checked_yunet_blob<'a>(
 
 fn aggregate_subjects(detections: &[Detection], face_score: f32) -> SubjectAnalysisOutput {
     let mut class_scores = [0.0_f32; COCO_LABEL_COUNT];
-    let mut person_detections = Vec::new();
     for detection in detections {
         class_scores[detection.class_id] = class_scores[detection.class_id].max(detection.score);
-        if detection.class_id == 0 && detection.score >= PERSON_SCORE_THRESHOLD {
-            person_detections.push(*detection);
-        }
     }
-    person_detections.sort_by(|left, right| right.score.total_cmp(&left.score));
-    let mut distinct_persons = Vec::with_capacity(person_detections.len());
-    for detection in person_detections {
-        if distinct_persons.iter().all(|kept: &Detection| {
-            bbox_iou(&kept.bbox, &detection.bbox) < PERSON_DUPLICATE_IOU_THRESHOLD
-        }) {
-            distinct_persons.push(detection);
-        }
-    }
+    let distinct_persons = distinct_person_detections(detections);
 
     let mut predictions = Vec::new();
     match distinct_persons.as_slice() {
@@ -911,7 +954,150 @@ fn aggregate_subjects(detections: &[Detection], face_score: f32) -> SubjectAnaly
     if let Some(score) = max_for_classes(&class_scores, PLANT_CLASSES) {
         predictions.push(prediction("plant", score));
     }
-    SubjectAnalysisOutput { predictions }
+    SubjectAnalysisOutput {
+        predictions,
+        person_crops: Vec::new(),
+    }
+}
+
+fn distinct_person_detections(detections: &[Detection]) -> Vec<Detection> {
+    let mut person_detections = detections
+        .iter()
+        .filter(|detection| detection.class_id == 0 && detection.score >= PERSON_SCORE_THRESHOLD)
+        .copied()
+        .collect::<Vec<_>>();
+    person_detections.sort_by(|left, right| right.score.total_cmp(&left.score));
+    let mut distinct_persons = Vec::with_capacity(person_detections.len());
+    for detection in person_detections {
+        if distinct_persons.iter().all(|kept: &Detection| {
+            bbox_iou(&kept.bbox, &detection.bbox) < PERSON_DUPLICATE_IOU_THRESHOLD
+        }) {
+            distinct_persons.push(detection);
+        }
+    }
+    distinct_persons
+}
+
+fn build_person_crops(
+    image: &image::RgbImage,
+    source_path: &Path,
+    detections: &[Detection],
+) -> Vec<PersonCrop> {
+    if image.width() == 0
+        || image.height() == 0
+        || !crate::imaging::is_analysis_thumbnail_path(source_path)
+    {
+        return Vec::new();
+    }
+    let Some(parent) = source_path.parent() else {
+        return Vec::new();
+    };
+    let Some(stem) = source_path.file_stem().and_then(|value| value.to_str()) else {
+        return Vec::new();
+    };
+    detections
+        .iter()
+        .take(MAX_PERSON_CROPS)
+        .enumerate()
+        .filter_map(|(index, detection)| {
+            let (left, top, right, bottom) =
+                person_crop_bounds(&detection.bbox, image.width(), image.height())?;
+            let width = right.saturating_sub(left);
+            let height = bottom.saturating_sub(top);
+            if width < MIN_PERSON_CROP_DIMENSION || height < MIN_PERSON_CROP_DIMENSION {
+                return None;
+            }
+            let crop = image::imageops::crop_imm(image, left, top, width, height).to_image();
+            let cache_key = person_crop_cache_key(
+                detection,
+                index,
+                image.width(),
+                image.height(),
+                (left, top, right, bottom),
+            );
+            let path = parent.join(format!(
+                "{stem}-person-crop-{index}-{cache_key}-{}.jpg",
+                crate::imaging::THUMBNAIL_SPEC
+            ));
+            if let Err(error) = crate::imaging::write_owned_thumbnail_once(&crop, &path) {
+                log::warn!(
+                    "could not write bounded person crop {}: {error}",
+                    path.display()
+                );
+                return None;
+            }
+            Some(PersonCrop {
+                path,
+                subject_score: detection.score,
+            })
+        })
+        .collect()
+}
+
+fn person_crop_cache_key(
+    detection: &Detection,
+    index: usize,
+    image_width: u32,
+    image_height: u32,
+    bounds: (u32, u32, u32, u32),
+) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(PERSON_CROP_CACHE_VERSION.as_bytes());
+    hasher.update(crate::imaging::THUMBNAIL_SPEC.as_bytes());
+    hasher.update((MAX_PERSON_CROPS as u64).to_le_bytes());
+    hasher.update(PERSON_CROP_MARGIN_RATIO.to_bits().to_le_bytes());
+    hasher.update(MIN_PERSON_CROP_DIMENSION.to_le_bytes());
+    hasher.update((PICO_IMAGE_SIZE as u64).to_le_bytes());
+    hasher.update((index as u64).to_le_bytes());
+    hasher.update(image_width.to_le_bytes());
+    hasher.update(image_height.to_le_bytes());
+    for coordinate in detection.bbox {
+        hasher.update(coordinate.to_bits().to_le_bytes());
+    }
+    for bound in [bounds.0, bounds.1, bounds.2, bounds.3] {
+        hasher.update(bound.to_le_bytes());
+    }
+    format!("{:x}", hasher.finalize())
+}
+
+fn person_crop_bounds(
+    bbox: &[f32; 4],
+    image_width: u32,
+    image_height: u32,
+) -> Option<(u32, u32, u32, u32)> {
+    let normalized = bbox.iter().all(|value| *value >= -1.0 && *value <= 1.5);
+    let scale_x = if normalized {
+        image_width as f32
+    } else {
+        image_width as f32 / PICO_IMAGE_SIZE as f32
+    };
+    let scale_y = if normalized {
+        image_height as f32
+    } else {
+        image_height as f32 / PICO_IMAGE_SIZE as f32
+    };
+    let mut left = bbox[0] * scale_x;
+    let mut top = bbox[1] * scale_y;
+    let mut right = bbox[2] * scale_x;
+    let mut bottom = bbox[3] * scale_y;
+    if [left, top, right, bottom]
+        .iter()
+        .any(|value| !value.is_finite())
+        || right <= left
+        || bottom <= top
+    {
+        return None;
+    }
+    let margin = (right - left).max(bottom - top) * PERSON_CROP_MARGIN_RATIO;
+    left = (left - margin).clamp(0.0, image_width as f32);
+    top = (top - margin).clamp(0.0, image_height as f32);
+    right = (right + margin).clamp(0.0, image_width as f32);
+    bottom = (bottom + margin).clamp(0.0, image_height as f32);
+    let left = left.floor() as u32;
+    let top = top.floor() as u32;
+    let right = right.ceil().min(image_width as f32) as u32;
+    let bottom = bottom.ceil().min(image_height as f32) as u32;
+    (right > left && bottom > top).then_some((left, top, right, bottom))
 }
 
 fn bbox_iou(left: &[f32; 4], right: &[f32; 4]) -> f32 {
@@ -957,6 +1143,50 @@ fn prediction(label_id: &str, similarity: f32) -> SubjectPrediction {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn yunet_directml_initialization_failure_loads_cpu_and_reports_fallback() {
+        let mut attempted_backends = Vec::new();
+        let (loaded_backend, selected_backend, detail) =
+            load_face_session_with_fallback(ExecutionBackend::DirectMl, |backend| {
+                attempted_backends.push(backend);
+                if backend == ExecutionBackend::DirectMl {
+                    Err(SemanticError::Inference(
+                        "provider initialization failed".into(),
+                    ))
+                } else {
+                    Ok("CPU YuNet")
+                }
+            })
+            .expect("CPU YuNet fallback");
+
+        assert_eq!(loaded_backend, "CPU YuNet");
+        assert_eq!(selected_backend, ExecutionBackend::Cpu);
+        assert_eq!(
+            attempted_backends,
+            vec![ExecutionBackend::DirectMl, ExecutionBackend::Cpu]
+        );
+        assert!(
+            detail
+                .expect("fallback detail")
+                .contains("provider initialization failed")
+        );
+    }
+
+    #[test]
+    fn yunet_reports_cpu_fallback_failure_instead_of_hiding_directml_error() {
+        let error = load_face_session_with_fallback::<()>(ExecutionBackend::DirectMl, |backend| {
+            Err(SemanticError::Inference(match backend {
+                ExecutionBackend::DirectMl => "DirectML provider failure".into(),
+                _ => "CPU contract failure".into(),
+            }))
+        })
+        .expect_err("both YuNet backends failed");
+
+        let message = error.to_string();
+        assert!(message.contains("DirectML provider failure"));
+        assert!(message.contains("CPU contract failure"));
+    }
 
     #[test]
     fn subject_catalog_is_non_primary_and_chinese() {
@@ -1192,6 +1422,29 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["single_person"]
         );
+    }
+
+    #[test]
+    fn person_crop_cache_changes_with_detection_box_and_reuses_identical_crop() {
+        let temp = tempfile::tempdir().expect("crop cache directory");
+        let source_path = temp.path().join("asset-grid-640-v1.jpg");
+        let image = image::RgbImage::from_fn(180, 160, |x, y| {
+            image::Rgb([x as u8, y as u8, (x.wrapping_add(y)) as u8])
+        });
+        let first_detection = detection(0, 0.91, [0.10, 0.10, 0.45, 0.90]);
+        let changed_detection = detection(0, 0.91, [0.55, 0.15, 0.95, 0.80]);
+
+        let first = build_person_crops(&image, &source_path, &[first_detection]);
+        let repeated = build_person_crops(&image, &source_path, &[first_detection]);
+        let changed = build_person_crops(&image, &source_path, &[changed_detection]);
+
+        assert_eq!(first.len(), 1);
+        assert_eq!(repeated.len(), 1);
+        assert_eq!(changed.len(), 1);
+        assert_eq!(first[0].path, repeated[0].path);
+        assert_ne!(first[0].path, changed[0].path);
+        assert!(first[0].path.is_file());
+        assert!(changed[0].path.is_file());
     }
 
     #[test]
