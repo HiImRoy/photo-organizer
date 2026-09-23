@@ -1,15 +1,16 @@
 export const DEFAULT_COLOR_HUE_STRICTNESS = 0.5;
 
 const MIN_COLOR_HUE_MATCH_RATIO = 0.08;
-const MAX_COLOR_HUE_MATCH_RATIO = 0.75;
+const MAX_COLOR_HUE_MATCH_RATIO = 0.45;
+const DOMINANT_COLOR_MATCH_STRICTNESS = 0.8;
 
 export function normalizeColorHueStrictness(value: number) {
   return Number.isFinite(value) ? Math.max(0, Math.min(1, value)) : DEFAULT_COLOR_HUE_STRICTNESS;
 }
 
 /**
- * Convert the user-facing strictness into the minimum share of chromatic hue
- * samples that must fall inside the selected hue range.
+ * Convert strictness into the minimum share of the whole image covered by the
+ * selected hue range. The backend uses this same 8%–45% contract.
  */
 export function colorHueMatchThreshold(strictness: number) {
   const normalized = normalizeColorHueStrictness(strictness);
@@ -20,6 +21,17 @@ export function colorHueMatchThreshold(strictness: number) {
 
 export function colorHueMatchThresholdPercent(strictness: number) {
   return Math.round(colorHueMatchThreshold(strictness) * 100);
+}
+
+export function colorHueRequiresDominantMatch(strictness: number) {
+  return normalizeColorHueStrictness(strictness) >= DOMINANT_COLOR_MATCH_STRICTNESS;
+}
+
+export function colorHueFilterSummary(strictness: number) {
+  const areaRequirement = `全图目标色面积 ≥ ${colorHueMatchThresholdPercent(strictness)}%`;
+  return colorHueRequiresDominantMatch(strictness)
+    ? `${areaRequirement}；且主色候选须与所选色相一致`
+    : areaRequirement;
 }
 
 export function colorHueStrictnessLabel(strictness: number) {

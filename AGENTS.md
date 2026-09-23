@@ -169,7 +169,7 @@ A task is complete only when:
 
 - For all subsequent code-development work and trivial execution tasks, the
   main agent must delegate the actual implementation or execution to a
-  subagent configured with model `gpt-5.6-luna` and `reasoning_effort=max`.
+  subagent configured with model `gpt-6-luna` and `reasoning_effort=max`.
 - The main agent remains responsible for planning, scope and boundary
   definition, review, integration, and final acceptance/verification.
   Delegation does not transfer accountability.

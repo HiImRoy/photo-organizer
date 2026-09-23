@@ -89,7 +89,7 @@ import { Thumbnail } from "./components/Thumbnail";
 import { gridThumbnailProfileForColumns } from "./components/thumbnailSource";
 import { WorkflowWorkspace, type WorkflowTool } from "./components/WorkflowWorkspace";
 import { usePreviewController, type PreviewController } from "./components/usePreviewController";
-import { colorHueMatchThresholdPercent } from "./colorFilter";
+import { colorHueFilterSummary } from "./colorFilter";
 import { formatDate } from "./format";
 import {
   DEFAULT_APP_SETTINGS,
@@ -3582,7 +3582,7 @@ function buildFilterConditions(
     conditions.push({
       id: "color-hue-range",
       label: "颜色范围",
-      value: `${formatHue(start)}° — ${formatHue(end)}°（宽度 ${formatHue(filter.colorHueWidth)}°；匹配 ≥ ${colorHueMatchThresholdPercent(filter.colorHueStrictness)}%）`,
+      value: `${formatHue(start)}° — ${formatHue(end)}°（宽度 ${formatHue(filter.colorHueWidth)}°；${colorHueFilterSummary(filter.colorHueStrictness)}）`,
       remove: (current) => ({ ...current, colorHueCenter: null, colorHueWidth: null }),
     });
   }

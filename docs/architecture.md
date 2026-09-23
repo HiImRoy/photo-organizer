@@ -34,7 +34,7 @@ User-selected source directory: read-only during scan and analysis
 - `src/`：React 工作区、类型化 Tauri client、确定性视觉夹具和组件测试。
 - `src-tauri/src/db.rs`：连接、事务、迁移、任务持久化、参数化筛选和分组统计。
 - `scanner.rs`：只读目录遍历、fingerprint、增量判定、基础分析和缺失标记。
-- `imaging.rs`：EXIF/指纹边界、受控缩略图提取、方向处理、应用私有缩略图、连续影调/色彩特征；优先使用 JPEG EXIF 内嵌预览，Windows 首次导入通过 WIC 直接请求有界输出，已有当前缓存时只从缩略图重算特征；多强调色使用缩略图上的 OKLab 加权聚类，综合面积、局部对比度、色度和空间连续性输出 `coveragePalette`/`prominentPalette`，面积主色候选负责旧主色字段与颜色筛选，强调色候选只用于视觉展示。完整源图像素不会进入导入分析链路。
+- `imaging.rs`：EXIF/指纹边界、受控缩略图提取、方向处理、应用私有缩略图、连续影调/色彩特征；优先使用 JPEG EXIF 内嵌预览，Windows 首次导入通过 WIC 直接请求有界输出，已有当前缓存时只从缩略图重算特征；多强调色使用缩略图上的 OKLab 加权聚类，综合面积、局部对比度、色度和空间连续性输出 `coveragePalette`/`prominentPalette`。面积候选负责兼容主色和颜色范围筛选的主要证据，强调色在颜色范围筛选中仅作有限辅助，并供 UI 展示；自动主色类别仍只来自面积候选。完整源图像素不会进入导入分析链路。
 - `semantic.rs`：Places365 环境与可观察场景题材证据、唯一的 SigLIP 2 摄影题材候选、ONNX Runtime、catalog 与 benchmark；模型名称、版本、分析版本和哈希随结果保存，不会把一个模型的结果伪装成另一个模型。
 - `subject.rs`：PicoDet/COCO 主体检测、YuNet 多尺度输出解码、中文主体标签聚合与模型状态。
 - `semantic_tasks.rs`：单 worker 的有界批处理、缩略图路径门禁、场景/主体双模型持久化、单项失败隔离、进度和终态。

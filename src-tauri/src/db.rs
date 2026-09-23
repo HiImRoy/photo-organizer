@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use chrono::{SecondsFormat, Utc};
+use rusqlite::functions::FunctionFlags;
 use rusqlite::types::Value;
 use rusqlite::{Connection, OptionalExtension, Transaction, params, params_from_iter};
 use sha2::{Digest, Sha256};
@@ -312,6 +313,37 @@ impl Repository {
         connection.pragma_update(None, "foreign_keys", "ON")?;
         connection.pragma_update(None, "journal_mode", "WAL")?;
         connection.pragma_update(None, "synchronous", "NORMAL")?;
+        connection.create_scalar_function(
+            "color_hue_palette_matches",
+            8,
+            FunctionFlags::SQLITE_DETERMINISTIC,
+            |context| {
+                let palette_json = context.get::<Option<String>>(0).ok().flatten();
+                let hue_histogram_json = context.get::<Option<String>>(1).ok().flatten();
+                let dominant_color_rgb = context.get::<Option<String>>(2).ok().flatten();
+                let dominant_color_coverage = context.get::<Option<f64>>(3).ok().flatten();
+                let dominant_color_category = context.get::<Option<String>>(4).ok().flatten();
+                let center = context.get::<Option<f64>>(5).ok().flatten();
+                let width = context.get::<Option<f64>>(6).ok().flatten();
+                let strictness = context.get::<Option<f64>>(7).ok().flatten();
+                Ok(
+                    if color_hue_palette_matches(
+                        palette_json.as_deref(),
+                        hue_histogram_json.as_deref(),
+                        dominant_color_rgb.as_deref(),
+                        dominant_color_coverage,
+                        dominant_color_category.as_deref(),
+                        center,
+                        width,
+                        strictness,
+                    ) {
+                        1_i64
+                    } else {
+                        0_i64
+                    },
+                )
+            },
+        )?;
         Ok(connection)
     }
 
@@ -3612,40 +3644,47 @@ fn add_hue_range_filter(
     let (Some(center), Some(width)) = (center, width) else {
         return;
     };
-    let bins = hue_bins_for_range(center, width);
-    if bins.is_empty() {
+    if !center.is_finite() || !width.is_finite() {
         return;
     }
 
-    let placeholders = placeholders(bins.len());
-    clauses.push(format!(
-        "(SELECT COALESCE(SUM(CASE WHEN CAST(selected_hue.key AS INTEGER) IN ({placeholders})\n                                  THEN CAST(selected_hue.value AS REAL) ELSE 0 END), 0.0)\n          FROM json_each(COALESCE(cf.hue_histogram_json, '[]')) selected_hue)\n         >= ? *\n        (SELECT COALESCE(SUM(CAST(all_hue.value AS REAL)), 0.0)\n          FROM json_each(COALESCE(cf.hue_histogram_json, '[]')) all_hue)\n       AND (SELECT COALESCE(SUM(CAST(non_empty_hue.value AS REAL)), 0.0)\n          FROM json_each(COALESCE(cf.hue_histogram_json, '[]')) non_empty_hue) > 0"
+    clauses.push(
+        "color_hue_palette_matches(
+            cf.dominant_colors_json, cf.hue_histogram_json,
+            cf.dominant_color_rgb, cf.dominant_color_coverage,
+            cf.dominant_color_category,
+            ?, ?, ?
+         )=1"
+        .into(),
+    );
+    values.push(Value::Real(center));
+    values.push(Value::Real(width));
+    values.push(Value::Real(
+        strictness.unwrap_or(DEFAULT_COLOR_HUE_STRICTNESS),
     ));
-    values.extend(bins.into_iter().map(|bin| Value::Integer(bin as i64)));
-    values.push(Value::Real(color_hue_match_threshold(strictness)));
 }
 
 const DEFAULT_COLOR_HUE_STRICTNESS: f64 = 0.5;
-const MIN_COLOR_HUE_MATCH_RATIO: f64 = 0.08;
-const MAX_COLOR_HUE_MATCH_RATIO: f64 = 0.75;
+const MIN_COLOR_HUE_AREA: f64 = 0.08;
+const MAX_COLOR_HUE_AREA: f64 = 0.45;
+const MAX_COLOR_HUE_ANGLE_TOLERANCE: f64 = 20.0;
+const MIN_COLOR_HUE_ANGLE_TOLERANCE: f64 = 2.0;
+const MAX_ACCENT_HUE_AREA_ASSIST_RATIO: f64 = 0.25;
+const MAX_ACCENT_HUE_AREA_ASSIST: f64 = 0.04;
+const MAX_PALETTE_JSON_BYTES: usize = 16 * 1024;
+const LEGACY_DOMINANT_COLOR_AREA_FACTOR: f64 = 0.25;
+const STRICT_COLOR_HUE_MAIN_THRESHOLD: f64 = 0.8;
 
 fn color_hue_match_threshold(strictness: Option<f64>) -> f64 {
-    let normalized = strictness
-        .unwrap_or(DEFAULT_COLOR_HUE_STRICTNESS)
-        .clamp(0.0, 1.0);
-    MIN_COLOR_HUE_MATCH_RATIO + (MAX_COLOR_HUE_MATCH_RATIO - MIN_COLOR_HUE_MATCH_RATIO) * normalized
+    let normalized = normalized_color_hue_strictness(strictness);
+    MIN_COLOR_HUE_AREA + (MAX_COLOR_HUE_AREA - MIN_COLOR_HUE_AREA) * normalized
 }
 
-fn hue_bins_for_range(center: f64, width: f64) -> Vec<usize> {
-    let center = normalize_hue(center);
-    let width = width.clamp(15.0, 330.0);
-    let half_width = width / 2.0;
-    (0..12)
-        .filter(|bin| {
-            let bin_center = *bin as f64 * 30.0 + 15.0;
-            circular_distance(center, bin_center) <= half_width + 15.0
-        })
-        .collect()
+fn normalized_color_hue_strictness(strictness: Option<f64>) -> f64 {
+    strictness
+        .filter(|value| value.is_finite())
+        .unwrap_or(DEFAULT_COLOR_HUE_STRICTNESS)
+        .clamp(0.0, 1.0)
 }
 
 fn normalize_hue(value: f64) -> f64 {
@@ -3655,6 +3694,369 @@ fn normalize_hue(value: f64) -> f64 {
 fn circular_distance(left: f64, right: f64) -> f64 {
     let difference = (left - right).abs().rem_euclid(360.0);
     difference.min(360.0 - difference)
+}
+
+#[derive(Clone, Copy, Debug)]
+struct HuePaletteCandidate {
+    rgb: [u8; 3],
+    is_chromatic: bool,
+    rank: u8,
+    area_coverage: f64,
+    saliency_coverage: f64,
+    local_contrast: f64,
+    chroma: f64,
+    spatial_coherence: f64,
+}
+
+#[allow(clippy::too_many_arguments)]
+fn color_hue_palette_matches(
+    palette_json: Option<&str>,
+    hue_histogram_json: Option<&str>,
+    dominant_color_rgb: Option<&str>,
+    dominant_color_coverage: Option<f64>,
+    dominant_color_category: Option<&str>,
+    center: Option<f64>,
+    width: Option<f64>,
+    strictness: Option<f64>,
+) -> bool {
+    let (Some(center), Some(width)) = (center, width) else {
+        return false;
+    };
+    if !center.is_finite() || !width.is_finite() {
+        return false;
+    }
+
+    let strictness = normalized_color_hue_strictness(strictness);
+    let center = normalize_hue(center);
+    let half_width = width.clamp(15.0, 330.0) / 2.0;
+    let angle_tolerance = MAX_COLOR_HUE_ANGLE_TOLERANCE
+        + (MIN_COLOR_HUE_ANGLE_TOLERANCE - MAX_COLOR_HUE_ANGLE_TOLERANCE) * strictness;
+    let allowed_distance = half_width + angle_tolerance;
+    let area_threshold = color_hue_match_threshold(Some(strictness));
+
+    let parsed = parse_palette_json(palette_json);
+    let mut coverage_candidates = parsed
+        .as_ref()
+        .map(|value| palette_candidates(value, "coveragePalette"))
+        .unwrap_or_default();
+    let prominent_candidates = parsed
+        .as_ref()
+        .map(|value| palette_candidates(value, "prominentPalette"))
+        .unwrap_or_default();
+
+    if coverage_candidates.is_empty()
+        && let Some(value) = parsed.as_ref()
+    {
+        let legacy_values = match value {
+            serde_json::Value::Array(values) => Some(values),
+            serde_json::Value::Object(object) => object
+                .get("colors")
+                .or_else(|| object.get("palette"))
+                .and_then(serde_json::Value::as_array),
+            _ => None,
+        };
+        if let Some(values) = legacy_values {
+            coverage_candidates = deduplicate_palette_candidates(
+                values
+                    .iter()
+                    .take(16)
+                    .filter_map(|candidate| palette_candidate(candidate, None))
+                    .collect(),
+            );
+        }
+    }
+
+    let coverage_candidates = deduplicate_palette_candidates(coverage_candidates);
+    let mut matched_area = 0.0;
+    let mut matched_area_color_count = 0;
+    for candidate in &coverage_candidates {
+        if candidate.is_chromatic
+            && color_hue(candidate.rgb)
+                .is_some_and(|hue| circular_distance(center, hue) <= allowed_distance)
+        {
+            matched_area += candidate.area_coverage;
+            matched_area_color_count += 1;
+        }
+    }
+    matched_area = matched_area.clamp(0.0, 1.0);
+
+    let main_color_matches = coverage_candidates.first().is_some_and(|candidate| {
+        candidate.is_chromatic
+            && color_hue(candidate.rgb)
+                .is_some_and(|hue| circular_distance(center, hue) <= allowed_distance)
+    });
+
+    let mut known_rgb = coverage_candidates
+        .iter()
+        .map(|candidate| candidate.rgb)
+        .collect::<std::collections::HashSet<_>>();
+    let mut matched_prominent_area = 0.0;
+    for candidate in deduplicate_palette_candidates(prominent_candidates) {
+        if !known_rgb.insert(candidate.rgb) {
+            continue;
+        }
+        if candidate.is_chromatic
+            && color_hue(candidate.rgb)
+                .is_some_and(|hue| circular_distance(center, hue) <= allowed_distance)
+        {
+            let rank_weight = 1.0 - f64::from(candidate.rank.saturating_sub(1).min(4)) * 0.08;
+            let saliency_weight = 0.70 + candidate.saliency_coverage * 0.30;
+            let contrast_weight = 0.85 + candidate.local_contrast * 0.15;
+            let chroma_weight = 0.90 + (candidate.chroma / 0.22).clamp(0.0, 1.0) * 0.10;
+            let coherence_weight = 0.90 + candidate.spatial_coherence * 0.10;
+            matched_prominent_area += candidate.area_coverage
+                * rank_weight
+                * saliency_weight
+                * contrast_weight
+                * chroma_weight
+                * coherence_weight;
+        }
+    }
+
+    let accent_assist_limit =
+        (area_threshold * MAX_ACCENT_HUE_AREA_ASSIST_RATIO * (1.0 - strictness))
+            .min(MAX_ACCENT_HUE_AREA_ASSIST * (1.0 - strictness));
+    let accent_assist =
+        (matched_prominent_area * (1.0 - strictness) * 0.25).min(accent_assist_limit);
+
+    if !coverage_candidates.is_empty() {
+        let main_color_required = strictness >= STRICT_COLOR_HUE_MAIN_THRESHOLD;
+        return matched_area_color_count > 0
+            && (!main_color_required || main_color_matches)
+            && matched_area + accent_assist >= area_threshold;
+    }
+
+    legacy_color_hue_match(
+        hue_histogram_json,
+        dominant_color_rgb,
+        dominant_color_coverage,
+        dominant_color_category,
+        center,
+        allowed_distance,
+        area_threshold,
+        strictness,
+        accent_assist,
+    )
+}
+
+fn parse_palette_json(palette_json: Option<&str>) -> Option<serde_json::Value> {
+    let palette_json = palette_json?;
+    if palette_json.len() > MAX_PALETTE_JSON_BYTES {
+        return None;
+    }
+    serde_json::from_str(palette_json).ok()
+}
+
+fn palette_candidates(palette: &serde_json::Value, key: &str) -> Vec<HuePaletteCandidate> {
+    palette
+        .get(key)
+        .and_then(serde_json::Value::as_array)
+        .map(|candidates| {
+            candidates
+                .iter()
+                .take(16)
+                .filter_map(|candidate| palette_candidate(candidate, None))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn palette_candidate(
+    candidate: &serde_json::Value,
+    fallback_area: Option<f64>,
+) -> Option<HuePaletteCandidate> {
+    let object = candidate.as_object()?;
+    let rgb = object
+        .get("color")
+        .and_then(parse_rgb_value)
+        .or_else(|| object.get("rgb").and_then(parse_rgb_value))?;
+    let category = object.get("category").and_then(serde_json::Value::as_str)?;
+    let is_chromatic = !category.eq_ignore_ascii_case("neutral");
+    Some(HuePaletteCandidate {
+        rgb,
+        is_chromatic,
+        rank: object
+            .get("rank")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(1)
+            .clamp(1, 5) as u8,
+        area_coverage: parsed_fraction(object.get("areaCoverage")).or(fallback_area)?,
+        saliency_coverage: parsed_fraction(object.get("saliencyCoverage")).unwrap_or(0.5),
+        local_contrast: parsed_fraction(object.get("localContrast")).unwrap_or(0.5),
+        chroma: parsed_fraction(object.get("chroma")).unwrap_or(0.11),
+        spatial_coherence: parsed_fraction(object.get("spatialCoherence")).unwrap_or(0.5),
+    })
+}
+
+fn parsed_fraction(value: Option<&serde_json::Value>) -> Option<f64> {
+    value
+        .and_then(serde_json::Value::as_f64)
+        .filter(|value| value.is_finite() && *value >= 0.0)
+        .map(|value| value.clamp(0.0, 1.0))
+}
+
+fn parse_rgb_value(value: &serde_json::Value) -> Option<[u8; 3]> {
+    if let Some(color) = value.as_str() {
+        return parse_hex_rgb(color);
+    }
+    if let Some(values) = value.as_array()
+        && values.len() == 3
+    {
+        return Some([
+            parse_rgb_channel(&values[0])?,
+            parse_rgb_channel(&values[1])?,
+            parse_rgb_channel(&values[2])?,
+        ]);
+    }
+    let object = value.as_object()?;
+    Some([
+        parse_rgb_channel(object.get("r")?)?,
+        parse_rgb_channel(object.get("g")?)?,
+        parse_rgb_channel(object.get("b")?)?,
+    ])
+}
+
+fn parse_rgb_channel(value: &serde_json::Value) -> Option<u8> {
+    let channel = value.as_u64()?;
+    u8::try_from(channel).ok()
+}
+
+fn parse_hex_rgb(color: &str) -> Option<[u8; 3]> {
+    let hex = color.strip_prefix('#').unwrap_or(color);
+    if hex.len() != 6 || !hex.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return None;
+    }
+    Some([
+        u8::from_str_radix(&hex[0..2], 16).ok()?,
+        u8::from_str_radix(&hex[2..4], 16).ok()?,
+        u8::from_str_radix(&hex[4..6], 16).ok()?,
+    ])
+}
+
+fn deduplicate_palette_candidates(
+    candidates: Vec<HuePaletteCandidate>,
+) -> Vec<HuePaletteCandidate> {
+    let mut deduplicated = Vec::<HuePaletteCandidate>::with_capacity(candidates.len());
+    for candidate in candidates {
+        if let Some(existing) = deduplicated
+            .iter_mut()
+            .find(|existing| existing.rgb == candidate.rgb)
+        {
+            existing.area_coverage = existing.area_coverage.max(candidate.area_coverage);
+            existing.is_chromatic &= candidate.is_chromatic;
+            existing.rank = existing.rank.min(candidate.rank);
+            existing.saliency_coverage =
+                existing.saliency_coverage.max(candidate.saliency_coverage);
+            existing.local_contrast = existing.local_contrast.max(candidate.local_contrast);
+            existing.chroma = existing.chroma.max(candidate.chroma);
+            existing.spatial_coherence =
+                existing.spatial_coherence.max(candidate.spatial_coherence);
+        } else {
+            deduplicated.push(candidate);
+        }
+    }
+    deduplicated
+}
+
+fn color_hue(rgb: [u8; 3]) -> Option<f64> {
+    let [red, green, blue] = rgb.map(f64::from);
+    let maximum = red.max(green).max(blue);
+    let minimum = red.min(green).min(blue);
+    let delta = maximum - minimum;
+    if maximum <= 0.0 || delta <= f64::EPSILON {
+        return None;
+    }
+    let hue = if (maximum - red).abs() <= f64::EPSILON {
+        60.0 * ((green - blue) / delta).rem_euclid(6.0)
+    } else if (maximum - green).abs() <= f64::EPSILON {
+        60.0 * ((blue - red) / delta + 2.0)
+    } else {
+        60.0 * ((red - green) / delta + 4.0)
+    };
+    Some(hue.rem_euclid(360.0))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn legacy_color_hue_match(
+    hue_histogram_json: Option<&str>,
+    dominant_color_rgb: Option<&str>,
+    dominant_color_coverage: Option<f64>,
+    dominant_color_category: Option<&str>,
+    center: f64,
+    allowed_distance: f64,
+    area_threshold: f64,
+    strictness: f64,
+    accent_assist: f64,
+) -> bool {
+    let Some(rgb) = dominant_color_rgb.and_then(parse_hex_rgb) else {
+        return false;
+    };
+    let dominant_is_chromatic =
+        dominant_color_category.is_some_and(|category| !category.eq_ignore_ascii_case("neutral"));
+    let main_color_matches = dominant_is_chromatic
+        && color_hue(rgb).is_some_and(|hue| circular_distance(center, hue) <= allowed_distance);
+    let legacy_coverage = dominant_color_coverage
+        .filter(|coverage| coverage.is_finite() && *coverage >= 0.0)
+        .unwrap_or(0.0)
+        .clamp(0.0, 1.0);
+    let histogram_area = legacy_hue_histogram_area(
+        hue_histogram_json,
+        center,
+        allowed_distance,
+        legacy_coverage,
+    );
+    let estimated_area = if histogram_area > 0.0 {
+        histogram_area
+    } else if hue_histogram_json.is_none() && main_color_matches {
+        legacy_coverage * LEGACY_DOMINANT_COLOR_AREA_FACTOR
+    } else {
+        0.0
+    };
+    let main_color_required = strictness >= STRICT_COLOR_HUE_MAIN_THRESHOLD;
+    (!main_color_required || main_color_matches)
+        && estimated_area + accent_assist >= area_threshold
+        && estimated_area > 0.0
+}
+
+fn legacy_hue_histogram_area(
+    histogram_json: Option<&str>,
+    center: f64,
+    allowed_distance: f64,
+    legacy_coverage: f64,
+) -> f64 {
+    let Some(histogram_json) = histogram_json.filter(|json| json.len() <= 1024) else {
+        return 0.0;
+    };
+    let Ok(histogram) = serde_json::from_str::<Vec<f64>>(histogram_json) else {
+        return 0.0;
+    };
+    if histogram.len() != 12 {
+        return 0.0;
+    }
+    let total = histogram
+        .iter()
+        .copied()
+        .filter(|value| value.is_finite() && *value > 0.0)
+        .sum::<f64>();
+    if total <= 0.0 {
+        return 0.0;
+    }
+    let matched = histogram
+        .iter()
+        .enumerate()
+        .filter(|(bin, _)| {
+            let bin_center = *bin as f64 * 30.0 + 15.0;
+            circular_distance(center, bin_center) + 15.0 <= allowed_distance
+        })
+        .map(|(_, value)| {
+            if value.is_finite() {
+                value.max(0.0)
+            } else {
+                0.0
+            }
+        })
+        .sum::<f64>();
+    (legacy_coverage * (matched / total)).clamp(0.0, 1.0)
 }
 
 fn sql_literal(value: &str) -> String {
@@ -5036,18 +5438,267 @@ mod tests {
     use super::*;
 
     #[test]
-    fn hue_range_bins_wrap_around_the_red_boundary() {
-        assert_eq!(hue_bins_for_range(0.0, 15.0), vec![0, 11]);
-        assert_eq!(hue_bins_for_range(45.0, 30.0), vec![0, 1, 2]);
-        assert_eq!(hue_bins_for_range(-30.0, 15.0), vec![10, 11]);
+    fn hue_match_threshold_scales_with_minimum_whole_image_area() {
+        assert!((color_hue_match_threshold(None) - 0.265).abs() < 1e-9);
+        assert!((color_hue_match_threshold(Some(0.0)) - 0.08).abs() < 1e-9);
+        assert!((color_hue_match_threshold(Some(1.0)) - 0.45).abs() < 1e-9);
+        assert!((color_hue_match_threshold(Some(2.0)) - 0.45).abs() < 1e-9);
     }
 
     #[test]
-    fn hue_match_threshold_scales_with_strictness() {
-        assert!((color_hue_match_threshold(None) - 0.415).abs() < 1e-9);
-        assert!((color_hue_match_threshold(Some(0.0)) - 0.08).abs() < 1e-9);
-        assert!((color_hue_match_threshold(Some(1.0)) - 0.75).abs() < 1e-9);
-        assert!((color_hue_match_threshold(Some(2.0)) - 0.75).abs() < 1e-9);
+    fn palette_hue_uses_continuous_rgb_to_separate_red_and_blue() {
+        assert!(matches_palette(
+            vec![hue_candidate("#E83A2F", 0.62)],
+            vec![],
+            0.0,
+            15.0,
+            1.0,
+        ));
+        assert!(!matches_palette(
+            vec![hue_candidate("#376BB5", 0.62)],
+            vec![],
+            0.0,
+            15.0,
+            1.0,
+        ));
+    }
+
+    #[test]
+    fn close_hues_match_across_zero_while_distant_hues_do_not() {
+        assert!(matches_palette(
+            vec![hue_candidate("#F00020", 0.62)],
+            vec![],
+            0.0,
+            15.0,
+            1.0,
+        ));
+        assert!(matches_palette(
+            vec![hue_candidate("#E83A2F", 0.62)],
+            vec![],
+            358.0,
+            15.0,
+            1.0,
+        ));
+        assert!(!matches_palette(
+            vec![hue_candidate("#D47C22", 0.62)],
+            vec![],
+            358.0,
+            15.0,
+            1.0,
+        ));
+    }
+
+    #[test]
+    fn dominant_color_gate_starts_at_the_frontend_boundary() {
+        let coverage = vec![
+            hue_candidate("#376BB5", 0.54),
+            hue_candidate("#E83A2F", 0.46),
+        ];
+        assert!(matches_palette(coverage.clone(), vec![], 0.0, 15.0, 0.75,));
+        assert!(!matches_palette(coverage, vec![], 0.0, 15.0, 0.8,));
+    }
+
+    #[test]
+    fn chromatic_main_override_uses_coverage_first_with_area_still_required() {
+        let mut red_main = hue_candidate("#E83A2F", 0.48);
+        red_main["category"] = serde_json::json!("red");
+        let mut gray_silhouette = hue_candidate("#777777", 0.52);
+        gray_silhouette["category"] = serde_json::json!("neutral");
+        assert!(matches_palette(
+            vec![red_main, gray_silhouette],
+            vec![],
+            0.0,
+            15.0,
+            1.0,
+        ));
+        assert!(!matches_palette(
+            vec![
+                hue_candidate("#E83A2F", 0.20),
+                hue_candidate("#777777", 0.80)
+            ],
+            vec![],
+            0.0,
+            15.0,
+            1.0,
+        ));
+    }
+
+    #[test]
+    fn low_saturation_blue_kept_by_palette_category_still_matches() {
+        let mut blue = hue_candidate("#A0A4AA", 0.62);
+        blue["category"] = serde_json::json!("blue");
+        assert!(matches_palette(vec![blue], vec![], 216.0, 15.0, 1.0));
+        let mut green = hue_candidate("#A0A6A0", 0.62);
+        green["category"] = serde_json::json!("green");
+        assert!(matches_palette(vec![green], vec![], 120.0, 15.0, 1.0));
+    }
+
+    #[test]
+    fn neutral_dominant_with_small_red_accent_fails_high_strictness() {
+        let mut neutral = hue_candidate("#777777", 0.90);
+        neutral["category"] = serde_json::json!("neutral");
+        assert!(!matches_palette(
+            vec![neutral, hue_candidate("#E83A2F", 0.10)],
+            vec![hue_candidate("#E83A2F", 0.10)],
+            0.0,
+            15.0,
+            1.0,
+        ));
+    }
+
+    #[test]
+    fn multiple_area_colors_add_together_but_duplicate_candidates_do_not() {
+        assert!(matches_palette(
+            vec![
+                hue_candidate("#E83A2F", 0.24),
+                hue_candidate("#EF4A35", 0.22),
+                hue_candidate("#376BB5", 0.54),
+            ],
+            vec![
+                hue_candidate("#E83A2F", 0.24),
+                hue_candidate("#EF4A35", 0.22),
+            ],
+            0.0,
+            30.0,
+            0.5,
+        ));
+        assert!(!matches_palette(
+            vec![
+                hue_candidate("#E83A2F", 0.30),
+                hue_candidate("#E83A2F", 0.30),
+            ],
+            vec![hue_candidate("#E83A2F", 0.30)],
+            0.0,
+            15.0,
+            1.0,
+        ));
+    }
+
+    #[test]
+    fn prominent_palette_is_capped_assistance_and_never_replaces_area_colors() {
+        assert!(matches_palette(
+            vec![hue_candidate("#E83A2F", 0.07)],
+            vec![
+                hue_candidate("#EF4A35", 0.40),
+                hue_candidate("#D9362A", 0.40),
+            ],
+            0.0,
+            30.0,
+            0.0,
+        ));
+        assert!(!matches_palette(
+            vec![hue_candidate("#376BB5", 0.70)],
+            vec![hue_candidate("#E83A2F", 0.30)],
+            0.0,
+            30.0,
+            0.0,
+        ));
+    }
+
+    #[test]
+    fn current_palette_never_falls_back_to_histogram_when_coverage_colors_miss() {
+        let palette = serde_json::json!({
+            "coveragePalette": [hue_candidate("#376BB5", 0.70)],
+            "prominentPalette": [hue_candidate("#E83A2F", 0.30)]
+        })
+        .to_string();
+        assert!(!color_hue_palette_matches(
+            Some(&palette),
+            Some("[100,0,0,0,0,0,0,0,0,0,0,0]"),
+            Some("#E83A2F"),
+            Some(0.60),
+            Some("red"),
+            Some(0.0),
+            Some(30.0),
+            Some(0.0),
+        ));
+    }
+
+    #[test]
+    fn legacy_arrays_and_missing_palettes_fall_back_conservatively() {
+        let legacy_array = serde_json::json!([
+            {"color":"#E83A2F", "category":"red", "areaCoverage":0.30},
+            {"color":"#376BB5", "category":"blue", "areaCoverage":0.70}
+        ])
+        .to_string();
+        assert!(color_hue_palette_matches(
+            Some(&legacy_array),
+            None,
+            Some("#E83A2F"),
+            Some(0.70),
+            Some("red"),
+            Some(0.0),
+            Some(30.0),
+            Some(0.5),
+        ));
+        let histogram = "[100,0,0,0,0,0,0,0,0,0,0,0]";
+        assert!(color_hue_palette_matches(
+            None,
+            Some(histogram),
+            Some("#E83A2F"),
+            Some(0.60),
+            Some("red"),
+            Some(0.0),
+            Some(90.0),
+            Some(1.0),
+        ));
+        assert!(!color_hue_palette_matches(
+            None,
+            Some(histogram),
+            Some("#E83A2F"),
+            Some(0.60),
+            Some("red"),
+            Some(0.0),
+            Some(15.0),
+            Some(1.0),
+        ));
+        assert!(!color_hue_palette_matches(
+            Some("not json"),
+            None,
+            None,
+            None,
+            None,
+            Some(0.0),
+            Some(15.0),
+            Some(1.0),
+        ));
+    }
+
+    fn hue_candidate(color: &str, area_coverage: f64) -> serde_json::Value {
+        serde_json::json!({
+            "color": color,
+            "category": "color",
+            "rank": 1,
+            "areaCoverage": area_coverage,
+            "saliencyCoverage": 0.6,
+            "localContrast": 0.4,
+            "chroma": 0.14,
+            "spatialCoherence": 0.7
+        })
+    }
+
+    fn matches_palette(
+        coverage_palette: Vec<serde_json::Value>,
+        prominent_palette: Vec<serde_json::Value>,
+        center: f64,
+        width: f64,
+        strictness: f64,
+    ) -> bool {
+        let palette = serde_json::json!({
+            "coveragePalette": coverage_palette,
+            "prominentPalette": prominent_palette
+        })
+        .to_string();
+        color_hue_palette_matches(
+            Some(&palette),
+            None,
+            None,
+            None,
+            None,
+            Some(center),
+            Some(width),
+            Some(strictness),
+        )
     }
 
     #[test]
@@ -6116,24 +6767,35 @@ mod tests {
         repository.initialize().expect("initialize");
         let (library_id, asset_id) = seed_classifiable_asset(&repository, "hue-strictness");
         let connection = repository.open().expect("open database");
+        let palette = serde_json::json!({
+            "coveragePalette": [
+                {"rank":1,"color":"#E83A2F","category":"red","areaCoverage":0.30},
+                {"rank":2,"color":"#376BB5","category":"blue","areaCoverage":0.70}
+            ],
+            "prominentPalette": [
+                {"rank":1,"color":"#E83A2F","category":"red","areaCoverage":0.30}
+            ]
+        })
+        .to_string();
         connection
             .execute(
                 "UPDATE color_features
-                 SET hue_histogram_json=?1
-                 WHERE asset_id=?2",
-                params!["[0.5,0.5,0,0,0,0,0,0,0,0,0,0]", asset_id],
+                 SET dominant_colors_json=?1, hue_histogram_json=?2,
+                     dominant_color_coverage=?3
+                 WHERE asset_id=?4",
+                params![palette, "[0.5,0.5,0,0,0,0,0,0,0,0,0,0]", 0.70, asset_id],
             )
-            .expect("seed hue histogram");
+            .expect("seed color palette");
         drop(connection);
 
-        let list_with_strictness = |strictness| {
+        let list_with_strictness = |strictness, page| {
             repository
                 .list_assets(
                     library_id,
                     AssetSortField::FileName,
                     SortDirection::Asc,
+                    page,
                     1,
-                    100,
                     &AssetFilter {
                         color_hue_center: Some(0.0),
                         color_hue_width: Some(15.0),
@@ -6142,12 +6804,16 @@ mod tests {
                     },
                 )
                 .expect("hue range filter")
-                .total
         };
 
-        assert_eq!(list_with_strictness(0.0), 1);
-        assert_eq!(list_with_strictness(0.5), 1);
-        assert_eq!(list_with_strictness(1.0), 0);
+        let first_page = list_with_strictness(0.0, 1);
+        assert_eq!(first_page.total, 1);
+        assert_eq!(first_page.items.len(), 1);
+        let second_page = list_with_strictness(0.0, 2);
+        assert_eq!(second_page.total, 1);
+        assert!(second_page.items.is_empty());
+        assert_eq!(list_with_strictness(0.5, 1).total, 1);
+        assert_eq!(list_with_strictness(1.0, 1).total, 0);
     }
 
     #[test]

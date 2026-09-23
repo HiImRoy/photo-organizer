@@ -250,7 +250,7 @@ export interface AssetFilter {
   colorLabels: ManualColorLabel[];
   colorHueCenter: number | null;
   colorHueWidth: number | null;
-  /** Minimum expected share of chromatic pixels inside the selected hue range. */
+  /** Strictness mapped to an 8%–45% whole-image target-hue area threshold. */
   colorHueStrictness: number;
   brightnessMin: number | null;
   brightnessMax: number | null;
