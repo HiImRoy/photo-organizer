@@ -1,3 +1,5 @@
+import { memo } from "react";
+
 import { classificationValueLabel } from "../classificationLabels";
 import { formatPercent } from "../format";
 import { MANUAL_COLOR_LABEL_OPTIONS, type AssetListItem, type ManualColorLabel } from "../types";
@@ -27,7 +29,7 @@ interface AssetCardProps {
   onToggleFavorite: (assetId: number) => void;
 }
 
-export function AssetCard({
+export const AssetCard = memo(function AssetCard({
   asset,
   thumbnailProfile,
   active,
@@ -199,4 +201,4 @@ export function AssetCard({
       </div>
     </div>
   );
-}
+});

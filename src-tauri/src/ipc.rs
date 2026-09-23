@@ -753,7 +753,7 @@ pub fn list_libraries(state: State<'_, AppState>) -> Result<Vec<LibrarySummary>,
 }
 
 #[tauri::command]
-pub fn list_assets(
+pub async fn list_assets(
     library_id: i64,
     sort: Option<String>,
     direction: Option<String>,
@@ -768,22 +768,28 @@ pub fn list_assets(
     let direction_value = direction.unwrap_or_else(|| "asc".into());
     let direction = SortDirection::parse(&direction_value)
         .ok_or_else(|| format!("invalid sort direction: {direction_value}"))?;
-    state
-        .repository
-        .list_assets(
-            library_id,
-            sort,
-            direction,
-            page.unwrap_or(1).max(1),
-            page_size.unwrap_or(200),
-            &filter.unwrap_or_default(),
-        )
-        .map_err(ipc_error)
+    let repository = state.repository.clone();
+    let page = page.unwrap_or(1).max(1);
+    let page_size = page_size.unwrap_or(200);
+    let filter = filter.unwrap_or_default();
+    tauri::async_runtime::spawn_blocking(move || {
+        repository.list_assets(library_id, sort, direction, page, page_size, &filter)
+    })
+    .await
+    .map_err(|error| format!("asset query task failed: {error}"))?
+    .map_err(ipc_error)
 }
 
 #[tauri::command]
-pub fn query_assets(query: AssetQuery, state: State<'_, AppState>) -> Result<AssetPage, String> {
-    state.repository.query_assets(&query).map_err(ipc_error)
+pub async fn query_assets(
+    query: AssetQuery,
+    state: State<'_, AppState>,
+) -> Result<AssetPage, String> {
+    let repository = state.repository.clone();
+    tauri::async_runtime::spawn_blocking(move || repository.query_assets(&query))
+        .await
+        .map_err(|error| format!("asset query task failed: {error}"))?
+        .map_err(ipc_error)
 }
 
 #[tauri::command]
@@ -1148,7 +1154,7 @@ pub async fn get_preview_data_url(
 }
 
 #[tauri::command]
-pub fn remove_library(library_id: i64, state: State<'_, AppState>) -> Result<bool, String> {
+pub async fn remove_library(library_id: i64, state: State<'_, AppState>) -> Result<bool, String> {
     let _scan_guard = state
         .repository
         .library_source_root(library_id)
@@ -1160,34 +1166,35 @@ pub fn remove_library(library_id: i64, state: State<'_, AppState>) -> Result<boo
                 .ok_or_else(|| "该图库或其嵌套图库正在扫描，请稍后重试".to_owned())
         })
         .transpose()?;
-    let jobs = state
-        .repository
-        .active_job_ids_for_library(library_id)
-        .map_err(ipc_error)?;
-    for (job_id, job_type) in jobs {
-        if job_type == "scan_and_basic_analysis" {
-            state.tasks.cancel(&job_id);
-            let _ = state.repository.cancel_scan(&job_id, library_id);
-        } else {
-            let _ = request_semantic_cancel(&state.repository, &state.semantic_tasks, &job_id);
-        }
-    }
-    let result = state
-        .repository
-        .remove_library_with_reconciliation(library_id)
-        .map_err(ipc_error)?;
-    if result.removed {
-        for (asset_id, fingerprint, thumbnail_path) in result.removed_cache_entries {
-            if let Some(path) = thumbnail_path {
-                remove_cache_file_if_safe(&state.paths.thumbnail_dir, &path);
+    let repository = state.repository.clone();
+    let paths = state.paths.clone();
+    let tasks = state.tasks.clone();
+    let semantic_tasks = state.semantic_tasks.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let jobs = repository
+            .active_job_ids_for_library(library_id)
+            .map_err(ipc_error)?;
+        for (job_id, job_type) in jobs {
+            if job_type == "scan_and_basic_analysis" {
+                tasks.cancel(&job_id);
+                let _ = repository.cancel_scan(&job_id, library_id);
+            } else {
+                let _ = request_semantic_cancel(&repository, &semantic_tasks, &job_id);
             }
-            remove_cache_entries(
-                &state.paths.preview_dir,
-                &format!("{asset_id}-{fingerprint}-"),
-            );
         }
-    }
-    Ok(result.removed)
+        let result = repository
+            .remove_library_with_reconciliation(library_id)
+            .map_err(ipc_error)?;
+        if result.removed {
+            for path in &result.removed_thumbnail_cache_paths {
+                remove_cache_file_if_safe(&paths.data_dir, "thumbnails", path);
+            }
+            remove_preview_cache_entries(&paths.data_dir, &result.removed_preview_asset_ids);
+        }
+        Ok(result.removed)
+    })
+    .await
+    .map_err(|error| format!("remove library task failed: {error}"))?
 }
 
 #[tauri::command]
@@ -2131,24 +2138,43 @@ fn mime_for_path(path: &Path) -> &'static str {
     }
 }
 
-fn remove_cache_entries(directory: &Path, prefix: &str) {
-    let Ok(entries) = fs::read_dir(directory) else {
+fn remove_preview_cache_entries(application_data_root: &Path, removed_asset_ids: &[i64]) {
+    if removed_asset_ids.is_empty() {
+        return;
+    }
+    let Some(directory) = private_app_cache_root(application_data_root, "previews") else {
+        return;
+    };
+    let Ok(entries) = fs::read_dir(&directory) else {
         return;
     };
     for entry in entries.flatten() {
+        let Ok(file_type) = entry.file_type() else {
+            continue;
+        };
+        if !file_type.is_file() {
+            continue;
+        }
         let path = entry.path();
-        let matches = path
-            .file_name()
-            .and_then(|name| name.to_str())
-            .is_some_and(|name| name.starts_with(prefix));
-        if matches {
+        let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+            continue;
+        };
+        let Some((raw_asset_id, _)) = name.split_once('-') else {
+            continue;
+        };
+        let Ok(asset_id) = raw_asset_id.parse::<i64>() else {
+            continue;
+        };
+        if removed_asset_ids.binary_search(&asset_id).is_ok()
+            && path.parent().is_some_and(|parent| parent == directory)
+        {
             let _ = fs::remove_file(path);
         }
     }
 }
 
-fn remove_cache_file_if_safe(root: &Path, path: &Path) {
-    let Ok(root) = canonical_or_absolute(root) else {
+fn remove_cache_file_if_safe(application_data_root: &Path, cache_name: &str, path: &Path) {
+    let Some(root) = private_app_cache_root(application_data_root, cache_name) else {
         return;
     };
     let Ok(target) = canonical_or_absolute(path) else {
@@ -2156,6 +2182,39 @@ fn remove_cache_file_if_safe(root: &Path, path: &Path) {
     };
     if target.starts_with(&root) {
         let _ = fs::remove_file(target);
+    }
+}
+
+fn private_app_cache_root(application_data_root: &Path, cache_name: &str) -> Option<PathBuf> {
+    let cache_root = application_data_root.join(cache_name);
+    let app_metadata = fs::symlink_metadata(application_data_root).ok()?;
+    let cache_metadata = fs::symlink_metadata(&cache_root).ok()?;
+    if !app_metadata.is_dir()
+        || !cache_metadata.is_dir()
+        || is_symlink_or_reparse_point(&app_metadata)
+        || is_symlink_or_reparse_point(&cache_metadata)
+    {
+        return None;
+    }
+
+    let application_data_root = application_data_root.canonicalize().ok()?;
+    let cache_root = cache_root.canonicalize().ok()?;
+    (cache_root.parent() == Some(application_data_root.as_path())).then_some(cache_root)
+}
+
+fn is_symlink_or_reparse_point(metadata: &fs::Metadata) -> bool {
+    if metadata.file_type().is_symlink() {
+        return true;
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0400;
+        metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
+    }
+    #[cfg(not(windows))]
+    {
+        false
     }
 }
 
@@ -2179,6 +2238,92 @@ fn ipc_error(error: impl std::fmt::Display) -> String {
 mod tests {
     use super::*;
     use rusqlite::params;
+
+    #[test]
+    fn preview_cache_cleanup_handles_large_cache_in_one_pass_and_keeps_source_files() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let application_data_root = temp.path().join("application-data");
+        let preview_dir = application_data_root.join("previews");
+        fs::create_dir_all(&preview_dir).expect("create preview cache");
+        let source_dir = temp.path().join("图库 😀");
+        fs::create_dir_all(&source_dir).expect("create source fixture");
+
+        let matching_first = preview_dir.join("31-old-fingerprint-screen-1920.jpg");
+        let matching_second = preview_dir.join("31-new-fingerprint-screen-2560.jpg");
+        let unrelated_same_prefix = preview_dir.join("310-old-fingerprint-screen-1920.jpg");
+        fs::write(&matching_first, b"cache").expect("write matching cache");
+        fs::write(&matching_second, b"cache").expect("write matching cache version");
+        fs::write(&unrelated_same_prefix, b"cache").expect("write unrelated cache");
+        for index in 0..512 {
+            fs::write(
+                preview_dir.join(format!("unrelated-{index:04}-preview.jpg")),
+                b"cache",
+            )
+            .expect("write unrelated cache entry");
+        }
+        let matching_directory = preview_dir.join("31-not-a-cache-file");
+        fs::create_dir(&matching_directory).expect("create matching-named directory");
+
+        let original = source_dir.join("31-old-fingerprint-screen-1920.jpg");
+        fs::write(&original, b"original fixture bytes").expect("write original fixture");
+        let original_bytes = fs::read(&original).expect("read original fixture");
+
+        remove_preview_cache_entries(&application_data_root, &[31]);
+
+        assert!(!matching_first.exists());
+        assert!(!matching_second.exists());
+        assert!(unrelated_same_prefix.is_file());
+        assert!(matching_directory.is_dir());
+        assert_eq!(
+            fs::read(&original).expect("source file remains"),
+            original_bytes
+        );
+        assert_eq!(
+            fs::read_dir(&preview_dir)
+                .expect("read preview cache")
+                .count(),
+            514
+        );
+    }
+
+    #[test]
+    fn cache_cleanup_root_must_be_a_direct_app_data_child() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let application_data_root = temp.path().join("application-data");
+        let preview_dir = application_data_root.join("previews");
+        fs::create_dir_all(&preview_dir).expect("create preview cache");
+        let source_dir = temp.path().join("图库");
+        fs::create_dir_all(&source_dir).expect("create source fixture");
+
+        assert_eq!(
+            private_app_cache_root(&application_data_root, "previews"),
+            preview_dir.canonicalize().ok()
+        );
+        assert!(private_app_cache_root(&application_data_root, "../图库").is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn preview_cache_cleanup_rejects_symlinked_cache_directory() {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let application_data_root = temp.path().join("application-data");
+        fs::create_dir_all(&application_data_root).expect("create app data root");
+        let source_dir = temp.path().join("图库");
+        fs::create_dir_all(&source_dir).expect("create source fixture");
+        let source_preview = source_dir.join("31-original.jpg");
+        fs::write(&source_preview, b"original fixture bytes").expect("write source file");
+        symlink(&source_dir, application_data_root.join("previews"))
+            .expect("create cache directory symlink");
+
+        remove_preview_cache_entries(&application_data_root, &[31]);
+
+        assert_eq!(
+            fs::read(source_preview).expect("source file remains"),
+            b"original fixture bytes"
+        );
+    }
 
     #[test]
     fn fresh_app_state_publishes_loading_status_without_an_active_model() {

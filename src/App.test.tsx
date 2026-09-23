@@ -1,6 +1,6 @@
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import App from "./App";
 import { emptyEffectiveClassification } from "./types";
@@ -410,6 +410,10 @@ beforeEach(() => {
       return vi.fn();
     },
   );
+});
+
+afterEach(() => {
+  vi.useRealTimers();
 });
 
 it("suppresses the browser context menu outside editable controls", () => {
@@ -2855,6 +2859,62 @@ describe("PhotoOrganizer application shell", () => {
         expect.objectContaining({ libraryId: 7, sort: "brightness", direction: "desc" }),
       ),
     );
+  });
+
+  it("debounces text search and ignores a result invalidated by the next edit", async () => {
+    const staleResultAsset = { ...asset, id: 991, fileName: "过时结果.png" };
+    let resolveStaleSearch:
+      | ((result: {
+          items: AssetListItem[];
+          total: number;
+          page: number;
+          pageSize: number;
+        }) => void)
+      | null = null;
+    api.fetchLibraries.mockResolvedValue([library]);
+    api.fetchAssets.mockImplementation((query: { filter: { search: string | null } }) => {
+      if (query.filter.search === "晚霞") {
+        return new Promise((resolve) => {
+          resolveStaleSearch = resolve;
+        });
+      }
+      if (query.filter.search === "海边") {
+        return Promise.resolve({ items: [secondAsset], total: 1, page: 1, pageSize: 120 });
+      }
+      return Promise.resolve({ items: [asset], total: 1, page: 1, pageSize: 120 });
+    });
+    render(<App />);
+    expect(await screen.findByRole("button", { name: "晚霞.png" })).toBeInTheDocument();
+
+    vi.useFakeTimers();
+    const searchInput = screen.getByRole("textbox", { name: "搜索图片" });
+    fireEvent.change(searchInput, { target: { value: "晚霞" } });
+    act(() => vi.advanceTimersByTime(249));
+    expect(api.fetchAssets).toHaveBeenCalledTimes(1);
+    act(() => vi.advanceTimersByTime(1));
+    expect(api.fetchAssets).toHaveBeenCalledTimes(2);
+    expect(api.fetchAssets).toHaveBeenLastCalledWith(
+      expect.objectContaining({ filter: expect.objectContaining({ search: "晚霞" }) }),
+    );
+
+    fireEvent.change(searchInput, { target: { value: "海边" } });
+    if (!resolveStaleSearch) throw new Error("the stale search request did not start");
+    await act(async () => {
+      resolveStaleSearch?.({ items: [staleResultAsset], total: 1, page: 1, pageSize: 120 });
+      await Promise.resolve();
+    });
+    expect(screen.queryByRole("button", { name: "过时结果.png" })).not.toBeInTheDocument();
+
+    await act(async () => {
+      vi.advanceTimersByTime(250);
+      await Promise.resolve();
+    });
+    expect(api.fetchAssets).toHaveBeenCalledTimes(3);
+    expect(api.fetchAssets).toHaveBeenLastCalledWith(
+      expect.objectContaining({ filter: expect.objectContaining({ search: "海边" }) }),
+    );
+    vi.useRealTimers();
+    expect(await screen.findByRole("button", { name: "海边.png" })).toBeInTheDocument();
   });
 
   it("loads grid results continuously without gallery pagination", async () => {

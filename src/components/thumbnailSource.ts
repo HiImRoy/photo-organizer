@@ -31,6 +31,8 @@ const GRID_1280_PROFILE: GridThumbnailProfile = {
 };
 
 const thumbnailCache = new Map<number, string>();
+const MAX_CACHED_THUMBNAILS = 256;
+const MAX_CACHED_THUMBNAIL_SOURCE_CHARACTERS = 32 * 1024 * 1024;
 const thumbnailRequests = new Map<number, Promise<string>>();
 const queuedThumbnailRequests = new Map<number, PendingThumbnailRequest>();
 const thumbnailQueue: PendingThumbnailRequest[] = [];
@@ -45,6 +47,7 @@ let activeThumbnailRequests = 0;
 let activePreviewRequests = 0;
 let thumbnailRequestSequence = 0;
 let previewRequestSequence = 0;
+let cachedThumbnailSourceCharacters = 0;
 
 type PendingThumbnailRequest = {
   assetId: number;
@@ -84,7 +87,7 @@ function drainThumbnailQueue() {
 
     void fetchThumbnail(pending.assetId)
       .then((source) => {
-        thumbnailCache.set(pending.assetId, source);
+        rememberThumbnail(pending.assetId, source);
         pending.resolve(source);
       })
       .catch((reason: unknown) => {
@@ -95,6 +98,38 @@ function drainThumbnailQueue() {
         thumbnailRequests.delete(pending.assetId);
         drainThumbnailQueue();
       });
+  }
+}
+
+function getCachedThumbnail(assetId: number) {
+  const source = thumbnailCache.get(assetId);
+  if (!source) return undefined;
+  thumbnailCache.delete(assetId);
+  thumbnailCache.set(assetId, source);
+  return source;
+}
+
+function removeCachedThumbnail(assetId: number) {
+  const source = thumbnailCache.get(assetId);
+  if (source === undefined) return false;
+  thumbnailCache.delete(assetId);
+  cachedThumbnailSourceCharacters -= source.length;
+  return true;
+}
+
+function rememberThumbnail(assetId: number, source: string) {
+  removeCachedThumbnail(assetId);
+  if (source.length > MAX_CACHED_THUMBNAIL_SOURCE_CHARACTERS) return;
+
+  thumbnailCache.set(assetId, source);
+  cachedThumbnailSourceCharacters += source.length;
+  while (
+    thumbnailCache.size > MAX_CACHED_THUMBNAILS ||
+    cachedThumbnailSourceCharacters > MAX_CACHED_THUMBNAIL_SOURCE_CHARACTERS
+  ) {
+    const oldestAssetId = thumbnailCache.keys().next().value;
+    if (typeof oldestAssetId !== "number") return;
+    removeCachedThumbnail(oldestAssetId);
   }
 }
 
@@ -135,7 +170,7 @@ function rememberPreview(key: string, source: string) {
 }
 
 export function requestThumbnail(assetId: number, priority = 0) {
-  const cached = thumbnailCache.get(assetId);
+  const cached = getCachedThumbnail(assetId);
   if (cached) return Promise.resolve(cached);
 
   const inFlight = thumbnailRequests.get(assetId);
@@ -219,7 +254,7 @@ export function useThumbnailSource(
     failed: boolean;
   }>(() => ({
     assetId: asset.id,
-    source: thumbnailCache.get(asset.id) ?? null,
+    source: getCachedThumbnail(asset.id) ?? null,
     failed: false,
   }));
   const [enhancedSource, setEnhancedSource] = useState<{
@@ -234,7 +269,7 @@ export function useThumbnailSource(
   const source =
     thumbnailState.assetId === asset.id
       ? thumbnailState.source
-      : (thumbnailCache.get(asset.id) ?? null);
+      : (getCachedThumbnail(asset.id) ?? null);
   const failed = thumbnailState.assetId === asset.id ? thumbnailState.failed : false;
 
   useEffect(() => {

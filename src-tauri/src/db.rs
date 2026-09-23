@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -64,6 +64,9 @@ const UNIFIED_SOURCE_COLLECTION_MIGRATION: &str =
 const SEMANTIC_ANALYSIS_TAXONOMY_MIGRATION: &str =
     include_str!("../migrations/0017_semantic_analysis_taxonomy.sql");
 
+const LIBRARY_REMOVAL_BATCH_SIZE: i64 = 256;
+const SQLITE_IN_QUERY_BATCH_SIZE: usize = 128;
+
 #[derive(Debug, Clone)]
 pub struct Repository {
     database_path: PathBuf,
@@ -106,7 +109,11 @@ pub struct SeenAssetWrite {
 #[derive(Debug, Clone, Default)]
 pub struct LibraryRemovalResult {
     pub removed: bool,
-    pub removed_cache_entries: Vec<(i64, String, Option<PathBuf>)>,
+    /// Sorted IDs are retained for one-pass cleanup of preview files after the
+    /// transaction commits. This is substantially smaller than retaining each
+    /// asset's path, fingerprint, and optional thumbnail path.
+    pub removed_preview_asset_ids: Vec<i64>,
+    pub removed_thumbnail_cache_paths: Vec<PathBuf>,
 }
 
 pub(crate) fn is_terminal_semantic_job_status(status: &str) -> bool {
@@ -1362,64 +1369,102 @@ impl Repository {
                 .collect::<Result<Vec<_>, _>>()?
         };
 
-        let affected_assets = {
-            let mut statement = transaction.prepare(
-                "SELECT a.id, a.absolute_path, a.fingerprint, a.file_status, t.cache_path
-                 FROM assets a
-                 LEFT JOIN thumbnails t
-                   ON t.asset_id=a.id AND t.spec=?2
-                 WHERE a.library_id=?1
-                 ORDER BY a.id",
+        let mut removed_preview_asset_ids = Vec::new();
+        let mut candidate_cache_paths = HashSet::<String>::new();
+        let mut last_asset_id = 0_i64;
+        {
+            let mut reassign_statement = transaction.prepare(
+                "UPDATE assets
+                 SET library_id=?2, relative_path=?3, file_status=?4
+                 WHERE id=?1",
             )?;
-            statement
-                .query_map(params![library_id, crate::imaging::THUMBNAIL_SPEC], |row| {
-                    Ok((
-                        row.get::<_, i64>(0)?,
-                        PathBuf::from(row.get::<_, String>(1)?),
-                        row.get::<_, String>(2)?,
-                        row.get::<_, String>(3)?,
-                        row.get::<_, Option<String>>(4)?.map(PathBuf::from),
-                    ))
-                })?
-                .collect::<Result<Vec<_>, _>>()?
-        };
-
-        let mut removed_cache_entries = Vec::new();
-        for (asset_id, absolute_path, _fingerprint, file_status, cache_path) in affected_assets {
-            let path_key = identity_key(&absolute_path);
-            let owner = remaining_roots
-                .iter()
-                .filter(|root| is_same_or_descendant(&root.identity_key, &path_key))
-                .max_by_key(|root| path_depth(&root.identity_key));
-            if let Some(owner) = owner {
-                let relative_path = relative_path_for_owner(&owner.source_path, &absolute_path);
-                transaction.execute(
-                    "UPDATE assets
-                     SET library_id=?2, relative_path=?3, file_status=?4
-                     WHERE id=?1",
-                    params![asset_id, owner.library_id, relative_path, file_status],
-                )?;
-            } else {
-                let fingerprint = transaction.query_row(
-                    "SELECT fingerprint FROM assets WHERE id=?1",
-                    [asset_id],
-                    |row| row.get::<_, String>(0),
-                )?;
-                transaction.execute("DELETE FROM assets WHERE id=?1", [asset_id])?;
-                let removable_cache_path = if let Some(cache_path) = cache_path {
-                    let cache_path_string = cache_path.to_string_lossy().into_owned();
-                    let still_referenced: bool = transaction.query_row(
-                        "SELECT EXISTS(
-                            SELECT 1 FROM thumbnails WHERE cache_path=?1
-                        )",
-                        [&cache_path_string],
-                        |row| row.get(0),
+            let mut delete_statement = transaction.prepare("DELETE FROM assets WHERE id=?1")?;
+            loop {
+                let affected_assets = {
+                    let mut statement = transaction.prepare(
+                        "SELECT a.id, a.absolute_path, a.file_status, t.cache_path
+                         FROM assets a
+                         LEFT JOIN thumbnails t
+                           ON t.asset_id=a.id AND t.spec=?3
+                         WHERE a.library_id=?1 AND a.id>?2
+                         ORDER BY a.id
+                         LIMIT ?4",
                     )?;
-                    (!still_referenced).then_some(cache_path)
-                } else {
-                    None
+                    statement
+                        .query_map(
+                            params![
+                                library_id,
+                                last_asset_id,
+                                crate::imaging::THUMBNAIL_SPEC,
+                                LIBRARY_REMOVAL_BATCH_SIZE
+                            ],
+                            |row| {
+                                Ok((
+                                    row.get::<_, i64>(0)?,
+                                    PathBuf::from(row.get::<_, String>(1)?),
+                                    row.get::<_, String>(2)?,
+                                    row.get::<_, Option<String>>(3)?,
+                                ))
+                            },
+                        )?
+                        .collect::<Result<Vec<_>, _>>()?
                 };
-                removed_cache_entries.push((asset_id, fingerprint, removable_cache_path));
+                let Some((last_id, ..)) = affected_assets.last() else {
+                    break;
+                };
+                last_asset_id = *last_id;
+
+                for (asset_id, absolute_path, file_status, cache_path) in affected_assets {
+                    let path_key = identity_key(&absolute_path);
+                    let owner = remaining_roots
+                        .iter()
+                        .filter(|root| is_same_or_descendant(&root.identity_key, &path_key))
+                        .max_by_key(|root| path_depth(&root.identity_key));
+                    if let Some(owner) = owner {
+                        let relative_path =
+                            relative_path_for_owner(&owner.source_path, &absolute_path);
+                        reassign_statement.execute(params![
+                            asset_id,
+                            owner.library_id,
+                            relative_path,
+                            file_status
+                        ])?;
+                    } else {
+                        delete_statement.execute([asset_id])?;
+                        removed_preview_asset_ids.push(asset_id);
+                        if let Some(cache_path) = cache_path {
+                            candidate_cache_paths.insert(cache_path);
+                        }
+                    }
+                }
+            }
+        }
+
+        let candidate_cache_paths = candidate_cache_paths.into_iter().collect::<Vec<_>>();
+        let mut removed_thumbnail_cache_paths = Vec::new();
+        for paths in candidate_cache_paths.chunks(SQLITE_IN_QUERY_BATCH_SIZE) {
+            let placeholders = std::iter::repeat_n("?", paths.len())
+                .collect::<Vec<_>>()
+                .join(",");
+            let sql = format!(
+                "SELECT DISTINCT cache_path FROM thumbnails WHERE cache_path IN ({placeholders})"
+            );
+            let values = paths
+                .iter()
+                .map(|path| Value::Text(path.clone()))
+                .collect::<Vec<_>>();
+            let still_referenced = {
+                let mut statement = transaction.prepare(&sql)?;
+                statement
+                    .query_map(params_from_iter(values.iter()), |row| {
+                        row.get::<_, String>(0)
+                    })?
+                    .collect::<Result<HashSet<_>, _>>()?
+            };
+            for cache_path in paths {
+                if !still_referenced.contains(cache_path) {
+                    removed_thumbnail_cache_paths.push(PathBuf::from(cache_path));
+                }
             }
         }
 
@@ -1428,7 +1473,8 @@ impl Repository {
         transaction.commit()?;
         Ok(LibraryRemovalResult {
             removed: true,
-            removed_cache_entries,
+            removed_preview_asset_ids,
+            removed_thumbnail_cache_paths,
         })
     }
 
@@ -1593,13 +1639,7 @@ impl Repository {
         let page = query.page.max(1);
         let offset = i64::from(page.saturating_sub(1)) * i64::from(page_size);
         let (where_sql, values) = asset_filter_sql(query);
-        let count_sql = format!(
-            "SELECT COUNT(*)
-             FROM assets a
-             LEFT JOIN tone_features tf ON tf.asset_id=a.id
-             LEFT JOIN color_features cf ON cf.asset_id=a.id
-             WHERE {where_sql}"
-        );
+        let count_sql = asset_count_sql(&where_sql, &query.filter);
         let total = connection.query_row(&count_sql, params_from_iter(values.iter()), |row| {
             row.get(0)
         })?;
@@ -3369,6 +3409,32 @@ fn asset_query_scope_sql(query: &AssetQuery) -> (String, Vec<Value>) {
             Vec::new(),
         ),
     }
+}
+
+fn asset_count_sql(where_sql: &str, filter: &AssetFilter) -> String {
+    let needs_tone_features = !filter.tone_labels.is_empty()
+        || filter.brightness_min.is_some()
+        || filter.brightness_max.is_some();
+    let has_hue_range = matches!(
+        (filter.color_hue_center, filter.color_hue_width),
+        (Some(center), Some(width)) if center.is_finite() && width.is_finite()
+    );
+    let needs_color_features = !filter.color_categories.is_empty()
+        || has_hue_range
+        || !filter.saturation_levels.is_empty()
+        || filter.saturation_min.is_some()
+        || filter.saturation_max.is_some();
+
+    let mut sql = String::from("SELECT COUNT(*) FROM assets a");
+    if needs_tone_features {
+        sql.push_str(" LEFT JOIN tone_features tf ON tf.asset_id=a.id");
+    }
+    if needs_color_features {
+        sql.push_str(" LEFT JOIN color_features cf ON cf.asset_id=a.id");
+    }
+    sql.push_str(" WHERE ");
+    sql.push_str(where_sql);
+    sql
 }
 
 fn asset_filter_sql(query: &AssetQuery) -> (String, Vec<Value>) {
@@ -6776,19 +6842,15 @@ mod tests {
         let first_removal = repository
             .remove_library_with_reconciliation(first_library)
             .expect("remove first library");
-        assert_eq!(first_removal.removed_cache_entries.len(), 1);
-        assert!(first_removal.removed_cache_entries[0].2.is_none());
+        assert_eq!(first_removal.removed_preview_asset_ids.len(), 1);
+        assert!(first_removal.removed_thumbnail_cache_paths.is_empty());
 
         let second_removal = repository
             .remove_library_with_reconciliation(second_library)
             .expect("remove second library");
-        assert_eq!(second_removal.removed_cache_entries.len(), 1);
         assert_eq!(
-            second_removal.removed_cache_entries[0]
-                .2
-                .as_deref()
-                .map(Path::to_path_buf),
-            Some(temp.path().join("shared-thumb.jpg"))
+            second_removal.removed_thumbnail_cache_paths,
+            vec![temp.path().join("shared-thumb.jpg")]
         );
     }
 
@@ -7722,6 +7784,134 @@ mod tests {
             )
             .expect("restored source assets");
         assert_eq!(restored_source_assets.total, 1);
+    }
+
+    #[test]
+    fn unfiltered_asset_count_plan_avoids_feature_table_joins() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let repository = Repository::new(temp.path().join("database.sqlite3"));
+        repository.initialize().expect("initialize");
+        let query = legacy_asset_query(
+            1,
+            AssetSortField::FileName,
+            SortDirection::Asc,
+            1,
+            100,
+            &AssetFilter::default(),
+        );
+        let (where_sql, values) = asset_filter_sql(&query);
+        let count_sql = asset_count_sql(&where_sql, &query.filter);
+        assert!(!count_sql.contains("tone_features"));
+        assert!(!count_sql.contains("color_features"));
+
+        let connection = repository.open().expect("open database");
+        let mut statement = connection
+            .prepare(&format!("EXPLAIN QUERY PLAN {count_sql}"))
+            .expect("prepare count plan");
+        let details = statement
+            .query_map(params_from_iter(values.iter()), |row| {
+                row.get::<_, String>(3)
+            })
+            .expect("query count plan")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("collect count plan");
+        assert!(details.iter().any(|detail| detail.contains("assets")));
+        assert!(details.iter().all(|detail| {
+            !detail.contains("tone_features") && !detail.contains("color_features")
+        }));
+
+        let tone_filter = AssetFilter {
+            tone_labels: vec!["mid_tone".into()],
+            ..AssetFilter::default()
+        };
+        let tone_query = legacy_asset_query(
+            1,
+            AssetSortField::FileName,
+            SortDirection::Asc,
+            1,
+            100,
+            &tone_filter,
+        );
+        let (tone_where_sql, _) = asset_filter_sql(&tone_query);
+        let tone_count_sql = asset_count_sql(&tone_where_sql, &tone_query.filter);
+        assert!(tone_count_sql.contains("LEFT JOIN tone_features tf"));
+        assert!(!tone_count_sql.contains("color_features"));
+    }
+
+    #[test]
+    fn removing_large_unicode_library_batches_assets_and_preserves_original_files() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let source = temp.path().join("大型图库 😀");
+        std::fs::create_dir_all(&source).expect("create source fixture");
+        let original = source.join("原图-0599.jpg");
+        std::fs::write(&original, b"original fixture bytes").expect("write source fixture");
+        let original_bytes = std::fs::read(&original).expect("read source fixture");
+
+        let repository = Repository::new(temp.path().join("database.sqlite3"));
+        repository.initialize().expect("initialize");
+        let (library_id, generation) = repository
+            .begin_scan(&source.to_string_lossy(), "large-unicode-remove")
+            .expect("begin scan");
+        repository
+            .cancel_scan("large-unicode-remove", library_id)
+            .expect("cancel fixture scan");
+
+        let mut connection = repository.open().expect("open database");
+        let transaction = connection.transaction().expect("begin seed transaction");
+        {
+            let mut insert = transaction
+                .prepare(
+                    "INSERT INTO assets(
+                        library_id, asset_identity_key, absolute_path, relative_path,
+                        file_name, extension, file_size, modified_at, fingerprint,
+                        file_status, scan_status, analysis_status, first_seen_at,
+                        last_seen_at, last_seen_scan
+                     ) VALUES(?1, ?2, ?3, ?4, ?5, 'jpg', 100, 1, ?6,
+                              'present', 'indexed', 'completed',
+                              '2026-09-01T00:00:00Z', '2026-09-01T00:00:00Z', ?7)",
+                )
+                .expect("prepare asset fixture");
+            for index in 0..600 {
+                let file_name = format!("原图-{index:04}.jpg");
+                let absolute_path = source.join(&file_name);
+                insert
+                    .execute(params![
+                        library_id,
+                        identity_key(&absolute_path),
+                        absolute_path.to_string_lossy(),
+                        file_name,
+                        format!("IMG_{index:04}.jpg"),
+                        format!("fixture-fingerprint-{index:04}"),
+                        generation
+                    ])
+                    .expect("insert asset fixture");
+            }
+        }
+        transaction.commit().expect("commit seed transaction");
+        drop(connection);
+
+        let result = repository
+            .remove_library_with_reconciliation(library_id)
+            .expect("remove large fixture library");
+        assert!(result.removed);
+        assert_eq!(result.removed_preview_asset_ids.len(), 600);
+        assert!(
+            result
+                .removed_preview_asset_ids
+                .windows(2)
+                .all(|pair| pair[0] < pair[1])
+        );
+        assert!(result.removed_thumbnail_cache_paths.is_empty());
+        assert_eq!(
+            std::fs::read(&original).expect("original remains"),
+            original_bytes
+        );
+        assert!(
+            repository
+                .list_libraries()
+                .expect("list libraries")
+                .is_empty()
+        );
     }
 
     #[test]

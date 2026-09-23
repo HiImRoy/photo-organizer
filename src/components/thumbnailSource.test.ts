@@ -45,6 +45,51 @@ describe("thumbnail request queue", () => {
     expect(peak).toBe(6);
   });
 
+  it("bounds unique thumbnail sources and evicts the least recently used entry", async () => {
+    api.fetchThumbnail.mockImplementation(async (assetId: number) => `thumbnail-${assetId}`);
+    const assetIds = Array.from({ length: 300 }, (_, index) => 12000 + index);
+
+    for (const assetId of assetIds) {
+      await requestThumbnail(assetId);
+    }
+    expect(api.fetchThumbnail).toHaveBeenCalledTimes(assetIds.length);
+
+    // The cache keeps the newest 256 entries. Touching the oldest retained
+    // entry makes it newer than the next entry for the upcoming eviction.
+    await expect(requestThumbnail(assetIds[44])).resolves.toBe(`thumbnail-${assetIds[44]}`);
+    await expect(requestThumbnail(12300)).resolves.toBe("thumbnail-12300");
+    await expect(requestThumbnail(assetIds[44])).resolves.toBe(`thumbnail-${assetIds[44]}`);
+    expect(api.fetchThumbnail).toHaveBeenCalledTimes(assetIds.length + 1);
+
+    await expect(requestThumbnail(assetIds[45])).resolves.toBe(`thumbnail-${assetIds[45]}`);
+    await expect(requestThumbnail(assetIds[0])).resolves.toBe(`thumbnail-${assetIds[0]}`);
+    expect(api.fetchThumbnail).toHaveBeenCalledTimes(assetIds.length + 3);
+  });
+
+  it("does not cache a failed thumbnail request", async () => {
+    api.fetchThumbnail
+      .mockRejectedValueOnce(new Error("thumbnail fetch failed"))
+      .mockResolvedValueOnce("thumbnail-retry-succeeded");
+
+    await expect(requestThumbnail(13001)).rejects.toThrow("thumbnail fetch failed");
+    await expect(requestThumbnail(13001)).resolves.toBe("thumbnail-retry-succeeded");
+    expect(api.fetchThumbnail).toHaveBeenCalledTimes(2);
+  });
+
+  it("evicts sources when their combined size exceeds the character budget", async () => {
+    const assetIds = [14001, 14002, 14003, 14004];
+    api.fetchThumbnail.mockImplementation(async (assetId: number) =>
+      String.fromCharCode(65 + assetId - assetIds[0]).repeat(9 * 1024 * 1024),
+    );
+
+    for (const assetId of assetIds) {
+      await requestThumbnail(assetId);
+    }
+    await requestThumbnail(assetIds[0]);
+
+    expect(api.fetchThumbnail).toHaveBeenCalledTimes(assetIds.length + 1);
+  });
+
   it("uses bounded quality tiers only below eight columns", () => {
     expect(gridThumbnailProfileForColumns(2)).toMatchObject({
       key: "grid-1280",

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { CSSProperties } from "react";
 
 import {
@@ -138,6 +138,7 @@ import {
 
 const PAGE_SIZE = 120;
 const LOAD_MORE_AHEAD_PX = 720;
+const TEXT_SEARCH_DEBOUNCE_MS = 250;
 const IMPORT_REFRESH_INTERVAL_MS = 750;
 const DEFAULT_LEFT_PANEL_WIDTH = 270;
 const DEFAULT_RIGHT_PANEL_WIDTH = 320;
@@ -319,6 +320,7 @@ export default function App() {
   );
   const currentLibraryId = assetQuery.libraryId;
   const { filter, sort, direction } = assetQuery;
+  const [searchPending, setSearchPending] = useState(false);
   const browseRootActive =
     currentLibraryId !== null || filter.favoriteOnly || filter.collectionId !== null;
   const [assets, setAssets] = useState<AssetListItem[]>([]);
@@ -561,6 +563,18 @@ export default function App() {
 
   function setFilterState(next: AssetFilter) {
     setAssetQuery((current) => updateAssetQueryFilter(current, next));
+  }
+
+  function invalidateAssetRequests() {
+    // Ignore any in-flight page or query result as soon as the user edits search.
+    // Tauri invoke requests cannot be cancelled from the frontend, but stale
+    // completions must not overwrite the next result set.
+    assetLoadGenerationRef.current += 1;
+    nextAssetPageRef.current = 1;
+    hasMoreAssetsRef.current = false;
+    loadingMoreAssetsRef.current = false;
+    setHasMoreAssets(false);
+    setLoadingMoreAssets(false);
   }
 
   function setPage(next: ValueUpdater<number>) {
@@ -1093,6 +1107,13 @@ export default function App() {
   }, [setCurrentLibraryId]);
 
   useEffect(() => {
+    if (!searchPending) return undefined;
+
+    const timeout = window.setTimeout(() => setSearchPending(false), TEXT_SEARCH_DEBOUNCE_MS);
+    return () => window.clearTimeout(timeout);
+  }, [filter.search, searchPending]);
+
+  useEffect(() => {
     let active = true;
     if (!browseRootActive) {
       assetLoadGenerationRef.current += 1;
@@ -1104,6 +1125,10 @@ export default function App() {
     nextAssetPageRef.current = 1;
     hasMoreAssetsRef.current = false;
     loadingMoreAssetsRef.current = false;
+    if (searchPending)
+      return () => {
+        active = false;
+      };
     queueMicrotask(() => {
       if (!active || generation !== assetLoadGenerationRef.current) return;
       setHasMoreAssets(false);
@@ -1139,7 +1164,7 @@ export default function App() {
     return () => {
       active = false;
     };
-  }, [assetQuery, refreshKey, browseRootActive]);
+  }, [assetQuery, refreshKey, browseRootActive, searchPending]);
 
   useEffect(() => {
     if (viewMode !== "grid" || !hasMoreAssets || loadingMoreAssets) return undefined;
@@ -1265,6 +1290,11 @@ export default function App() {
       saturationLevels: [],
       ratings: next.ratings.length > 1 ? [Math.max(...next.ratings)] : next.ratings,
     };
+    const searchChanged = normalized.search !== (assetQueryRef.current.filter.search ?? null);
+    if (searchChanged) {
+      invalidateAssetRequests();
+      setSearchPending(true);
+    }
     setFilterState(normalized);
     setPage(1);
   }
@@ -2282,6 +2312,45 @@ export default function App() {
   const showBatchEditor = batchEditorOpen && selectedAssetIds.length > 0;
   const navigationView = workspaceMode === "organization" ? "organization" : "library";
 
+  const gridActionsRef = useRef({
+    onStartAssetDrag: beginAssetPointerDrag,
+    onSelect: selectAsset,
+    onToggleSelection: toggleAssetSelection,
+    onOpen: openSinglePreview,
+    onClearSelection: clearSelection,
+    onUpdateRating: editAssetRatingForSelection,
+    onUpdateColorLabel: editAssetColorLabelForSelection,
+    onToggleFavorite: toggleFavorite,
+  });
+  gridActionsRef.current = {
+    onStartAssetDrag: beginAssetPointerDrag,
+    onSelect: selectAsset,
+    onToggleSelection: toggleAssetSelection,
+    onOpen: openSinglePreview,
+    onClearSelection: clearSelection,
+    onUpdateRating: editAssetRatingForSelection,
+    onUpdateColorLabel: editAssetColorLabelForSelection,
+    onToggleFavorite: toggleFavorite,
+  };
+  const gridActions = useMemo(
+    () => ({
+      onStartAssetDrag: (asset: AssetListItem, event: React.PointerEvent<HTMLButtonElement>) =>
+        gridActionsRef.current.onStartAssetDrag(asset, event),
+      onSelect: (asset: AssetListItem, modifiers?: SelectionModifiers) =>
+        gridActionsRef.current.onSelect(asset, modifiers),
+      onToggleSelection: (asset: AssetListItem, modifiers?: SelectionModifiers) =>
+        gridActionsRef.current.onToggleSelection(asset, modifiers),
+      onOpen: (asset: AssetListItem) => gridActionsRef.current.onOpen(asset),
+      onClearSelection: () => gridActionsRef.current.onClearSelection(),
+      onUpdateRating: (assetId: number, rating: number) =>
+        void gridActionsRef.current.onUpdateRating(assetId, rating),
+      onUpdateColorLabel: (assetId: number, colorLabel: ManualColorLabel | null) =>
+        void gridActionsRef.current.onUpdateColorLabel(assetId, colorLabel),
+      onToggleFavorite: (assetId: number) => void gridActionsRef.current.onToggleFavorite(assetId),
+    }),
+    [],
+  );
+
   function openSettingsDialog() {
     setSettingsOpen(true);
     setFilterPopoverOpen(false);
@@ -2828,19 +2897,15 @@ export default function App() {
                               selectedAssetIds={selectedAssetIds}
                               groupBy={groupBy}
                               semanticCatalog={semanticCatalog}
-                              onStartAssetDrag={beginAssetPointerDrag}
-                              onSelect={selectAsset}
-                              onToggleSelection={toggleAssetSelection}
-                              onOpen={openSinglePreview}
-                              onClearSelection={clearSelection}
-                              onUpdateRating={(assetId, rating) =>
-                                void editAssetRatingForSelection(assetId, rating)
-                              }
-                              onUpdateColorLabel={(assetId, colorLabel) =>
-                                void editAssetColorLabelForSelection(assetId, colorLabel)
-                              }
+                              onStartAssetDrag={gridActions.onStartAssetDrag}
+                              onSelect={gridActions.onSelect}
+                              onToggleSelection={gridActions.onToggleSelection}
+                              onOpen={gridActions.onOpen}
+                              onClearSelection={gridActions.onClearSelection}
+                              onUpdateRating={gridActions.onUpdateRating}
+                              onUpdateColorLabel={gridActions.onUpdateColorLabel}
                               favoriteAssetIds={favoriteAssetIds}
-                              onToggleFavorite={(assetId) => void toggleFavorite(assetId)}
+                              onToggleFavorite={gridActions.onToggleFavorite}
                             />
                           ) : (
                             <section className="library-empty">
@@ -3308,7 +3373,7 @@ function PanelResizeHandle({
   );
 }
 
-function GridWorkspace({
+const GridWorkspace = memo(function GridWorkspace({
   assets,
   gridColumns,
   active,
@@ -3342,6 +3407,7 @@ function GridWorkspace({
   onToggleFavorite: (assetId: number) => void;
 }) {
   const [collapsedGroups, setCollapsedGroups] = useState<Set<string>>(new Set());
+  const selectedAssetIdSet = useMemo(() => new Set(selectedAssetIds), [selectedAssetIds]);
   const thumbnailProfile = gridThumbnailProfileForColumns(gridColumns);
 
   if (groupBy === "none")
@@ -3359,7 +3425,7 @@ function GridWorkspace({
             asset={asset}
             thumbnailProfile={thumbnailProfile}
             active={active?.id === asset.id}
-            selected={selectedAssetIds.includes(asset.id)}
+            selected={selectedAssetIdSet.has(asset.id)}
             onStartDrag={onStartAssetDrag}
             onSelect={onSelect}
             onToggleSelection={onToggleSelection}
@@ -3425,7 +3491,7 @@ function GridWorkspace({
                     asset={asset}
                     thumbnailProfile={thumbnailProfile}
                     active={active?.id === asset.id}
-                    selected={selectedAssetIds.includes(asset.id)}
+                    selected={selectedAssetIdSet.has(asset.id)}
                     onStartDrag={onStartAssetDrag}
                     onSelect={onSelect}
                     onToggleSelection={onToggleSelection}
@@ -3443,7 +3509,7 @@ function GridWorkspace({
       })}
     </div>
   );
-}
+});
 
 function groupValueForAsset(
   asset: AssetListItem,
