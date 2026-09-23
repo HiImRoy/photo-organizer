@@ -139,6 +139,74 @@
   max-width: 100%;
 }
 
+.scan-performance {
+  box-sizing: border-box;
+  min-width: 0;
+  margin-top: 8px;
+  padding: 8px;
+  border: 1px solid var(--border-soft);
+  border-radius: var(--control-radius);
+  background: var(--panel-inset);
+}
+
+.scan-performance-heading {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  color: var(--text);
+  font-size: 9px;
+}
+
+.scan-performance-heading span,
+.scan-performance-note {
+  color: var(--text-muted);
+  font-size: 8px;
+}
+
+.scan-performance-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 4px 12px;
+  margin: 7px 0 0;
+}
+
+.scan-performance-grid > div {
+  display: flex;
+  min-width: 0;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.scan-performance-grid dt {
+  min-width: 0;
+  color: var(--text-muted);
+  font-size: 8px;
+}
+
+.scan-performance-grid dd {
+  margin: 0;
+  color: var(--text);
+  font-size: 8px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.scan-performance-grid > .is-child {
+  padding-left: 7px;
+}
+
+.scan-performance-grid > .is-child dt,
+.scan-performance-grid > .is-child dd {
+  color: var(--text-muted);
+}
+
+.scan-performance-note {
+  margin: 7px 0 0;
+  line-height: 1.4;
+}
+
 @media (max-width: 860px) {
   .photo-app .task-status-anchor > .task-status-trigger {
     grid-template-columns: minmax(0, 1fr) minmax(86px, 1.15fr) auto;

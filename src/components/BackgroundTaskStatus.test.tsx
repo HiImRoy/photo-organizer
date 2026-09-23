@@ -1,4 +1,4 @@
-import { fireEvent, render, screen } from "@testing-library/react";
+import { fireEvent, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import type { ComponentProps } from "react";
 import { describe, expect, it, vi } from "vitest";
@@ -19,6 +19,26 @@ const scanProgress: ScanProgress = {
   missing: 0,
   currentPath: "C:\\fixtures\\scan\\four.png",
   error: null,
+};
+
+const scanPerformance: NonNullable<ScanProgress["performance"]> = {
+  discoveryUs: 1_250,
+  ownershipLookupUs: 2_000,
+  metadataLookupUs: 4_000,
+  fingerprintUs: 8_500,
+  imageProcessingUs: 20_000,
+  exifUs: 0,
+  sourceDimensionUs: 0,
+  decodeUs: 8_000,
+  sourceDecodeUs: 0,
+  thumbnailDecodeUs: 8_000,
+  resizeUs: 0,
+  featureAnalysisUs: 1_250,
+  thumbnailWriteUs: 0,
+  databaseWriteUs: 3_500,
+  processedFiles: 1,
+  skippedFiles: 0,
+  failedFiles: 0,
 };
 
 const semanticProgress: SemanticProgress = {
@@ -82,6 +102,49 @@ describe("BackgroundTaskStatus", () => {
 
     fireEvent.pointerDown(document.body);
     expect(screen.queryByRole("dialog", { name: "后台任务详情" })).not.toBeInTheDocument();
+  });
+
+  it("omits performance diagnostics when older scan progress has no counters", async () => {
+    const user = userEvent.setup();
+    renderTaskStatus({ scanProgress, scanRunning: true });
+
+    await user.click(screen.getByRole("button", { name: "查看后台任务" }));
+
+    expect(screen.queryByRole("group", { name: "扫描性能诊断" })).not.toBeInTheDocument();
+    expect(screen.getByText("发现 20")).toBeInTheDocument();
+  });
+
+  it("shows cumulative scan timings and identifies nested image-processing metrics", async () => {
+    const user = userEvent.setup();
+    renderTaskStatus({
+      scanProgress: {
+        ...scanProgress,
+        currentPath: null,
+        performance: scanPerformance,
+      },
+      scanRunning: true,
+    });
+
+    await user.click(screen.getByRole("button", { name: "查看后台任务" }));
+
+    const diagnostics = screen.getByRole("group", { name: "扫描性能诊断" });
+    expect(diagnostics).toHaveAttribute("aria-live", "off");
+    const expectMetric = (label: string, value: string) => {
+      const row = within(diagnostics).getByText(label).parentElement;
+      expect(row).toHaveTextContent(value);
+    };
+
+    expectMetric("图片发现", "1.3 ms");
+    expectMetric("元数据 / 归属查询", "6.0 ms");
+    expectMetric("读文件 / 指纹", "8.5 ms");
+    expectMetric("图像处理总计", "20.0 ms");
+    expectMetric("其中：缩略图解码", "8.0 ms");
+    expectMetric("其中：特征分析", "1.3 ms");
+    expectMetric("数据库写入", "3.5 ms");
+    expect(diagnostics).toHaveTextContent("并行阶段可能重叠");
+    expect(diagnostics).toHaveTextContent("不代表墙钟总时长");
+    expect(diagnostics).toHaveTextContent("子项不要重复相加");
+    expect(diagnostics).not.toHaveTextContent("C:\\");
   });
 
   it("preserves full long paths and unbroken errors in scan details", async () => {

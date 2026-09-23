@@ -1258,23 +1258,6 @@ export default function App() {
     };
   }, [acceptScanProgress, acceptSemanticProgress, requestDataRefresh, setCurrentLibraryId]);
 
-  useEffect(() => {
-    if (
-      !scanProgress ||
-      scanProgress.status !== "completed" ||
-      scanProgress.failed > 0 ||
-      scanProgress.missing > 0
-    ) {
-      return undefined;
-    }
-
-    const taskId = scanProgress.taskId;
-    const dismissTimer = window.setTimeout(() => {
-      if (scanProgressRef.current?.taskId === taskId) dismissScanProgress();
-    }, 700);
-    return () => window.clearTimeout(dismissTimer);
-  }, [dismissScanProgress, scanProgress]);
-
   function updateFilter(next: AssetFilter) {
     const normalized = {
       ...next,

@@ -2338,6 +2338,141 @@ describe("PhotoOrganizer application shell", () => {
     expect(api.cancelLibraryScan).toHaveBeenCalledWith("task-1");
   });
 
+  it("retains completed scan diagnostics until dismissed and keeps later scans visible", async () => {
+    const user = userEvent.setup();
+    api.chooseLibraryFolder.mockResolvedValue("C:\\fixtures\\scan");
+    render(<App />);
+    await screen.findByRole("heading", { name: "建立本地图片库" });
+    await waitFor(() => expect(progressListener).toBeDefined());
+
+    act(() => {
+      progressListener?.({
+        taskId: "task-1",
+        libraryId: 7,
+        status: "running",
+        stage: "processing",
+        discovered: 3,
+        processed: 2,
+        succeeded: 2,
+        failed: 0,
+        skipped: 0,
+        missing: 0,
+        currentPath: null,
+        error: null,
+      });
+    });
+
+    const trigger = await screen.findByRole("button", { name: "查看后台任务" });
+    await user.click(trigger);
+    vi.useFakeTimers();
+    try {
+      act(() => {
+        progressListener?.({
+          taskId: "task-1",
+          libraryId: 7,
+          status: "completed",
+          stage: "completed",
+          discovered: 3,
+          processed: 3,
+          succeeded: 3,
+          failed: 0,
+          skipped: 0,
+          missing: 0,
+          currentPath: null,
+          error: null,
+          performance: {
+            discoveryUs: 1_000,
+            ownershipLookupUs: 1_000,
+            metadataLookupUs: 2_000,
+            fingerprintUs: 3_000,
+            imageProcessingUs: 4_000,
+            exifUs: 0,
+            sourceDimensionUs: 0,
+            decodeUs: 2_000,
+            sourceDecodeUs: 0,
+            thumbnailDecodeUs: 2_000,
+            resizeUs: 0,
+            featureAnalysisUs: 1_000,
+            thumbnailWriteUs: 0,
+            databaseWriteUs: 1_000,
+            processedFiles: 3,
+            skippedFiles: 0,
+            failedFiles: 0,
+          },
+        });
+      });
+      act(() => vi.advanceTimersByTime(1_000));
+
+      expect(screen.getByRole("button", { name: "查看后台任务" })).toBeInTheDocument();
+      expect(screen.getByRole("group", { name: "扫描性能诊断" })).toBeInTheDocument();
+      const dismissButton = screen.getByRole("button", { name: "关闭扫描状态" });
+      expect(dismissButton).toHaveAttribute("title", "关闭扫描状态");
+      fireEvent.click(dismissButton);
+      expect(screen.queryByRole("button", { name: "查看后台任务" })).not.toBeInTheDocument();
+
+      act(() => {
+        progressListener?.({
+          taskId: "task-2",
+          libraryId: 7,
+          status: "running",
+          stage: "processing",
+          discovered: 4,
+          processed: 1,
+          succeeded: 1,
+          failed: 0,
+          skipped: 0,
+          missing: 0,
+          currentPath: null,
+          error: null,
+        });
+      });
+      const nextTrigger = screen.getByRole("button", { name: "查看后台任务" });
+      expect(nextTrigger).toHaveTextContent("导入中");
+      fireEvent.click(nextTrigger);
+      expect(screen.getByText("发现 4")).toBeInTheDocument();
+
+      act(() => {
+        progressListener?.({
+          taskId: "task-2",
+          libraryId: 7,
+          status: "completed",
+          stage: "completed",
+          discovered: 4,
+          processed: 4,
+          succeeded: 4,
+          failed: 0,
+          skipped: 0,
+          missing: 0,
+          currentPath: null,
+          error: null,
+        });
+      });
+      act(() => {
+        progressListener?.({
+          taskId: "task-3",
+          libraryId: 7,
+          status: "running",
+          stage: "processing",
+          discovered: 5,
+          processed: 2,
+          succeeded: 2,
+          failed: 0,
+          skipped: 0,
+          missing: 0,
+          currentPath: null,
+          error: null,
+        });
+      });
+
+      expect(screen.getByRole("button", { name: "查看后台任务" })).toHaveTextContent("导入中");
+      expect(screen.queryByText("发现 4")).not.toBeInTheDocument();
+      fireEvent.click(screen.getByRole("button", { name: "查看后台任务" }));
+      expect(screen.getByText("发现 5")).toBeInTheDocument();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("resets scan cancellation when the backend declines the request", async () => {
     const user = userEvent.setup();
     api.chooseLibraryFolder.mockResolvedValue("C:\\fixtures\\scan");
@@ -2675,7 +2810,7 @@ describe("PhotoOrganizer application shell", () => {
     });
   });
 
-  it("dismisses a fully successful scan automatically", async () => {
+  it("keeps a fully successful scan visible until the status is dismissed", async () => {
     const user = userEvent.setup();
     api.chooseLibraryFolder.mockResolvedValue("C:\\fixtures\\successful-scan");
     render(<App />);
@@ -2702,10 +2837,9 @@ describe("PhotoOrganizer application shell", () => {
     const taskTrigger = await screen.findByRole("button", { name: "查看后台任务" });
     await user.click(taskTrigger);
     expect(screen.getByRole("progressbar", { name: "扫描进度" })).toBeInTheDocument();
-    await waitFor(
-      () => expect(screen.queryByRole("progressbar", { name: "扫描进度" })).not.toBeInTheDocument(),
-      { timeout: 1_500 },
-    );
+    await user.click(screen.getByRole("button", { name: "关闭扫描状态" }));
+    expect(screen.queryByRole("progressbar", { name: "扫描进度" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "查看后台任务" })).not.toBeInTheDocument();
   });
 
   it("requests a new stable sort when the user changes the sort field", async () => {

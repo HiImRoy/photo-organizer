@@ -18,6 +18,13 @@ const stageLabels: Record<string, string> = {
   failed: "导入失败",
 };
 
+function formatScanDuration(microseconds: number): string {
+  if (microseconds < 1000) return `${microseconds} μs`;
+  const milliseconds = microseconds / 1000;
+  if (milliseconds < 1000) return `${milliseconds.toFixed(1)} ms`;
+  return `${(milliseconds / 1000).toFixed(2)} s`;
+}
+
 export function ProgressPanel({
   progress,
   taskName,
@@ -32,6 +39,7 @@ export function ProgressPanel({
       ? 8
       : 0;
   const operationLabel = terminal ? (stageLabels[progress.stage] ?? progress.stage) : "导入中";
+  const performance = progress.performance;
 
   return (
     <section className={`scan-panel status-${progress.status}`} aria-live="polite">
@@ -45,7 +53,13 @@ export function ProgressPanel({
         </div>
         <span className="task-panel-percent">{ratio}%</span>
         {terminal ? (
-          <button className="icon-button" type="button" onClick={onDismiss} aria-label="关闭状态">
+          <button
+            className="icon-button"
+            type="button"
+            onClick={onDismiss}
+            aria-label="关闭扫描状态"
+            title="关闭扫描状态"
+          >
             <CloseIcon width="18" height="18" />
           </button>
         ) : (
@@ -81,6 +95,54 @@ export function ProgressPanel({
         <div className="scan-error" role="alert">
           {progress.error}
         </div>
+      ) : null}
+      {performance ? (
+        <section
+          className="scan-performance"
+          role="group"
+          aria-label="扫描性能诊断"
+          aria-live="off"
+        >
+          <div className="scan-performance-heading">
+            <strong>性能计时</strong>
+            <span>累计值 · 并行阶段可能重叠</span>
+          </div>
+          <dl className="scan-performance-grid">
+            <div>
+              <dt>图片发现</dt>
+              <dd>{formatScanDuration(performance.discoveryUs)}</dd>
+            </div>
+            <div>
+              <dt>元数据 / 归属查询</dt>
+              <dd>
+                {formatScanDuration(performance.metadataLookupUs + performance.ownershipLookupUs)}
+              </dd>
+            </div>
+            <div>
+              <dt>读文件 / 指纹</dt>
+              <dd>{formatScanDuration(performance.fingerprintUs)}</dd>
+            </div>
+            <div>
+              <dt>图像处理总计</dt>
+              <dd>{formatScanDuration(performance.imageProcessingUs)}</dd>
+            </div>
+            <div className="is-child">
+              <dt>其中：缩略图解码</dt>
+              <dd>{formatScanDuration(performance.thumbnailDecodeUs)}</dd>
+            </div>
+            <div className="is-child">
+              <dt>其中：特征分析</dt>
+              <dd>{formatScanDuration(performance.featureAnalysisUs)}</dd>
+            </div>
+            <div>
+              <dt>数据库写入</dt>
+              <dd>{formatScanDuration(performance.databaseWriteUs)}</dd>
+            </div>
+          </dl>
+          <p className="scan-performance-note">
+            阶段时间是累计工作耗时，并行任务可能重叠，不代表墙钟总时长。图像处理总计包含缩略图解码和特征分析，子项不要重复相加。
+          </p>
+        </section>
       ) : null}
     </section>
   );
