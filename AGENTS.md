@@ -95,11 +95,52 @@ Each implementation task must:
 1. Inspect existing code and documentation.
 2. State assumptions.
 3. Keep the change limited to the current milestone.
-4. Add or update tests.
-5. Run relevant tests, lint, formatting, and type checks.
+4. Add or update tests for behavior changes. Documentation- or comment-only
+   changes do not require new tests or code-test runs.
+5. Select verification from the risk-based matrix below; do not treat every
+   check as mandatory for every change.
 6. Review the final diff.
 7. Update relevant documentation.
-8. Report unresolved risks honestly.
+8. Report checks that were not run and unresolved risks honestly.
+
+### Risk-based verification
+
+Use the smallest verification set that covers the changed behavior, and expand
+it when a change crosses shared boundaries or raises regression risk:
+
+- Documentation- or comment-only changes: check formatting on changed
+  documents and run `git diff --check`. No new tests, application tests, lint,
+  type checks, or builds are required unless the change also alters executable
+  code or a generated/configuration contract.
+- Isolated CSS or a small UI component: check formatting on changed files and
+  run the related Vitest suite when component behavior or DOM contracts change.
+  For visual changes, inspect the affected view at the relevant theme and
+  viewport sizes. A local fix does not automatically require every viewport in
+  the full visual matrix.
+- Shared TypeScript logic: check changed-file formatting, lint and typecheck,
+  and run the affected tests. Include every known consumer when shared behavior
+  changes.
+- Rust, IPC, database, import, or analysis changes: run the relevant Rust tests
+  and static checks; include affected frontend tests when an IPC or user-facing
+  contract is involved. Keep filesystem tests within `test-data/` or test-owned
+  temporary directories.
+- Startup or packaging changes: preserve the manual launch contract below and
+  verify `scripts/manual-build-start.ps1 -CheckOnly` and the frontend build.
+- Escalate frontend changes to the full frontend suite when shared UI/state or
+  cross-feature behavior makes targeted coverage insufficient. Escalate Rust,
+  IPC, or database changes to all-target Rust tests when shared contracts,
+  migrations, or safety boundaries are involved. Run full static checks/builds
+  for cross-module, dependency/configuration, startup/packaging changes, or
+  when the affected area cannot be isolated confidently. CI and release
+  validation retain their full required checks; this local matrix does not
+  reduce them.
+
+When a check fails, first isolate and rerun the failing test or command to
+distinguish a reproducible failure from an intermittent or environment issue.
+Do not hide a failure by disabling or weakening its test, suppressing its
+output, or repeatedly rerunning until it passes. Fix a reproducible failure or
+report it with the evidence. Always identify checks that were not run.
+
 ### Manual launch contract
 
 `启动 PhotoOrganizer.cmd` is the canonical manual build-and-launch entry for
@@ -159,11 +200,14 @@ The MVP excludes:
 A task is complete only when:
 
 - Required behavior is implemented.
-- Relevant automated tests pass.
-- Type checks and lint pass.
+- Verification appropriate to the change has passed: behavior changes include
+  relevant tests; documentation/comment-only changes need no code tests; lint,
+  type checks, visual checks, and builds are required when the matrix says they
+  cover the changed area.
 - No original test fixture is unexpectedly modified.
 - User-visible behavior is documented.
 - The final diff has been reviewed.
+- Any skipped checks and unresolved failures are reported honestly.
 
 ## Agent delegation and ownership
 

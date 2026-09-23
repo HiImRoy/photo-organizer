@@ -98,19 +98,23 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts\manual-build-sta
 
 ## 质量检查
 
-提交前运行：
+日常改动按[测试策略](docs/testing.md)选择与改动范围相符的检查。文档/注释-only 改动只检查变更文档格式和 `git diff --check`，不需要新增或运行代码测试。CI 与发布保留完整验证门槛。
+
+CI/发布全量验证命令示例（不是每个提交的本地必跑清单）：
 
 ```powershell
 npm.cmd run format:check
 npm.cmd run lint
 npm.cmd run typecheck
-npm.cmd test
-npm.cmd run test:rust
-npm.cmd run clippy
+npm.cmd test -- --run
+cargo fmt --manifest-path src-tauri/Cargo.toml -- --check
+cargo test --manifest-path src-tauri/Cargo.toml --all-targets --all-features
+cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --all-features -- -D warnings
 npm.cmd run build
+npm.cmd run tauri build -- --target x86_64-pc-windows-msvc --bundles nsis
 ```
 
-Windows 打包和环境检查：
+Windows 打包和环境检查（按需或发布时）：
 
 ```powershell
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/build-windows.ps1

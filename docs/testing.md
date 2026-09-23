@@ -10,8 +10,36 @@
 - Rust 集成测试：复制夹具到临时源目录，验证扫描/增量/缺失/损坏/Unicode/缓存失效和源哈希不变。
 - React 测试：Vitest + Testing Library，mock Tauri client，覆盖空状态、导入、紧凑任务入口的点击展开、进度、取消、网格、错误、排序和三栏详情。
 - UI 可访问性回归：覆盖图片卡片 `aria-pressed` 选中态、进度条数值、错误提示和可见键盘焦点。
-- 构建验证：TypeScript、ESLint、Prettier、Rustfmt、Clippy、Vite production build、Cargo test、Tauri bundle。
+- 完整构建验证：由 CI、发布流程或高风险/跨模块变更执行，包括 TypeScript、ESLint、Prettier、Rustfmt、Clippy、Vite production build、Cargo test 和所需 Tauri bundle。
 - 手工 smoke：只选择 `test-data/manual-library/`，验证系统对话框、增量展示、重启恢复和安装包启动。
+
+## 本地验证矩阵与升级条件
+
+日常开发按改动范围选择最小且充分的验证。文档或注释-only 改动只需对变更文件做格式检查并运行 `git diff --check`；无需新增测试，也无需运行代码测试、lint、类型检查或构建。若文档改动同时改变了可执行配置、生成流程或用户可见行为，再按相应代码层级验证。
+
+| 改动范围                      | 本地日常验证                                                                                                                           | 何时扩大验证                                                                                                                                                      |
+| ----------------------------- | -------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 文档/注释-only                | 变更文档的 Prettier 检查；`git diff --check`                                                                                           | 改动同时影响可执行配置、生成流程或产品行为时，按对应层级升级                                                                                                      |
+| 纯 CSS 或小型局部组件         | 纯 CSS 只需检查变更文件格式，并在外观改变时检查受影响视图；TSX 行为或 DOM 契约变化时运行相关 Vitest。CSS-only 不要求 TS lint/typecheck | 涉及共享控件、全局样式、断点、导航/主布局，或无法确定影响范围时，扩大到相关页面、主题、窗口尺寸和测试套件；只有改动 TS/TSX 或影响类型契约时才加 TS lint/typecheck |
+| 共享 TypeScript 逻辑          | 变更文件格式检查、相关 lint、typecheck、受影响 Vitest；共享行为需覆盖已知调用方                                                        | 被多个功能区使用、改变公共状态/数据契约或影响跨区工作流时，运行所有受影响套件；高风险时升级到全量前端验证                                                         |
+| Rust、IPC、数据库、导入或分析 | 相关 Rust 测试、Rustfmt/Clippy 等受影响静态检查；IPC 或用户可见契约变更时运行对应前端测试/typecheck                                    | 迁移、文件安全边界、缩略图-only 处理边界、模型输入、跨前后端流程或多模块行为变化时，扩大到全量相关 Rust/前端测试和静态检查                                        |
+| 启动或打包                    | 保持手动启动合同；运行 `scripts/manual-build-start.ps1 -CheckOnly` 和前端 build                                                        | 按启动/发布流程完成其余必要检查；发布包仍需对应的打包及验收流程                                                                                                   |
+| 高风险、跨模块或影响无法隔离  | 完整前端测试、Rust 全目标测试、静态检查和 build                                                                                        | 由 CI/发布门禁确认全量结果；不得以局部通过替代现有 CI 或发布要求                                                                                                  |
+
+升级到更大验证集的明确条件包括：共享控件/全局 CSS/响应式断点变化、IPC 或持久化数据结构变化、文件操作安全行为、导入/缩略图/模型分析边界变化、多个模块共同修改、依赖或构建配置变化，以及无法可靠圈定受影响调用方的情况。CI 的验证强度和发布验收要求保持不变；完整 `npm test`、Rust 全量测试、全量静态检查和构建可由 CI、发布或上述高风险改动承担，无需每个局部修复都在本地重复运行。
+
+局部前端命令示例（把示例路径换成本次实际改动文件）：
+
+```powershell
+npx.cmd prettier --check src/components/BackgroundTaskStatus.tsx src/components/backgroundTaskStatus.css
+npx.cmd vitest run src/components/BackgroundTaskStatus.test.tsx
+npx.cmd eslint --max-warnings 0 src/components/BackgroundTaskStatus.tsx
+npm.cmd run typecheck
+```
+
+只运行与改动相关的命令：CSS-only 执行格式和必要视觉检查即可，不运行上述 TS lint/typecheck；组件测试只在交互、渲染或 DOM 契约受到影响时运行。全局 CSS/共享控件按升级条件扩展视觉检查；TS lint/typecheck 仍以是否改动 TS/TSX 或其类型契约为准。
+
+失败时先隔离并重跑失败的单项，以判断是可复现问题还是偶发/环境问题。不得通过关闭或弱化测试、隐藏输出、反复重跑直到变绿来掩盖失败；可复现失败应修复，无法修复时要记录证据和原因。最终报告必须逐项说明未运行的检查。
 
 ## 手动启动开发窗口
 
@@ -23,19 +51,22 @@
 
 数据库覆盖首次/重复初始化、迁移顺序、唯一约束、upsert 和重启恢复；组合筛选还必须验证色相范围严格度按 8%～45% 单调提高目标色的全图面积要求，高严格度要求面积主色匹配，并覆盖多个面积色/强调色、跨红色边界、旧调色板与无效数据。缩略图覆盖正常、损坏、方向、命中、失效、Unicode 路径和不写源目录；高分辨率 fixture 必须证明导入提取后的像素尺寸受限且 `source_decode_us=0`。分析覆盖黑、白、灰、高低饱和、透明、超小图和所有输出范围。
 
-## 命令与通过标准
+## CI/发布全量验证命令示例与通过标准
+
+以下是全量验证示例，不是每次小改动的本地必跑清单。CI 当前执行完整前端格式/lint/typecheck/Vitest、Rustfmt、Rust all-targets/all-features tests、Clippy 和前端 production build；发布流程还构建 Windows 安装包。不得通过本地分层策略降低这些 CI/发布门槛。
 
 ```powershell
 npm.cmd run format:check
 npm.cmd run lint
 npm.cmd run typecheck
 npm.cmd test -- --run
-npm.cmd run test:rust
-npm.cmd run clippy
+cargo fmt --manifest-path src-tauri/Cargo.toml -- --check
+cargo test --manifest-path src-tauri/Cargo.toml --all-targets --all-features
+cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --all-features -- -D warnings
 npm.cmd run build
 ```
 
-任何失败必须修复或在执行计划与最终报告中记录真实原因。未运行的检查不能描述为通过。
+完整验证中的失败必须修复，或如实记录可复现原因及后续处置。任何未运行的检查都不得描述为通过；对局部日常改动，按上方矩阵报告实际选择和未运行项目即可。
 
 ## 浏览器视觉回归
 
@@ -47,7 +78,9 @@ http://localhost:1420/?visual-fixture=scanning
 http://localhost:1420/?visual-fixture=error
 ```
 
-每次结构或样式调整至少检查 1920×1080、1440×900、1366×768 和 960×720，并检查可调宽度侧栏、组合筛选、分组、单图/胶片栏、扫描/语义任务、错误、模型不可用、图片选中、详情与焦点。相邻主/次按钮操作组还必须检查高度、圆角、边框、基线和间距一致，至少覆盖设置页底部操作组的深色、白天和窄窗口状态。截图作为当次验收产物按需生成，不将已经失效的界面截图长期留在仓库。production build 后确认确定性夹具模块只存在于开发动态分支。
+视觉检查按受影响范围和响应式风险选择。局部样式修复检查对应视图，以及相关的常规尺寸和边界/窄窗口；不要求每次都覆盖全部四个尺寸。全局结构、断点、侧栏、网格/胶片布局或多页面共享样式变更，应覆盖 1920×1080、1440×900、1366×768、960×720 中受影响的尺寸，并检查相关状态。涉及主题变量时检查受影响主题。
+
+相邻主/次按钮操作组的几何契约始终有效：凡修改该组或其共享样式，都要核对高度、圆角、边框、基线和间距；至少检查深色、白天主题及一个窄窗口，并覆盖混合主/次按钮。其他局部样式修改只检查实际受影响的控件与状态。截图作为当次验收产物按需生成，不将失效截图长期留在仓库。仅在改动视觉 fixture 或相关构建分支时，额外确认确定性 fixture 模块只存在于开发动态分支。
 
 ## 发布前附加验证
 
