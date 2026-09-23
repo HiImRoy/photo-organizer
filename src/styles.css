@@ -15858,6 +15858,7 @@ button.primary-action:active:not(:disabled) {
   flex: 0 0 var(--control-height-compact);
   padding: 0 !important;
   place-items: center;
+  justify-content: center;
   color: var(--text-muted);
   border: 1px solid var(--line-visible) !important;
   border-radius: 50% !important;
