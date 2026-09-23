@@ -1937,6 +1937,9 @@ select:disabled {
   font-size: 8px;
 }
 .current-path {
+  box-sizing: border-box;
+  min-width: 0;
+  max-width: 100%;
   margin-top: 5px;
   overflow: hidden;
   color: #6f7884;
@@ -1948,9 +1951,12 @@ select:disabled {
   white-space: nowrap;
 }
 .scan-error {
+  min-width: 0;
+  max-width: 100%;
   margin-top: 5px;
   color: var(--error);
   font-size: 9px;
+  overflow-wrap: anywhere;
 }
 .semantic-taskbar {
   display: grid;

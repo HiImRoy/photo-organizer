@@ -121,6 +121,24 @@
   border-radius: var(--control-radius);
 }
 
+.photo-app .task-status-popover {
+  box-sizing: border-box;
+  min-width: 0;
+}
+
+.photo-app .task-status-list {
+  grid-template-columns: minmax(0, 1fr);
+  min-width: 0;
+}
+
+.photo-app .task-status-popover .scan-panel,
+.photo-app .task-status-popover .semantic-taskbar {
+  box-sizing: border-box;
+  width: 100%;
+  min-width: 0;
+  max-width: 100%;
+}
+
 @media (max-width: 860px) {
   .photo-app .task-status-anchor > .task-status-trigger {
     grid-template-columns: minmax(0, 1fr) minmax(86px, 1.15fr) auto;

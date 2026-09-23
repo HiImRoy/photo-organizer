@@ -84,6 +84,24 @@ describe("BackgroundTaskStatus", () => {
     expect(screen.queryByRole("dialog", { name: "后台任务详情" })).not.toBeInTheDocument();
   });
 
+  it("preserves full long paths and unbroken errors in scan details", async () => {
+    const user = userEvent.setup();
+    const longPath = `C:\\Users\\13002\\Pictures\\${"long-folder-name".repeat(24)}\\中文 图片.png`;
+    const longError = "decoder-failed-".repeat(32);
+
+    renderTaskStatus({
+      scanProgress: { ...scanProgress, currentPath: longPath, error: longError },
+      scanRunning: true,
+    });
+
+    await user.click(screen.getByRole("button", { name: "查看后台任务" }));
+
+    const pathDetails = screen.getByTitle(longPath);
+    expect(pathDetails).toHaveClass("current-path");
+    expect(pathDetails).toHaveTextContent(longPath);
+    expect(screen.getByRole("alert")).toHaveTextContent(longError);
+  });
+
   it("puts semantic analysis in the same task details surface", async () => {
     const user = userEvent.setup();
     const onPauseResumeSemantic = vi.fn();
