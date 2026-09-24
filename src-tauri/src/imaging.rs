@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufRead, BufReader, Cursor, Read, Seek, Write};
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 use std::time::Instant;
 
 use exif::{In, Tag, Value};
@@ -21,6 +22,8 @@ pub const ANALYSIS_THUMBNAIL_MAX_DIMENSION: u32 = 640;
 pub const ANALYSIS_VERSION: &str = "basic-color-v6";
 pub const COLOR_ALGORITHM_VERSION: &str = "accent-oklab-v3";
 pub const SCREEN_PREVIEW_SPEC: &str = "screen-bounded-v2";
+
+static SRGB_LINEAR_LUT: OnceLock<[f64; 256]> = OnceLock::new();
 
 const MAX_COLOR_CLUSTERS: usize = 8;
 const COLOR_CLUSTER_ITERATIONS: usize = 8;
@@ -1116,10 +1119,30 @@ fn nearest_center(color: OklabColor, centers: &[OklabColor]) -> usize {
         .unwrap_or(0)
 }
 
+fn srgb_linear_lut() -> &'static [f64; 256] {
+    SRGB_LINEAR_LUT
+        .get_or_init(|| std::array::from_fn(|channel| srgb_to_linear(channel as f64 / 255.0)))
+}
+
 fn rgb_to_oklab(red: u8, green: u8, blue: u8) -> OklabColor {
-    let red = srgb_to_linear(f64::from(red) / 255.0);
-    let green = srgb_to_linear(f64::from(green) / 255.0);
-    let blue = srgb_to_linear(f64::from(blue) / 255.0);
+    let lookup = srgb_linear_lut();
+    rgb_to_oklab_linear(
+        lookup[usize::from(red)],
+        lookup[usize::from(green)],
+        lookup[usize::from(blue)],
+    )
+}
+
+#[cfg(test)]
+fn rgb_to_oklab_direct(red: u8, green: u8, blue: u8) -> OklabColor {
+    rgb_to_oklab_linear(
+        srgb_to_linear(f64::from(red) / 255.0),
+        srgb_to_linear(f64::from(green) / 255.0),
+        srgb_to_linear(f64::from(blue) / 255.0),
+    )
+}
+
+fn rgb_to_oklab_linear(red: f64, green: f64, blue: f64) -> OklabColor {
     let l = 0.4122214708 * red + 0.5363325363 * green + 0.0514459929 * blue;
     let m = 0.2119034982 * red + 0.6806995451 * green + 0.1073969566 * blue;
     let s = 0.0883024619 * red + 0.2817188376 * green + 0.6299787005 * blue;
@@ -1532,6 +1555,36 @@ mod tests {
 
     fn assert_in_unit_range(value: f64) {
         assert!((0.0..=1.0).contains(&value), "value out of range: {value}");
+    }
+
+    #[test]
+    fn srgb_lookup_matches_direct_oklab_conversion_bit_exactly() {
+        let lookup = srgb_linear_lut();
+        for channel in 0..=u8::MAX {
+            let direct = srgb_to_linear(f64::from(channel) / 255.0);
+            assert_eq!(
+                lookup[usize::from(channel)].to_bits(),
+                direct.to_bits(),
+                "sRGB channel {channel}"
+            );
+        }
+
+        for channel in 0..=u8::MAX {
+            let colors = [
+                (channel, channel, channel),
+                (channel, 0, 0),
+                (0, channel, 0),
+                (0, 0, channel),
+                (channel, u8::MAX - channel, channel.rotate_left(1)),
+            ];
+            for (red, green, blue) in colors {
+                let optimized = rgb_to_oklab(red, green, blue);
+                let direct = rgb_to_oklab_direct(red, green, blue);
+                assert_eq!(optimized.l.to_bits(), direct.l.to_bits());
+                assert_eq!(optimized.a.to_bits(), direct.a.to_bits());
+                assert_eq!(optimized.b.to_bits(), direct.b.to_bits());
+            }
+        }
     }
 
     #[test]
