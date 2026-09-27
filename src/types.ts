@@ -305,6 +305,10 @@ export interface ScanPerformance {
   discoveryUs: number;
   ownershipLookupUs: number;
   metadataLookupUs: number;
+  /** Optional stage detail added after the original aggregate-only payload. */
+  fileMetadataUs?: number;
+  existingAssetLookupUs?: number;
+  cacheProbeUs?: number;
   fingerprintUs: number;
   imageProcessingUs: number;
   exifUs: number;
@@ -316,6 +320,8 @@ export interface ScanPerformance {
   featureAnalysisUs: number;
   thumbnailWriteUs: number;
   databaseWriteUs: number;
+  coldFiles?: number;
+  reanalyzedFiles?: number;
   processedFiles: number;
   skippedFiles: number;
   failedFiles: number;

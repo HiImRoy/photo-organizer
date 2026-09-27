@@ -40,6 +40,12 @@ export function ProgressPanel({
       : 0;
   const operationLabel = terminal ? (stageLabels[progress.stage] ?? progress.stage) : "导入中";
   const performance = progress.performance;
+  const hasMetadataLookupBreakdown =
+    performance?.fileMetadataUs !== undefined ||
+    performance?.existingAssetLookupUs !== undefined ||
+    performance?.cacheProbeUs !== undefined;
+  const hasProcessingDecisionCounts =
+    performance?.coldFiles !== undefined || performance?.reanalyzedFiles !== undefined;
 
   return (
     <section className={`scan-panel status-${progress.status}`} aria-live="polite">
@@ -118,6 +124,26 @@ export function ProgressPanel({
                 {formatScanDuration(performance.metadataLookupUs + performance.ownershipLookupUs)}
               </dd>
             </div>
+            {hasMetadataLookupBreakdown ? (
+              <>
+                <div className="is-child">
+                  <dt>其中：文件元数据</dt>
+                  <dd>{formatScanDuration(performance.fileMetadataUs ?? 0)}</dd>
+                </div>
+                <div className="is-child">
+                  <dt>其中：已有资源查询</dt>
+                  <dd>{formatScanDuration(performance.existingAssetLookupUs ?? 0)}</dd>
+                </div>
+                <div className="is-child">
+                  <dt>其中：缓存探测</dt>
+                  <dd>{formatScanDuration(performance.cacheProbeUs ?? 0)}</dd>
+                </div>
+                <div className="is-child">
+                  <dt>其中：归属查询</dt>
+                  <dd>{formatScanDuration(performance.ownershipLookupUs)}</dd>
+                </div>
+              </>
+            ) : null}
             <div>
               <dt>读文件 / 指纹</dt>
               <dd>{formatScanDuration(performance.fingerprintUs)}</dd>
@@ -139,8 +165,29 @@ export function ProgressPanel({
               <dd>{formatScanDuration(performance.databaseWriteUs)}</dd>
             </div>
           </dl>
+          {hasProcessingDecisionCounts ? (
+            <>
+              <div className="scan-performance-heading">
+                <strong>处理计数</strong>
+              </div>
+              <dl className="scan-performance-grid">
+                <div>
+                  <dt>新文件已判定需处理</dt>
+                  <dd>{performance.coldFiles ?? 0} 张</dd>
+                </div>
+                <div>
+                  <dt>已有文件需重分析</dt>
+                  <dd>{performance.reanalyzedFiles ?? 0} 张</dd>
+                </div>
+                <div>
+                  <dt>已有文件跳过</dt>
+                  <dd>{performance.skippedFiles} 张</dd>
+                </div>
+              </dl>
+            </>
+          ) : null}
           <p className="scan-performance-note">
-            阶段时间是累计工作耗时，并行任务可能重叠，不代表墙钟总时长。图像处理总计包含缩略图解码和特征分析，子项不要重复相加。
+            阶段是累计工作耗时，可能并行重叠，不代表墙钟时长。元数据明细和归属查询已计入查询总计；图像处理子项已计入图像处理总计，不要重复相加。
           </p>
         </section>
       ) : null}

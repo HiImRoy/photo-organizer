@@ -434,11 +434,14 @@ pub struct SemanticProgress {
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
+#[serde(default, rename_all = "camelCase")]
 pub struct ScanPerformance {
     pub discovery_us: u64,
     pub ownership_lookup_us: u64,
     pub metadata_lookup_us: u64,
+    pub file_metadata_us: u64,
+    pub existing_asset_lookup_us: u64,
+    pub cache_probe_us: u64,
     pub fingerprint_us: u64,
     pub image_processing_us: u64,
     pub exif_us: u64,
@@ -452,7 +455,44 @@ pub struct ScanPerformance {
     pub database_write_us: u64,
     pub processed_files: u64,
     pub skipped_files: u64,
+    pub cold_files: u64,
+    pub reanalyzed_files: u64,
     pub failed_files: u64,
+}
+
+#[cfg(test)]
+mod scan_performance_tests {
+    use super::ScanPerformance;
+
+    #[test]
+    fn scan_performance_wire_names_keep_legacy_aggregate_and_default_new_fields() {
+        let performance = ScanPerformance {
+            metadata_lookup_us: 17,
+            file_metadata_us: 5,
+            existing_asset_lookup_us: 9,
+            cache_probe_us: 3,
+            cold_files: 2,
+            reanalyzed_files: 4,
+            skipped_files: 6,
+            ..ScanPerformance::default()
+        };
+        let value = serde_json::to_value(performance).expect("serialize performance");
+        assert_eq!(value["metadataLookupUs"], 17);
+        assert_eq!(value["fileMetadataUs"], 5);
+        assert_eq!(value["existingAssetLookupUs"], 9);
+        assert_eq!(value["cacheProbeUs"], 3);
+        assert_eq!(value["coldFiles"], 2);
+        assert_eq!(value["reanalyzedFiles"], 4);
+        assert_eq!(value["skippedFiles"], 6);
+
+        let legacy: ScanPerformance =
+            serde_json::from_value(serde_json::json!({"metadataLookupUs": 11}))
+                .expect("deserialize legacy payload");
+        assert_eq!(legacy.metadata_lookup_us, 11);
+        assert_eq!(legacy.file_metadata_us, 0);
+        assert_eq!(legacy.existing_asset_lookup_us, 0);
+        assert_eq!(legacy.cache_probe_us, 0);
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

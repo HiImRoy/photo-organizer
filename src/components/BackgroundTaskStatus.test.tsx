@@ -21,7 +21,7 @@ const scanProgress: ScanProgress = {
   error: null,
 };
 
-const scanPerformance: NonNullable<ScanProgress["performance"]> = {
+const legacyScanPerformance: NonNullable<ScanProgress["performance"]> = {
   discoveryUs: 1_250,
   ownershipLookupUs: 2_000,
   metadataLookupUs: 4_000,
@@ -39,6 +39,16 @@ const scanPerformance: NonNullable<ScanProgress["performance"]> = {
   processedFiles: 1,
   skippedFiles: 0,
   failedFiles: 0,
+};
+
+const scanPerformance: NonNullable<ScanProgress["performance"]> = {
+  ...legacyScanPerformance,
+  fileMetadataUs: 2_000,
+  existingAssetLookupUs: 1_250,
+  cacheProbeUs: 0,
+  coldFiles: 3,
+  reanalyzedFiles: 4,
+  skippedFiles: 2,
 };
 
 const semanticProgress: SemanticProgress = {
@@ -114,6 +124,22 @@ describe("BackgroundTaskStatus", () => {
     expect(screen.getByText("发现 20")).toBeInTheDocument();
   });
 
+  it("keeps aggregate timings when legacy diagnostics lack the stage breakdown", async () => {
+    const user = userEvent.setup();
+    renderTaskStatus({
+      scanProgress: { ...scanProgress, currentPath: null, performance: legacyScanPerformance },
+      scanRunning: true,
+    });
+
+    await user.click(screen.getByRole("button", { name: "查看后台任务" }));
+
+    const diagnostics = screen.getByRole("group", { name: "扫描性能诊断" });
+    const lookupRow = within(diagnostics).getByText("元数据 / 归属查询").parentElement;
+    expect(lookupRow).toHaveTextContent("6.0 ms");
+    expect(diagnostics).not.toHaveTextContent("文件元数据");
+    expect(diagnostics).not.toHaveTextContent("处理计数");
+  });
+
   it("shows cumulative scan timings and identifies nested image-processing metrics", async () => {
     const user = userEvent.setup();
     renderTaskStatus({
@@ -136,14 +162,21 @@ describe("BackgroundTaskStatus", () => {
 
     expectMetric("图片发现", "1.3 ms");
     expectMetric("元数据 / 归属查询", "6.0 ms");
+    expectMetric("其中：文件元数据", "2.0 ms");
+    expectMetric("其中：已有资源查询", "1.3 ms");
+    expectMetric("其中：缓存探测", "0 μs");
+    expectMetric("其中：归属查询", "2.0 ms");
+    expectMetric("新文件已判定需处理", "3 张");
+    expectMetric("已有文件需重分析", "4 张");
+    expectMetric("已有文件跳过", "2 张");
     expectMetric("读文件 / 指纹", "8.5 ms");
     expectMetric("图像处理总计", "20.0 ms");
     expectMetric("其中：缩略图解码", "8.0 ms");
     expectMetric("其中：特征分析", "1.3 ms");
     expectMetric("数据库写入", "3.5 ms");
-    expect(diagnostics).toHaveTextContent("并行阶段可能重叠");
-    expect(diagnostics).toHaveTextContent("不代表墙钟总时长");
-    expect(diagnostics).toHaveTextContent("子项不要重复相加");
+    expect(diagnostics).toHaveTextContent("可能并行重叠");
+    expect(diagnostics).toHaveTextContent("不代表墙钟时长");
+    expect(diagnostics).toHaveTextContent("不要重复相加");
     expect(diagnostics).not.toHaveTextContent("C:\\");
   });
 

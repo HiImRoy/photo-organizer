@@ -7,7 +7,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, SyncSender};
 use std::time::{Duration, Instant, UNIX_EPOCH};
 
-use crate::db::{LibrarySourceRoot, ProcessedAssetWrite, Repository, SeenAssetWrite};
+use crate::db::{
+    ExistingAssetLookupSession, LibrarySourceRoot, ProcessedAssetWrite, Repository, SeenAssetWrite,
+};
 use crate::error::{AppError, AppResult};
 use crate::imaging::{process_image_from_cached_thumbnail, process_image_with_source_bytes};
 use crate::models::{FileSnapshot, ProcessedImage, ScanPerformance, ScanProgress, ScanSummary};
@@ -231,6 +233,9 @@ where
         options.include_subfolder_images,
         task_id,
     )?;
+    let lookup_setup_started = Instant::now();
+    let mut existing_asset_lookup = repository.existing_asset_lookup_session()?;
+    let lookup_setup_us = elapsed_us(lookup_setup_started);
     scan_library_scope(
         repository,
         thumbnail_dir,
@@ -241,6 +246,8 @@ where
         generation,
         true,
         options,
+        &mut existing_asset_lookup,
+        lookup_setup_us,
         emit,
     )
 }
@@ -361,6 +368,8 @@ where
     aggregate.stage = "discovering".into();
     emit(aggregate.clone());
 
+    let mut existing_asset_lookup = None;
+    let mut lookup_setup_us = 0;
     for (scope_root, library_id, generation) in ordered_targets {
         if cancelled.load(Ordering::Relaxed) {
             aggregate.status = "cancelled".into();
@@ -369,6 +378,13 @@ where
             emit(aggregate.clone());
             return Ok(summary_from_progress(&aggregate, root_library_id));
         }
+
+        if existing_asset_lookup.is_none() {
+            let lookup_setup_started = Instant::now();
+            existing_asset_lookup = Some(repository.existing_asset_lookup_session()?);
+            lookup_setup_us = elapsed_us(lookup_setup_started);
+        }
+        let scope_lookup_setup_us = std::mem::take(&mut lookup_setup_us);
 
         let base_progress = aggregate.clone();
         let scope_summary = match scan_library_scope(
@@ -381,6 +397,10 @@ where
             generation,
             false,
             options,
+            existing_asset_lookup
+                .as_mut()
+                .expect("existing-asset lookup session initialized above"),
+            scope_lookup_setup_us,
             |local| emit(aggregate_scope_progress(&base_progress, &local)),
         ) {
             Ok(summary) => summary,
@@ -426,13 +446,19 @@ fn scan_library_scope<F>(
     generation: i64,
     complete_job: bool,
     options: ScanOptions,
+    existing_asset_lookup: &mut ExistingAssetLookupSession,
+    lookup_setup_us: u64,
     emit: F,
 ) -> AppResult<ScanSummary>
 where
     F: Fn(ScanProgress),
 {
     let descendant_roots = repository.nested_source_roots(library_id)?;
-    let mut performance = ScanPerformance::default();
+    let mut performance = ScanPerformance {
+        existing_asset_lookup_us: lookup_setup_us,
+        metadata_lookup_us: lookup_setup_us,
+        ..ScanPerformance::default()
+    };
     let mut progress = ScanProgress::starting(task_id);
     progress.library_id = Some(library_id);
     progress.stage = "discovering".into();
@@ -529,11 +555,16 @@ where
                     }
                     progress.current_path = Some(path_to_string(&path));
 
-                    let metadata_started = Instant::now();
-                    let snapshot = match snapshot_file(&owner.source_path, &path) {
+                    let snapshot_started = Instant::now();
+                    let snapshot_result = snapshot_file(&owner.source_path, &path);
+                    add_metadata_elapsed(
+                        &mut performance.file_metadata_us,
+                        &mut performance.metadata_lookup_us,
+                        snapshot_started,
+                    );
+                    let snapshot = match snapshot_result {
                         Ok(snapshot) => snapshot,
                         Err(error) => {
-                            add_elapsed(&mut performance.metadata_lookup_us, metadata_started);
                             let fallback = fallback_snapshot(&owner.source_path, &path);
                             let fingerprint = fallback_fingerprint(&fallback);
                             let database_started = Instant::now();
@@ -555,15 +586,34 @@ where
                         }
                     };
 
+                    let identity_key_started = Instant::now();
                     let asset_identity_key = identity_key(Path::new(&snapshot.absolute_path));
-                    let existing = repository.find_existing_asset(&asset_identity_key)?;
-                    add_elapsed(&mut performance.metadata_lookup_us, metadata_started);
+                    add_elapsed(&mut performance.metadata_lookup_us, identity_key_started);
+                    let existing_lookup_started = Instant::now();
+                    let existing_result =
+                        existing_asset_lookup.find_existing_asset(&asset_identity_key);
+                    add_metadata_elapsed(
+                        &mut performance.existing_asset_lookup_us,
+                        &mut performance.metadata_lookup_us,
+                        existing_lookup_started,
+                    );
+                    let existing = existing_result?;
                     if let Some(existing) = existing {
-                        let cache_ready = existing.thumbnail_status.as_deref() == Some("ready")
-                            && existing
+                        let cache_ready = if existing.thumbnail_status.as_deref() == Some("ready") {
+                            let cache_probe_started = Instant::now();
+                            let cache_exists = existing
                                 .cache_path
                                 .as_deref()
                                 .is_some_and(|cache| Path::new(cache).is_file());
+                            add_metadata_elapsed(
+                                &mut performance.cache_probe_us,
+                                &mut performance.metadata_lookup_us,
+                                cache_probe_started,
+                            );
+                            cache_exists
+                        } else {
+                            false
+                        };
                         if existing.file_size == snapshot.file_size
                             && existing.modified_at == snapshot.modified_at
                             && existing.analysis_status == "completed"
@@ -588,6 +638,8 @@ where
                             continue;
                         }
 
+                        performance.reanalyzed_files =
+                            performance.reanalyzed_files.saturating_add(1);
                         if existing.file_size == snapshot.file_size
                             && existing.modified_at == snapshot.modified_at
                             && cache_ready
@@ -605,6 +657,7 @@ where
                             flush_pending_image_work(
                                 repository,
                                 thumbnail_dir,
+                                cancelled,
                                 &mut pending_work,
                                 &mut completed_results,
                                 &mut progress,
@@ -614,6 +667,8 @@ where
                             )?;
                             continue;
                         }
+                    } else {
+                        performance.cold_files = performance.cold_files.saturating_add(1);
                     }
 
                     pending_work.push(PendingImageWork {
@@ -629,6 +684,7 @@ where
                     flush_pending_image_work(
                         repository,
                         thumbnail_dir,
+                        cancelled,
                         &mut pending_work,
                         &mut completed_results,
                         &mut progress,
@@ -683,6 +739,7 @@ where
         flush_pending_image_work(
             repository,
             thumbnail_dir,
+            cancelled,
             &mut pending_work,
             &mut completed_results,
             &mut progress,
@@ -690,6 +747,19 @@ where
             &mut reporter,
             options,
         )?;
+        if cancelled.load(Ordering::Relaxed) {
+            return Ok(Some(cancel_scan_scope(
+                repository,
+                task_id,
+                library_id,
+                complete_job,
+                &mut completed_results,
+                &mut pending_seen,
+                &mut progress,
+                &mut performance,
+                &mut reporter,
+            )?));
+        }
         flush_completed_results(
             repository,
             &mut completed_results,
@@ -802,6 +872,7 @@ fn stream_discovered_images(
 fn flush_pending_image_work<F>(
     repository: &Repository,
     thumbnail_dir: &Path,
+    cancelled: &AtomicBool,
     pending_work: &mut Vec<PendingImageWork>,
     completed_results: &mut Vec<ImageWorkResult>,
     progress: &mut ScanProgress,
@@ -819,6 +890,9 @@ where
     if let Some(next) = pending_work.last() {
         progress.current_path = Some(path_to_string(&next.path));
         reporter.force(progress, performance)?;
+        if cancelled.load(Ordering::Relaxed) {
+            return Ok(());
+        }
     }
     completed_results.extend(process_image_work_batch(
         std::mem::take(pending_work),
@@ -1219,6 +1293,13 @@ fn add_performance(total: &mut ScanPerformance, value: &ScanPerformance) {
     total.metadata_lookup_us = total
         .metadata_lookup_us
         .saturating_add(value.metadata_lookup_us);
+    total.file_metadata_us = total
+        .file_metadata_us
+        .saturating_add(value.file_metadata_us);
+    total.existing_asset_lookup_us = total
+        .existing_asset_lookup_us
+        .saturating_add(value.existing_asset_lookup_us);
+    total.cache_probe_us = total.cache_probe_us.saturating_add(value.cache_probe_us);
     total.fingerprint_us = total.fingerprint_us.saturating_add(value.fingerprint_us);
     total.image_processing_us = total
         .image_processing_us
@@ -1246,6 +1327,10 @@ fn add_performance(total: &mut ScanPerformance, value: &ScanPerformance) {
         .saturating_add(value.database_write_us);
     total.processed_files = total.processed_files.saturating_add(value.processed_files);
     total.skipped_files = total.skipped_files.saturating_add(value.skipped_files);
+    total.cold_files = total.cold_files.saturating_add(value.cold_files);
+    total.reanalyzed_files = total
+        .reanalyzed_files
+        .saturating_add(value.reanalyzed_files);
     total.failed_files = total.failed_files.saturating_add(value.failed_files);
 }
 
@@ -1255,6 +1340,12 @@ fn elapsed_us(started: Instant) -> u64 {
 
 fn add_elapsed(total: &mut u64, started: Instant) {
     *total = total.saturating_add(elapsed_us(started));
+}
+
+fn add_metadata_elapsed(stage_total: &mut u64, metadata_total: &mut u64, started: Instant) {
+    let elapsed = elapsed_us(started);
+    *stage_total = stage_total.saturating_add(elapsed);
+    *metadata_total = metadata_total.saturating_add(elapsed);
 }
 
 fn path_to_string(path: &Path) -> String {
@@ -1271,6 +1362,8 @@ fn is_pruned_source_root(path: &Path, descendants: &[LibrarySourceRoot]) -> bool
 #[cfg(test)]
 mod tests {
     use std::sync::Mutex;
+    use std::sync::atomic::AtomicU64;
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     use image::{DynamicImage, Rgba, RgbaImage};
     use rusqlite::Connection;
@@ -1279,6 +1372,8 @@ mod tests {
     use crate::models::{AssetSortField, SortDirection};
     use crate::paths::AppPaths;
 
+    static RESCAN_TEST_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
     fn setup() -> (tempfile::TempDir, AppPaths, Repository, PathBuf) {
         let temp = tempfile::tempdir().expect("temp dir");
         let paths = AppPaths::initialize(temp.path().join("app-data")).expect("app paths");
@@ -1286,6 +1381,36 @@ mod tests {
         repository.initialize().expect("database");
         let source = temp.path().join("fixture-library");
         fs::create_dir_all(&source).expect("source");
+        (temp, paths, repository, source)
+    }
+
+    fn setup_rescan_fixture() -> (tempfile::TempDir, AppPaths, Repository, PathBuf) {
+        let repository_root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("repository root");
+        let temp_parent = repository_root.join("test-data").join(".tmp");
+        fs::create_dir_all(&temp_parent).expect("test data temp parent");
+        let temp_parent = fs::canonicalize(temp_parent).expect("canonical test temp parent");
+        let timestamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock after unix epoch")
+            .as_nanos();
+        let sequence = RESCAN_TEST_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+        let prefix = format!(
+            "import-rescan-{}-{timestamp}-{sequence}-",
+            std::process::id()
+        );
+        let temp = tempfile::Builder::new()
+            .prefix(&prefix)
+            .tempdir_in(&temp_parent)
+            .expect("create unique scanner fixture directory");
+        let canonical_fixture = fs::canonicalize(temp.path()).expect("canonical fixture path");
+        assert!(canonical_fixture.starts_with(&temp_parent));
+        let paths = AppPaths::initialize(temp.path().join("app-data")).expect("app paths");
+        let repository = Repository::new(&paths.database_path);
+        repository.initialize().expect("database");
+        let source = temp.path().join("source-library");
+        fs::create_dir_all(&source).expect("source library");
         (temp, paths, repository, source)
     }
 
@@ -1667,6 +1792,98 @@ mod tests {
     }
 
     #[test]
+    fn rescan_diagnostics_split_metadata_stages_and_classify_decisions() {
+        let (_fixture, paths, repository, source) = setup_rescan_fixture();
+        let image_path = source.join("旅行").join("高分辨率.png");
+        save_pixel(&image_path, Rgba([40, 110, 210, 255]), (1600, 900));
+        let original_hash = hash_file(&image_path).expect("source hash before scan");
+
+        let cold = scan_library(
+            &repository,
+            &paths.thumbnail_dir,
+            &source,
+            "diagnostics-cold",
+            &AtomicBool::new(false),
+            |_| {},
+        )
+        .expect("cold diagnostic scan");
+        assert_eq!(cold.status, "completed");
+        assert_eq!(cold.performance.cold_files, 1);
+        assert_eq!(cold.performance.reanalyzed_files, 0);
+        assert_eq!(cold.performance.skipped_files, 0);
+        assert_eq!(cold.performance.source_decode_us, 0);
+        assert!(cold.performance.file_metadata_us > 0);
+        assert!(cold.performance.existing_asset_lookup_us > 0);
+        assert!(cold.performance.metadata_lookup_us > 0);
+        assert_metadata_timing_accounting(&cold.performance);
+
+        let thumbnail_path = paths
+            .thumbnail_dir
+            .read_dir()
+            .expect("thumbnail directory")
+            .map(|entry| entry.expect("thumbnail entry").path())
+            .find(|path| path.is_file())
+            .expect("application-owned thumbnail");
+        let thumbnail_dimensions =
+            image::image_dimensions(&thumbnail_path).expect("read bounded thumbnail dimensions");
+        assert!(thumbnail_dimensions.0 > 0 && thumbnail_dimensions.1 > 0);
+        assert!(thumbnail_dimensions.0 <= crate::imaging::ANALYSIS_THUMBNAIL_MAX_DIMENSION);
+        assert!(thumbnail_dimensions.1 <= crate::imaging::ANALYSIS_THUMBNAIL_MAX_DIMENSION);
+
+        let skipped = scan_library(
+            &repository,
+            &paths.thumbnail_dir,
+            &source,
+            "diagnostics-skipped",
+            &AtomicBool::new(false),
+            |_| {},
+        )
+        .expect("warm diagnostic scan");
+        assert_eq!(skipped.status, "completed");
+        assert_eq!(skipped.performance.cold_files, 0);
+        assert_eq!(skipped.performance.reanalyzed_files, 0);
+        assert_eq!(skipped.performance.skipped_files, 1);
+        assert_metadata_timing_accounting(&skipped.performance);
+
+        let connection = Connection::open(&paths.database_path).expect("open test database");
+        connection
+            .execute("DELETE FROM tone_features WHERE asset_id=1", [])
+            .expect("remove derived tone features");
+        connection
+            .execute("DELETE FROM color_features WHERE asset_id=1", [])
+            .expect("remove derived color features");
+        drop(connection);
+
+        let reanalyzed = scan_library(
+            &repository,
+            &paths.thumbnail_dir,
+            &source,
+            "diagnostics-reanalyzed",
+            &AtomicBool::new(false),
+            |_| {},
+        )
+        .expect("reanalyze diagnostic scan");
+        assert_eq!(reanalyzed.status, "completed");
+        assert_eq!(reanalyzed.performance.cold_files, 0);
+        assert_eq!(reanalyzed.performance.reanalyzed_files, 1);
+        assert_eq!(reanalyzed.performance.skipped_files, 0);
+        assert_eq!(reanalyzed.performance.source_decode_us, 0);
+        assert_metadata_timing_accounting(&reanalyzed.performance);
+        assert_eq!(
+            hash_file(&image_path).expect("source hash after scans"),
+            original_hash
+        );
+    }
+
+    fn assert_metadata_timing_accounting(performance: &ScanPerformance) {
+        let split_total = performance
+            .file_metadata_us
+            .saturating_add(performance.existing_asset_lookup_us)
+            .saturating_add(performance.cache_probe_us);
+        assert!(performance.metadata_lookup_us >= split_total);
+    }
+
+    #[test]
     fn valid_thumbnail_is_reused_when_basic_features_need_reprocessing() {
         let (_temp, paths, repository, source) = setup();
         let image = source.join("cache-reuse.png");
@@ -1994,6 +2211,76 @@ mod tests {
             repository.list_libraries().expect("libraries")[0].missing_count,
             0
         );
+    }
+
+    #[test]
+    fn interrupted_scan_can_restart_and_finish_without_changing_sources() {
+        let (_fixture, paths, repository, source) = setup_rescan_fixture();
+        const FIRST_BATCH_SIZE: u64 = IMPORT_DATABASE_BATCH as u64;
+        const TOTAL_FIXTURES: u64 = 34;
+        let mut images = Vec::with_capacity(TOTAL_FIXTURES as usize);
+        for index in 0..TOTAL_FIXTURES {
+            let image_path = source.join("旅行").join(format!("图片-{index:02}.png"));
+            save_pixel(&image_path, Rgba([index as u8, 80, 160, 255]), (24, 16));
+            let source_hash = hash_file(&image_path).expect("fixture source hash");
+            images.push((image_path, source_hash));
+        }
+
+        let cancellation = AtomicBool::new(false);
+        let interrupted = scan_library(
+            &repository,
+            &paths.thumbnail_dir,
+            &source,
+            "restart-interrupted",
+            &cancellation,
+            |progress| {
+                if progress.processed >= FIRST_BATCH_SIZE {
+                    cancellation.store(true, Ordering::Relaxed);
+                }
+            },
+        )
+        .expect("cancelled scan");
+        assert_eq!(interrupted.status, "cancelled");
+        assert_eq!(interrupted.discovered, TOTAL_FIXTURES);
+        assert_eq!(interrupted.processed, FIRST_BATCH_SIZE);
+        assert_eq!(interrupted.succeeded, FIRST_BATCH_SIZE);
+        assert_eq!(
+            repository
+                .list_libraries()
+                .expect("libraries")
+                .into_iter()
+                .find(|library| library.id == interrupted.library_id)
+                .expect("interrupted library")
+                .missing_count,
+            0
+        );
+
+        let resumed = scan_library(
+            &repository,
+            &paths.thumbnail_dir,
+            &source,
+            "restart-resumed",
+            &AtomicBool::new(false),
+            |_| {},
+        )
+        .expect("restarted scan");
+        assert_eq!(resumed.status, "completed");
+        assert_eq!(resumed.succeeded, TOTAL_FIXTURES - FIRST_BATCH_SIZE);
+        assert_eq!(resumed.skipped, FIRST_BATCH_SIZE);
+        assert_eq!(
+            resumed.performance.cold_files,
+            TOTAL_FIXTURES - FIRST_BATCH_SIZE
+        );
+        assert_eq!(resumed.performance.reanalyzed_files, 0);
+        assert_eq!(resumed.performance.skipped_files, FIRST_BATCH_SIZE);
+        assert_metadata_timing_accounting(&resumed.performance);
+        for (image_path, source_hash) in images {
+            assert_eq!(
+                hash_file(&image_path).expect("fixture source hash after restart"),
+                source_hash
+            );
+        }
+        assert!(!source.join("thumbnails").exists());
     }
 
     #[cfg(windows)]

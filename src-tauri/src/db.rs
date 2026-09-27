@@ -66,10 +66,52 @@ const SEMANTIC_ANALYSIS_TAXONOMY_MIGRATION: &str =
 
 const LIBRARY_REMOVAL_BATCH_SIZE: i64 = 256;
 const SQLITE_IN_QUERY_BATCH_SIZE: usize = 128;
+const EXISTING_ASSET_LOOKUP_SQL: &str =
+    "SELECT a.id, a.file_size, a.modified_at, a.analysis_status,
+                        t.status, t.cache_path, COALESCE(tf.algorithm_version, cf.algorithm_version)
+                 FROM assets a
+                 LEFT JOIN thumbnails t ON t.asset_id = a.id AND t.spec = ?2
+                 LEFT JOIN tone_features tf ON tf.asset_id = a.id
+                 LEFT JOIN color_features cf ON cf.asset_id = a.id
+                 WHERE a.asset_identity_key = ?1";
 
 #[derive(Debug, Clone)]
 pub struct Repository {
     database_path: PathBuf,
+}
+
+/// Reuses one SQLite connection and its prepared-statement cache for a scan's
+/// repeated existing-asset lookups. Each lookup remains an independent
+/// autocommit statement so later calls observe commits made by writer
+/// connections while this session is alive.
+pub struct ExistingAssetLookupSession {
+    connection: Connection,
+}
+
+impl ExistingAssetLookupSession {
+    pub fn find_existing_asset(
+        &mut self,
+        asset_identity_key: &str,
+    ) -> AppResult<Option<ExistingAssetSnapshot>> {
+        let mut statement = self.connection.prepare_cached(EXISTING_ASSET_LOOKUP_SQL)?;
+        statement
+            .query_row(
+                params![asset_identity_key, crate::imaging::THUMBNAIL_SPEC],
+                |row| {
+                    Ok(ExistingAssetSnapshot {
+                        id: row.get(0)?,
+                        file_size: row.get(1)?,
+                        modified_at: row.get(2)?,
+                        analysis_status: row.get(3)?,
+                        thumbnail_status: row.get(4)?,
+                        cache_path: row.get(5)?,
+                        analysis_algorithm_version: row.get(6)?,
+                    })
+                },
+            )
+            .optional()
+            .map_err(AppError::from)
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -136,6 +178,12 @@ impl Repository {
 
     pub fn database_path(&self) -> &Path {
         &self.database_path
+    }
+
+    pub fn existing_asset_lookup_session(&self) -> AppResult<ExistingAssetLookupSession> {
+        Ok(ExistingAssetLookupSession {
+            connection: self.open()?,
+        })
     }
 
     pub fn initialize(&self) -> AppResult<()> {
@@ -874,13 +922,7 @@ impl Repository {
         let connection = self.open()?;
         connection
             .query_row(
-                "SELECT a.id, a.file_size, a.modified_at, a.analysis_status,
-                        t.status, t.cache_path, COALESCE(tf.algorithm_version, cf.algorithm_version)
-                 FROM assets a
-                 LEFT JOIN thumbnails t ON t.asset_id = a.id AND t.spec = ?2
-                 LEFT JOIN tone_features tf ON tf.asset_id = a.id
-                 LEFT JOIN color_features cf ON cf.asset_id = a.id
-                 WHERE a.asset_identity_key = ?1",
+                EXISTING_ASSET_LOOKUP_SQL,
                 params![asset_identity_key, crate::imaging::THUMBNAIL_SPEC],
                 |row| {
                     Ok(ExistingAssetSnapshot {
@@ -5507,6 +5549,136 @@ fn rebuild_library_hierarchy(transaction: &Transaction<'_>) -> AppResult<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn lookup_opt_tempdir() -> tempfile::TempDir {
+        let repository_root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("repository root");
+        let temp_parent = repository_root
+            .join("test-data")
+            .join(".tmp")
+            .join("import-lookup-opt-20260927-6c98d72a")
+            .join("rust-tests")
+            .join("db");
+        std::fs::create_dir_all(&temp_parent).expect("create owned test-data directory");
+        tempfile::Builder::new()
+            .prefix("lookup-session-")
+            .tempdir_in(temp_parent)
+            .expect("create test-owned lookup directory")
+    }
+
+    fn insert_lookup_test_asset(
+        repository: &Repository,
+        library_id: i64,
+        path: &Path,
+        asset_identity_key: &str,
+        file_size: i64,
+        modified_at: i64,
+    ) -> i64 {
+        let connection = repository.open().expect("open fixture writer");
+        let path_text = path.to_string_lossy().into_owned();
+        let relative_path = path
+            .file_name()
+            .expect("fixture file name")
+            .to_string_lossy()
+            .into_owned();
+        let file_name = relative_path.clone();
+        let extension = path
+            .extension()
+            .expect("fixture extension")
+            .to_string_lossy()
+            .into_owned();
+        let timestamp = now();
+        connection
+            .execute(
+                "INSERT INTO assets(
+                    library_id, asset_identity_key, absolute_path, relative_path,
+                    file_name, extension, file_size, modified_at, fingerprint,
+                    analysis_status, first_seen_at, last_seen_at
+                 ) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 'lookup-test',
+                          'completed', ?9, ?9)",
+                params![
+                    library_id,
+                    asset_identity_key,
+                    path_text,
+                    relative_path,
+                    file_name,
+                    extension,
+                    file_size,
+                    modified_at,
+                    timestamp,
+                ],
+            )
+            .expect("insert fixture asset");
+        connection.last_insert_rowid()
+    }
+
+    #[test]
+    fn existing_asset_lookup_session_matches_api_and_observes_unicode_path_writes() {
+        let temp = lookup_opt_tempdir();
+        let source = temp.path().join("旅行 photos Путешествие 😀");
+        std::fs::create_dir_all(&source).expect("create Unicode fixture directory");
+        let first_path = source.join("照片 01.jpg");
+        std::fs::write(&first_path, b"first fixture bytes").expect("write source fixture");
+        let second_path = source.join("новая photo 😀.png");
+        std::fs::write(&second_path, b"second fixture bytes").expect("write source fixture");
+
+        let repository = Repository::new(temp.path().join("database.sqlite3"));
+        repository.initialize().expect("initialize database");
+        let source_text = source.to_string_lossy().into_owned();
+        let (library_id, _) = repository
+            .begin_scan(&source_text, "lookup-session-unicode")
+            .expect("create fixture library");
+
+        let first_key = identity_key(&first_path);
+        let first_id =
+            insert_lookup_test_asset(&repository, library_id, &first_path, &first_key, 19, 123);
+        let mut session = repository
+            .existing_asset_lookup_session()
+            .expect("open lookup session");
+
+        let api_result = repository
+            .find_existing_asset(&first_key)
+            .expect("lookup through existing API");
+        let session_result = session
+            .find_existing_asset(&first_key)
+            .expect("lookup through reusable session");
+        assert_eq!(session_result, api_result);
+        assert_eq!(
+            session_result.as_ref().map(|asset| asset.id),
+            Some(first_id)
+        );
+
+        let second_key = identity_key(&second_path);
+        assert!(
+            session
+                .find_existing_asset(&second_key)
+                .expect("initial lookup before writer commit")
+                .is_none()
+        );
+        let second_id =
+            insert_lookup_test_asset(&repository, library_id, &second_path, &second_key, 20, 456);
+        let inserted = session
+            .find_existing_asset(&second_key)
+            .expect("lookup after committed insert")
+            .expect("newly committed asset is visible");
+        assert_eq!(inserted.id, second_id);
+        assert_eq!(inserted.file_size, 20);
+
+        let writer = repository.open().expect("open fixture updater");
+        writer
+            .execute(
+                "UPDATE assets SET file_size=29, modified_at=789 WHERE id=?1",
+                [first_id],
+            )
+            .expect("commit fixture update");
+        let updated = session
+            .find_existing_asset(&first_key)
+            .expect("lookup after committed update")
+            .expect("updated asset remains visible");
+        assert_eq!(updated.file_size, 29);
+        assert_eq!(updated.modified_at, 789);
+    }
 
     #[test]
     fn hue_match_threshold_scales_with_minimum_whole_image_area() {
