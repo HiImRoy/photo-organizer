@@ -207,6 +207,12 @@ const thirdAsset: AssetListItem = {
   dominantColorCategory: "green",
 };
 
+function sidebarButtonWithTitle(title: string): HTMLButtonElement | undefined {
+  return Array.from(document.querySelectorAll<HTMLButtonElement>("button.nav-row[title]")).find(
+    (button) => button.title === title,
+  );
+}
+
 let progressListener: ((progress: ScanProgress) => void) | undefined;
 let semanticProgressListener: ((progress: SemanticProgress) => void) | undefined;
 let semanticStatusListener: ((status: SemanticRuntimeStatus) => void) | undefined;
@@ -3216,6 +3222,214 @@ describe("PhotoOrganizer application shell", () => {
     await waitFor(() => expect(screen.getByTitle("默认收藏")).toHaveTextContent("1"));
     expect(api.fetchBrowseNodes.mock.calls.length).toBeGreaterThan(browseRequestsBeforeFavorite);
     expect(api.updateAssetRating).not.toHaveBeenCalled();
+  });
+
+  it("preserves a newer library selection and its selected assets when removal completes", async () => {
+    const user = userEvent.setup();
+    const libraryB: LibrarySummary = {
+      ...library,
+      id: 8,
+      name: "图库 B",
+      rootPath: "C:\\fixtures\\图库 B",
+      sourcePath: "C:\\fixtures\\图库 B",
+      sourceIdentityKey: "c:/fixtures/图库 b",
+    };
+    const libraryC: LibrarySummary = {
+      ...library,
+      id: 9,
+      name: "图库 C",
+      rootPath: "C:\\fixtures\\图库 C",
+      sourcePath: "C:\\fixtures\\图库 C",
+      sourceIdentityKey: "c:/fixtures/图库 c",
+    };
+    const cAsset: AssetListItem = {
+      ...asset,
+      id: 99,
+      libraryId: libraryC.id,
+      absolutePath: `${libraryC.sourcePath}\\相机C.png`,
+      relativePath: "相机C.png",
+      fileName: "相机C.png",
+    };
+    let resolveRemoval: ((removed: boolean) => void) | undefined;
+    const removal = new Promise<boolean>((resolve) => {
+      resolveRemoval = resolve;
+    });
+    const confirm = vi.spyOn(window, "confirm").mockReturnValue(true);
+    api.fetchLibraries.mockResolvedValue([library, libraryB, libraryC]);
+    api.fetchAssets.mockImplementation((query: { libraryId: number | null }) =>
+      Promise.resolve(
+        query.libraryId === libraryC.id
+          ? { items: [cAsset], total: 1, page: 1, pageSize: 200 }
+          : { items: [asset], total: 1, page: 1, pageSize: 200 },
+      ),
+    );
+    api.removeLibrary.mockImplementationOnce(() => removal);
+    render(<App />);
+
+    await screen.findByRole("button", { name: asset.fileName });
+    await user.click(screen.getByRole("button", { name: "中文 图库图库菜单" }));
+    await user.click(screen.getByRole("button", { name: "从图库移除" }));
+    await waitFor(() => expect(api.removeLibrary).toHaveBeenCalledWith(library.id));
+
+    const libraryCButton = sidebarButtonWithTitle(libraryC.sourcePath);
+    if (!libraryCButton) throw new Error("library C is missing from the sidebar");
+    await user.click(libraryCButton);
+    await user.click(await screen.findByRole("button", { name: `选择 ${cAsset.fileName}` }));
+    expect(await screen.findByText("已选择 1 张")).toBeInTheDocument();
+
+    if (!resolveRemoval) throw new Error("the deferred library removal did not start");
+    await act(async () => {
+      resolveRemoval?.(true);
+    });
+
+    await waitFor(() =>
+      expect(sidebarButtonWithTitle(libraryC.sourcePath)).toHaveClass("is-active"),
+    );
+    expect(sidebarButtonWithTitle(libraryB.sourcePath)).not.toHaveClass("is-active");
+    expect(screen.getByText("已选择 1 张")).toBeInTheDocument();
+    confirm.mockRestore();
+  });
+
+  it("preserves a newer Favorites source when library removal completes", async () => {
+    const user = userEvent.setup();
+    const favoriteNode = {
+      kind: "collection" as const,
+      collection: {
+        id: 100,
+        name: "默认收藏",
+        description: "",
+        createdAt: "2026-08-06T10:00:00Z",
+        updatedAt: "2026-08-06T10:00:00Z",
+        assetCount: 1,
+        parentCollectionId: null,
+        collectionKind: "system_favorites" as const,
+        systemKey: "default_favorites",
+        displayOrder: -1,
+      },
+      children: [],
+    };
+    let resolveRemoval: ((removed: boolean) => void) | undefined;
+    const removal = new Promise<boolean>((resolve) => {
+      resolveRemoval = resolve;
+    });
+    const confirm = vi.spyOn(window, "confirm").mockReturnValue(true);
+    api.fetchLibraries.mockResolvedValue([library]);
+    api.fetchBrowseNodes.mockResolvedValue([favoriteNode]);
+    api.fetchAssets.mockResolvedValue({ items: [asset], total: 1, page: 1, pageSize: 200 });
+    api.removeLibrary.mockImplementationOnce(() => removal);
+    render(<App />);
+
+    await screen.findByRole("button", { name: asset.fileName });
+    await user.click(screen.getByRole("button", { name: "中文 图库图库菜单" }));
+    await user.click(screen.getByRole("button", { name: "从图库移除" }));
+    await waitFor(() => expect(api.removeLibrary).toHaveBeenCalledWith(library.id));
+
+    const favoritesButton = sidebarButtonWithTitle("默认收藏");
+    if (!favoritesButton) throw new Error("the Favorites source is missing from the sidebar");
+    await user.click(favoritesButton);
+    await waitFor(() => expect(favoritesButton).toHaveClass("is-active"));
+    expect(api.fetchAssets).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        libraryId: null,
+        filter: expect.objectContaining({ favoriteOnly: true, collectionId: null }),
+      }),
+    );
+
+    if (!resolveRemoval) throw new Error("the deferred library removal did not start");
+    await act(async () => {
+      resolveRemoval?.(true);
+    });
+
+    await waitFor(() => expect(sidebarButtonWithTitle("默认收藏")).toHaveClass("is-active"));
+    expect(sidebarButtonWithTitle(library.sourcePath)).toBeUndefined();
+    confirm.mockRestore();
+  });
+
+  it("preserves a newer collection source when library removal completes", async () => {
+    const user = userEvent.setup();
+    const collectionNode = {
+      kind: "collection" as const,
+      collection: {
+        id: 101,
+        name: "旅行收藏夹",
+        description: "",
+        createdAt: "2026-08-06T10:00:00Z",
+        updatedAt: "2026-08-06T10:00:00Z",
+        assetCount: 1,
+        parentCollectionId: null,
+        collectionKind: "manual" as const,
+        systemKey: null,
+        displayOrder: 0,
+      },
+      children: [],
+    };
+    let resolveRemoval: ((removed: boolean) => void) | undefined;
+    const removal = new Promise<boolean>((resolve) => {
+      resolveRemoval = resolve;
+    });
+    const confirm = vi.spyOn(window, "confirm").mockReturnValue(true);
+    api.fetchLibraries.mockResolvedValue([library]);
+    api.fetchBrowseNodes.mockResolvedValue([collectionNode]);
+    api.fetchAssets.mockResolvedValue({ items: [asset], total: 1, page: 1, pageSize: 200 });
+    api.removeLibrary.mockImplementationOnce(() => removal);
+    render(<App />);
+
+    await screen.findByRole("button", { name: asset.fileName });
+    await user.click(screen.getByRole("button", { name: "中文 图库图库菜单" }));
+    await user.click(screen.getByRole("button", { name: "从图库移除" }));
+    await waitFor(() => expect(api.removeLibrary).toHaveBeenCalledWith(library.id));
+
+    const collectionButton = sidebarButtonWithTitle("旅行收藏夹");
+    if (!collectionButton) throw new Error("the collection source is missing from the sidebar");
+    await user.click(collectionButton);
+    await waitFor(() => expect(collectionButton).toHaveClass("is-active"));
+    expect(api.fetchAssets).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        libraryId: null,
+        filter: expect.objectContaining({ favoriteOnly: false, collectionId: 101 }),
+      }),
+    );
+
+    if (!resolveRemoval) throw new Error("the deferred library removal did not start");
+    await act(async () => {
+      resolveRemoval?.(true);
+    });
+
+    await waitFor(() => expect(sidebarButtonWithTitle("旅行收藏夹")).toHaveClass("is-active"));
+    expect(sidebarButtonWithTitle(library.sourcePath)).toBeUndefined();
+    confirm.mockRestore();
+  });
+
+  it("falls back when the currently selected library is removed", async () => {
+    const user = userEvent.setup();
+    const fallbackLibrary: LibrarySummary = {
+      ...library,
+      id: 8,
+      name: "备用图库",
+      rootPath: "C:\\fixtures\\备用图库",
+      sourcePath: "C:\\fixtures\\备用图库",
+      sourceIdentityKey: "c:/fixtures/备用图库",
+    };
+    const confirm = vi.spyOn(window, "confirm").mockReturnValue(true);
+    let availableLibraries = [library, fallbackLibrary];
+    api.fetchLibraries.mockImplementation(async () => availableLibraries);
+    api.removeLibrary.mockImplementation(async (libraryId: number) => {
+      const nextLibraries = availableLibraries.filter((item) => item.id !== libraryId);
+      const removed = nextLibraries.length !== availableLibraries.length;
+      availableLibraries = nextLibraries;
+      return removed;
+    });
+    render(<App />);
+
+    await waitFor(() => expect(sidebarButtonWithTitle(library.sourcePath)).toBeDefined());
+    await user.click(screen.getByRole("button", { name: "中文 图库图库菜单" }));
+    await user.click(screen.getByRole("button", { name: "从图库移除" }));
+
+    await waitFor(() =>
+      expect(sidebarButtonWithTitle(fallbackLibrary.sourcePath)).toHaveClass("is-active"),
+    );
+    expect(sidebarButtonWithTitle(library.sourcePath)).toBeUndefined();
+    confirm.mockRestore();
   });
 
   it("removes a library through its menu without touching source files", async () => {

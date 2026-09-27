@@ -40,6 +40,10 @@ ownership, shared-cache, cancellation, and original-file safety semantics.
   is returned to its caller but is not retained. The existing screen-preview
   cache remains LRU-bounded to 48 entries. These caches hold data URLs, so
   eviction drops string references without creating object URLs.
+- Library removal completion filters the latest library list and checks the
+  latest browse source before falling back to the first remaining library. A
+  newer library, Favorites, or collection selection survives an in-flight
+  removal unless that selected library is itself removed.
 
 ## Verification
 
@@ -54,6 +58,9 @@ ownership, shared-cache, cancellation, and original-file safety semantics.
 - Targeted text-search debounce test in `src/App.test.tsx`: 1 passed; 72 other
   tests in that file were skipped. TypeScript typecheck passed. Targeted ESLint
   and Prettier checks passed for the frontend files touched in this milestone.
+- Library-removal selection regression coverage in `src/App.test.tsx`: 4 passed;
+  the full App test file passed (77 tests). Targeted ESLint, Prettier, and
+  TypeScript typecheck passed for the removal-race patch.
 - The full frontend Vitest suite was not run.
 
 ## Residual risk

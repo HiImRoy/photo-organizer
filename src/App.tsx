@@ -2102,9 +2102,11 @@ export default function App() {
       for (const target of targets) {
         if (await removeLibrary(target.id)) removedIds.push(target.id);
       }
-      const remaining = libraries.filter((item) => !removedIds.includes(item.id));
-      setLibraries(remaining);
-      if (currentLibraryId !== null && removedIds.includes(currentLibraryId)) {
+      const removedSet = new Set(removedIds);
+      const remaining = librariesRef.current.filter((item) => !removedSet.has(item.id));
+      setLibraries((current) => current.filter((item) => !removedSet.has(item.id)));
+      const latestQuery = assetQueryRef.current;
+      if (latestQuery.libraryId !== null && removedSet.has(latestQuery.libraryId)) {
         setCurrentLibraryId(remaining[0]?.id ?? null);
         setActiveAssetId(null);
         setSelectedAssetIds([]);
