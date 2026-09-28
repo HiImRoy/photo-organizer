@@ -1,26 +1,27 @@
 # 0073 筛选分类与 AI 搜索双模型流水线执行计划
 
-状态：任务计划待用户审查；本轮仅创建计划，尚未修改业务代码、数据库、依赖或其他文档。
+状态：ADR-0013 已接受；Conditional GO 仅限隔离、离线的 caption + FTS 可行性 spike。原型待验证、尚未实现。生产接入与打包为 NO-GO，直到 spike 全部门槛通过且另行获得明确产品批准。本轮仅更新文档，不改变产品范围。
 
 ## 目标与范围
 
-将“筛选分类”和“AI 搜索”实现为两套独立的模型、结果、状态和任务生命周期：
+本计划当前仅授权按 [ADR-0013](../decisions/0013-caption-search-feasibility.md) 进行隔离、离线可行性 spike，不授权实现产品功能。若未来另行取得产品批准，分类与 AI 搜索才可按下列原则设计为两套独立流水线：
 
 1. **筛选分类流水线**继续使用当前模型：SigLIP2 负责摄影题材候选，Places365 提供场景证据，PicoDet 识别主体，YuNet 辅助人像判断。保持现有题材/主体标签、筛选字段及分类任务契约；搜索描述不得创建、修正或覆盖分类结果。
-2. **AI 搜索流水线**以预训练 Florence-2-base-ft 为候选模型，在应用私有缩略图上生成自然语言图片描述，以本地 SQLite FTS5 对描述和经审定的辅助文本进行检索。描述结果只服务 AI 搜索，不参与筛选分类。
-3. 两条流水线可共用资产 ID、源指纹和符合 `grid-640-v1` 边界的应用缩略图；模型状态、分析版本、任务队列、错误、进度、结果表和搜索索引保持独立。
-4. 图片描述在导入完成后以低优先级后台任务处理，可暂停、续跑、取消、重试，并在应用重启后恢复。调度器必须让导入和现有分类任务优先，不得让描述推理进入导入热路径或降低现有导入验收指标。
-5. 先验证模型格式、中文/英文检索质量、速度、内存和许可，再决定是否打包或启用；不训练模型，也不建立持久训练集。
+2. spike 评估预训练 Florence-2-base-ft 与本地 SQLite FTS5 的可行性；假设描述只服务 AI 搜索，不参与筛选分类。英文 caption 与双语 query mapping 仅是假设，中文检索尚未得到证明。
+3. spike 使用应用生成的 `grid-640-v1` 缩略图：自动技术与导入回归仅使用 `test-data/` fixture；真实质量试验须由用户明确一次性发起，可临时读取现有图库中已生成的应用缩略图。流水线、任务、状态与数据隔离是未来设计目标，不代表现有实现。
+4. 未来生产任务必须在导入完成后低优先级运行、支持恢复且永不进入导入热路径；当前 spike 不接入导入/分类调度器。
+5. spike 全部门槛通过也只允许提交后续产品决策；不训练模型，不持久化用户照片/训练集，不在本轮打包或启用模型。
 
 ## 现状与依据
 
 - `src-tauri/src/topics.rs` 使用 SigLIP2 进行题材候选判断；`src-tauri/src/semantic_tasks.rs` 协调题材和主体分析；`src-tauri/src/subject.rs` 使用 PicoDet/YuNet；Places365 保持场景证据角色。模型资源、来源和许可分别记录在 `src-tauri/resources/models/` 下的 `MODEL-SOURCE.md`。
 - 当前分类任务已有 `analysis_jobs` / `analysis_job_items`、暂停/恢复/取消和重启恢复能力。分类结果按模型、分析版本、taxonomy 版本和源指纹保存；资产上的 `semantic_status` 属于分类状态，不应用作描述任务状态。
-- 当前 `search_local_images` 在 `src-tauri/src/workflow.rs` 中对 SigLIP2 文本/图片 embedding 做余弦排序；相关 IPC 在 `src-tauri/src/ipc.rs`，前端调用在 `src/api.ts`。该向量检索可保留为可选回退，但不得成为新描述搜索的前置条件。
-- 当前未发现图片描述专用结果表、描述任务契约或 FTS5 检索表。`rusqlite` 使用 bundled SQLite，但发布构建中的 FTS5 可用性仍须验证。
+- 当前 `search_local_images` 在 `src-tauri/src/workflow.rs` 中对 SigLIP2 文本/图片 embedding 做余弦排序；相关 IPC 在 `src-tauri/src/ipc.rs`，前端调用在 `src/api.ts`。现有向量搜索继续保留为当前产品行为；未来经批准的描述/FTS 搜索须独立，spike 失败时保持当前方案。
+- 当前未发现图片描述专用结果表、描述任务契约或 FTS5 检索表。`src-tauri/Cargo.toml` 当前为 `ort = 2.0.0-rc.12`、启用 DirectML，`rusqlite = 0.37` 使用 bundled SQLite；发布构建中的 FTS5 可用性仍须验证。
 - `docs/requirements.md` 现将大模型描述列为排除项，`docs/roadmap.md` 尚无描述索引里程碑。后续进入实现前，ADR 通过后需在对应实现任务中同步修订用户需求、路线图、发布资源与第三方许可文档；本计划不修改这些文件。
-- Florence-2-base-ft 的模型卡将其标为 MIT、0.23B 参数，并展示 caption / detailed caption 等任务；其示例使用 Transformers/PyTorch 和 `trust_remote_code=True`。该资料没有证明当前 Rust + ONNX Runtime 应用已有可直接打包的推理导出，因此 ONNX/本地运行时适配是先行验证门槛，而不是已解决条件。[模型卡](https://huggingface.co/microsoft/Florence-2-base-ft)
-- SQLite FTS5 提供 `unicode61` 与 `trigram` 等内置 tokenizer；trigram 对少于三个 Unicode 字符的全文查询不能匹配。实际中英文分词、短中文词及短语检索效果必须用目标查询验证，不能假设默认配置可满足中文搜索。[FTS5 文档](https://www.sqlite.org/fts5.html)
+- Florence-2-base-ft 官方模型卡标示 MIT、0.23B 并列出 caption 任务，但示例包含 `trust_remote_code=True`；ONNX Community 页面展示的是 Transformers.js 导出，不证明其兼容当前 Rust `ort` / DirectML。revision 固定、远程代码审计和逐文件许可/hash 检查都是 spike 门槛。[Microsoft 模型卡](https://huggingface.co/microsoft/Florence-2-base-ft)；[ONNX Community 模型页](https://huggingface.co/onnx-community/Florence-2-base-ft)
+- Transformers.js dtype 指南的 Florence 示例对 encoder 量化敏感：`embed_tokens`、`vision_encoder` 用 fp16，而 `encoder_model`、`decoder_model_merged` 用 q4，且目标为 WebGPU；不能用全子图 q4 估计部署体积或质量，也不能当作 DirectML 实测。[dtype 指南](https://huggingface.co/docs/transformers.js/guides/dtypes)；[DirectML 文档](https://onnxruntime.ai/docs/execution-providers/DirectML-ExecutionProvider.html)
+- FTS5 是词法检索，不提供语义翻译；trigram 需要三字符片段，中文短查询及有效 tokenizer 粒度下的短词必须单独测量，不得宣称中文检索已经证实。[SQLite FTS5 文档](https://www.sqlite.org/fts5.html)
 
 ## 不可破坏的边界
 
@@ -32,29 +33,31 @@
 
 ## 分阶段实施
 
-### 阶段 0：架构与模型可行性 ADR（实现前阻断门）
+### 阶段 0：架构与模型可行性 ADR（已完成；不等于产品批准）
 
-在 `docs/decisions/` 新建 ADR，比较候选模型和部署形态，写明替代方案、维护成本及迁移影响。至少决定：
+已由 [ADR-0013](../decisions/0013-caption-search-feasibility.md) 完成方案比较与决策边界：
 
-- Florence-2-base-ft 的固定上游 revision、权重/导出格式、tokenizer 与解码代码；能否在现有 Rust + ONNX Runtime CPU/DirectML 栈离线运行，是否必须增加生产依赖或本地 sidecar。
-- 模型资源采用随包分发还是可选本地资源；安装包增量、冷启动/按需加载、内存与磁盘预算，以及模型缺失/损坏时的行为。
-- 描述结果、任务状态与索引的持久化结构；共享通用 job 基础设施时，如何保证任务类型、查询、恢复与进度完全隔离，或是否采用独立 caption job 表。
-- FTS5 是否存在于所有目标发布构建，中文 tokenizer/规范化策略和索引字段；失败时的降级体验。
-- GPU 与 CPU 的共享资源调度、优先级和并发上限；描述任务默认自动排队还是需设置开关。
+- 决定仅对隔离离线 spike 为 conditional GO，生产接入/打包当前 NO-GO。
+- Rust `ort` 手写 encoder-decoder、Python/Transformers sidecar、Transformers.js worker/browser 与保留 SigLIP2 向量搜索均已比较；没有选定生产推理形态或新增依赖。
+- 生产授权仍需通过 ADR-0013 的 revision/hash/licensing、CPU offline、精确包体、FTS5、双语检索质量、latency/memory、导入回归及隐私门槛，并另行取得产品批准。
 
-**门槛：**若模型不能在不引入未经批准的架构/运行时变化下稳定离线运行，或其权重/代码不能按产品分发要求许可，则暂停 Florence 实现并提交备选模型决策；不得先改数据库/API/UI 再补审查。
+**当前结论：**原型待验证、未实现。门槛未通过前，不改数据库/API/UI、模型资源清单或生产依赖；若 spike 失败，留在当前 SigLIP2 搜索方案，不自动改用备选 runtime。
 
-### 阶段 1：预训练候选小规模验证
+### 阶段 1：条件准许的隔离离线可行性 spike（待验证、未实现）
 
-只用现有图库的应用缩略图进行一次性人工质量与速度试验；用户通过应用选择当前图库/样本。不得遍历个人原图目录作为模型输入，不复制导出图片，不保存训练样本或可复用标注集。只保留不含照片内容的聚合测量结果；若用户未来要求复现质量评测，需另行决定是否保存查询和评分。
+采用两条严格分开的数据路径：自动技术验证与导入回归只使用 `test-data/` fixture 经应用有界流程生成的 `grid-640-v1` 缩略图；caption/中文检索质量验证仅可在用户日后明确发起并选择样本后，临时读取所选资产已经生成的 `grid-640-v1` 缩略图。后者绝不访问/遍历个人原图目录、不复制或保存图片、不持久化 caption、查询或人工标注，仅保留不含照片内容的聚合指标。此为一次性抽样而非数据集。本轮仅编辑文档，不实际操作任何图库。整个 spike 与生产应用隔离，断网运行，不接入当前数据库/任务调度/产品 UI；只保留配置、revision/hash 与错误类别等非内容信息。
 
-- 选取约 100 张现有缩略图，覆盖当前图库中常见题材、人像/多人、弱光、静物、动植物、建筑/街拍和容易混淆的场景；从当前分类标签分层抽样之外，再混入不依赖现有标签的随机样本，降低已有分类偏差。
+- 仅在真实质量评估时，由用户明确选择当前图库中约 100 张有代表性的现有资产，并只读取已生成的 `grid-640-v1` 应用缩略图；覆盖常见题材、人像/多人、弱光、静物、动植物、建筑/街拍和易混场景，混入不依赖现有分类标签的抽样以降低偏差。此人工质量试验不能由 `test-data/` fixture 结果代替。
 - 评审 caption 是否准确描述主要主体、动作和场景；记录关键漏写、明显幻觉、英文/中文输出比例、单张生成耗时、P50/P95、吞吐、峰值进程内存与可获取的 GPU 显存。
-- 使用至少 20 组真实中文搜索句及对应英文表达，覆盖主体、动作、颜色、环境、时间和组合描述。人工审阅 top-10，计算 Precision@10，并单独记录因描述漏写、语言不匹配和 tokenizer 行为导致的漏召回。
-- 将 FTS5 的 `unicode61`、`trigram` 和任何候选词规范化/别名方案用于查询对照，重点覆盖一至两个汉字、连续中文、混合中英文、空格/标点及同义表达。未经 ADR 批准，不新增在线翻译或重型分词依赖。
+- 使用至少 20 组中英文等价查询，覆盖主体、动作、颜色、环境、时间和组合描述。英文 caption + 双语 query mapping 只是待证假设；人工审阅 top-10、计算 Precision@10，并记录语言失配与漏召回。
+- 对 FTS5 `unicode61` / `trigram` 做查询对照，重点测一至两个汉字、短于 tokenizer 有效粒度的中文、trigram 少于三个字符、连续中文、混合中英、空格/标点及同义词。FTS5 不做语义翻译。
 - 若启用现有 SigLIP2 向量搜索作为对照，只在评测中并排记录；不得将其设为图片描述、FTS 查询或新功能可用性的必需依赖。
+- 必须完整离线生成全部固定样本；CPU 路径必需，DirectML 仅在当前 `ort` + 实际目标机器上实测兼容和收益后才作为可选结果。精确文件子集、immutable revision、逐文件 SHA-256 与总包体须一并记录。Transformers.js 的 WebGPU dtype 示例不是 DirectML 证据；全子图 q4 不是可接受的尺寸估算。
+- 预先声明参考机、CPU P50/P95 latency 与峰值 RAM 上限、可选 DirectML RAM/VRAM 上限和包体限额；未声明预算即未通过 gate，不得按结果事后放宽。
 
-**建议质量门槛（试验前由 ADR 固化）：**100 条描述中至少 90% 的主要主体/场景描述基本正确，明显关键事实幻觉不超过 5%；20 组查询的中位 Precision@10 不低于 0.70，中文与英文查询的中位 Precision@10 差异不超过 0.15。未达到时先调整 caption 类型、输出长度、查询扩展或 tokenizer 并复测；仍不达标则不进入正式接入。此抽样只用于模型选择与验收，不用于训练或自动调参。
+**质量门槛（ADR-0013 固化）：**100 条 caption 中至少 90% 的主要主体/场景描述基本正确，明显关键事实幻觉不超过 5%；20 组等价查询 median Precision@10 不低于 0.70，中英文 median 差异不超过 0.15，并单列短中文结果。延迟/内存/包体遵循预注册设备预算。测试输入只用于一次性可行性判断，不用于训练、微调或自动调参。
+
+**阶段 2–5 生产门禁：** 以下数据库、推理任务、API/UI、测试与发布条目仅保留为未来候选需求。只有阶段 1 所有门槛通过，且产品明确批准并先行更新 `docs/requirements.md` 与 `docs/roadmap.md` 后，才可建立独立实现任务和重新审阅此设计；不代表本轮可以开始任何生产接入。
 
 ### 阶段 2：数据库与版本化结果契约
 
@@ -92,10 +95,12 @@
 - **搜索：**使用生成的 fixture 描述验证中文/英文、混合词、同义词、短词、标点/引号、空查询、Unicode 文件名、无结果、部分覆盖、过期记录、排序稳定和图库隔离；验证 FTS5 缺失的受控错误/禁用体验。
 - **API/UI：**分别测试两个任务状态及进度；确认现有筛选值/标签不受描述影响，分类与描述模型可分别 unavailable；搜索仍可用文件名/描述索引，不要求先加载 SigLIP2；结果继续使用既有卡片交互。
 - **性能：**在 `test-data/` 生成固定 1,000 张测试图片，使用同一 release 配置至少三次对比当前导入基线与描述功能开启后的扫描过程。扫描期不得有 caption inference，导入 wall-time 中位数相对基线回退目标不超过 5%，失败数为 0；另记录 caption CPU/GPU 的 P50/P95、吞吐、峰值 RAM/VRAM、暂停响应及恢复时间。设备内存硬上限须在 ADR 根据目标机测量确定，不凭空承诺。
-- **用户图库质量试验：**只由用户在验收时对所选图库进行一次性试验，读取应用已生成缩略图，不遍历原始图片目录、不复制图片、不建立/持久化标注集；完成后只记录聚合指标与错误类别。未取得当前图库质量/速度试验结果前，不得声称已改善实际搜索效果或完成发布验收。
+- **用户图库质量试验：**仅由用户明确发起，对所选图库一次性读取已生成 `grid-640-v1` 应用缩略图；不遍历原图目录、不复制/保存照片、不持久化 caption、查询或标注。自动技术/回归测试必须使用 `test-data/`。完成后只记录聚合指标与错误类别。未取得真实图库缩略图质量/速度试验结果前，不得声称已改善实际搜索效果或完成发布验收。
 - **发布：**核验 ONNX/runtime 兼容、资源校验脚本、包体变化、SBOM、`THIRD_PARTY_NOTICES.md`、模型来源/许可证、干净离线环境启动与缺模型降级。任何新增生产依赖或资源格式必须在 ADR 与发布说明中明确。
 
-## 完成验收标准
+## 未来生产接入完成验收标准（不适用于当前 spike）
+
+以下标准属于未来生产任务，不表示当前功能已获批准。当前 spike 是否可申请后续产品决策，以 ADR-0013 的全部证据门槛为准。
 
 - 筛选分类继续由 SigLIP2、Places365、PicoDet 和 YuNet 各司其职；分类标签与现有筛选接口/存储语义保持兼容。分类与描述的进度、错误、版本、重试和重跑互不改变。
 - AI 搜索使用本地生成描述和 FTS5，描述只从应用缩略图产生；中文、英文及短中文匹配试验达到 ADR 确认的质量门槛，漏召回和未覆盖状态能被观察，而非静默误报“无结果”。
@@ -104,7 +109,7 @@
 - 测试报告包括准确的模型 revision/hash、设备与后端、样本选择方式、CPU/GPU 性能、质量指标、未通过项和未执行项；没有以训练或自动调参方式使用评测样本。
 - 更新需求、路线图、模型来源/许可、发布资源及用户界面说明；完成相关 Rust/SQLite、IPC、前端测试与质量风险要求的全量静态检查/构建；审阅最终 diff。实现任务完成后按用户既有要求提交本任务修改，提交范围仅包含已审阅且属于该任务的文件；是否推送按用户另行要求执行。
 
-## 未定决策
+## 生产批准前仍未定的实现问题
 
 1. Florence-2-base-ft 是否能以项目允许的方式导出并在当前 ONNX Runtime CPU/DirectML 组合中可靠运行；若需 Python、Transformers、自定义远程代码或另一推理栈，是否接受相应架构/发布成本。
 2. 描述模型按需下载、可选手动放置还是随安装包分发；用户离线体验、安装体积及权重再分发许可的取舍。
@@ -121,11 +126,15 @@
 - 不改变筛选分类的 taxonomy、提示词、阈值、标签 API 或现有模型权重；不让描述参与分类决策。
 - 不要求向量检索、Chinese-CLIP、向量数据库、ANN/HNSW、云端模型、在线翻译、账号或远程服务。
 - 不做图片内容编辑、EXIF 写入、人脸身份识别、基于原图的全分辨率分析、OCR 专项索引或生成式问答；这些如需加入必须另立计划与许可/隐私审查。
-- 本计划只定义后续实施工作，不包含业务实现。本轮按用户既有要求，仅修改并提交本计划文件，不推送；后续实施仍须遵守各自任务的批准范围。
+- 本计划目前只准许离线 feasibility spike，不包含业务实现或生产接入。本计划与 ADR-0013 定义本轮文档范围；`requirements.md` 与 `roadmap.md` 保持原状，未来生产实现仍须先取得明确产品批准并同步更新这两份文件。
 
 ## 参考资料与项目边界
 
 - Florence-2-base-ft 官方模型卡（任务、参数量、当前许可证标记与推理示例）：https://huggingface.co/microsoft/Florence-2-base-ft
+- ONNX Community Florence-2-base-ft（Transformers.js 导出示例）：https://huggingface.co/onnx-community/Florence-2-base-ft
+- Transformers.js custom/offline 使用文档：https://huggingface.co/docs/transformers.js/custom_usage
+- Transformers.js dtype/量化指南：https://huggingface.co/docs/transformers.js/guides/dtypes
+- ONNX Runtime DirectML Provider 文档：https://onnxruntime.ai/docs/execution-providers/DirectML-ExecutionProvider.html
 - SQLite FTS5 官方文档（编译、tokenizer、短 trigram 查询、索引维护）：https://www.sqlite.org/fts5.html
 - 项目现有约束：`AGENTS.md`、`docs/requirements.md`、`docs/roadmap.md`、`docs/release.md`、`docs/testing.md`。
 - 相关实施依据：`docs/plans/0036-thumbnail-only-decode.md`、`docs/plans/0063-photography-label-taxonomy-v4.md`、`docs/plans/0065-startup-model-lifecycle-and-fallback.md`、`docs/plans/0068-import-performance-optimization.md`、`docs/plans/0052-search-result-gallery-bridge.md`。
