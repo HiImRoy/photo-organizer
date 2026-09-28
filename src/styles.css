@@ -4620,21 +4620,11 @@ body {
   border-color: rgba(255, 255, 255, 0.3);
 }
 
-.library-context-menu button {
-  transform: translateY(0);
+.photo-app .library-context-menu button,
+.photo-app .library-context-menu button:hover,
+.photo-app .library-context-menu button:active {
+  transform: none;
   box-shadow: none;
-}
-
-.library-context-menu button:hover {
-  transform: translateY(-1px);
-  box-shadow:
-    4px 5px 8px rgba(0, 0, 0, 0.3),
-    -3px -3px 6px rgba(255, 255, 255, 0.035);
-}
-
-.library-context-menu button:active {
-  transform: translateY(1px);
-  box-shadow: var(--shadow-pressed);
 }
 
 button:disabled {
@@ -6134,10 +6124,12 @@ body,
     -6px -6px 15px rgba(255, 255, 255, 0.035);
 }
 
-.library-context-menu button:hover {
+.photo-app .library-context-menu button:hover:not(.danger-action),
+.photo-app .library-context-menu button:active,
+.photo-app .library-context-menu button:focus-visible {
   border: 0;
-  background: rgba(255, 255, 255, 0.07);
-  box-shadow: var(--neu-shadow-pressed);
+  background: var(--accent-soft);
+  box-shadow: none;
 }
 
 /* Gallery cells use the same surface treatment.  Label color is expressed as
@@ -16004,6 +15996,15 @@ button.primary-action:active:not(:disabled) {
   color: var(--text-high);
   background: var(--panel-inset);
 }
+
+.photo-app .collection-context-menu button:hover,
+.photo-app .collection-context-menu button:active,
+.photo-app .collection-context-menu button:focus-visible {
+  background: var(--accent-soft);
+  transform: none;
+  box-shadow: none;
+}
+
 .collection-context-menu .danger-action:hover {
   color: var(--error);
 }
