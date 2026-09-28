@@ -1,5 +1,6 @@
 @echo off
 setlocal EnableExtensions
+rem Canonical manual build/start entry; version requirements live in package.json and checks in scripts\manual-build-start.ps1.
 
 pushd "%~dp0" >nul
 if errorlevel 1 (

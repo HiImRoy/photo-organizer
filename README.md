@@ -49,7 +49,7 @@ PhotoOrganizer 的核心模型有两层：
 ## 开发环境
 
 - Windows 10/11
-- Node.js 22.13+（`package.json` 声明的版本；手动启动器会对较低版本提示警告并继续尝试）
+- Node.js 22.12+（`package.json` 声明的版本；手动启动器会对较低版本提示警告并继续尝试）
 - Rust stable，MSVC toolchain
 - Microsoft C++ Build Tools
 - WebView2
@@ -69,6 +69,10 @@ npm.cmd install
 1. 双击项目根目录的 `启动 PhotoOrganizer.cmd`。
 2. 脚本会检查 Node.js、npm、Rust MSVC toolchain、Microsoft C++ Build Tools、WebView2、配置文件和前端依赖状态。
 3. `package-lock.json` 与依赖 marker 不一致、marker 缺失或关键 CLI 缺失时，正常启动会运行 `npm install` 并刷新 marker。
+   Node.js 22.12 可满足项目的构建要求；依赖同步时，npm 仍可能为开发依赖链中的
+   `eslint-visitor-keys@5.0.1` 显示非阻断的 `EBADENGINE` 警告（其声明的 Node 范围不包含 22.12）。
+   这是依赖自身的 engine 警告，与启动器检查的项目最低版本不同。依赖已同步时，日常启动不会运行
+   `npm install`，也就不会重复显示该警告。该警告不会被隐藏。
 4. 前端构建通过后，脚本会使用手动 Tauri 配置启动桌面窗口。该配置将 `beforeDevCommand` 设为 `null`，并通过 `--no-dev-server` 禁止启动开发服务器；默认 WebView2 兼容参数不包含 `--no-sandbox`。
 5. 构建或桌面启动失败时，脚本会返回对应命令的非零退出码。
 
@@ -84,7 +88,7 @@ npm.cmd run start:desktop
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts\manual-build-start.ps1 -CheckOnly
 ```
 
-`-CheckOnly` 只读取并报告环境与依赖状态，不安装依赖、不写入 marker、不构建也不启动应用。缺少必要工具或依赖未同步时会返回非零退出码。Node.js 低于 `package.json` 声明的 22.13 时会显示警告，但不会仅因版本号阻止手动启动；实际构建失败时会报告构建命令的退出码。
+`-CheckOnly` 只读取并报告环境与依赖状态，不安装依赖、不写入 marker、不构建也不启动应用。缺少必要工具或依赖未同步时会返回非零退出码。Node.js 低于 `package.json` 声明的 22.12 时会显示项目 engine 警告，但不会仅因版本号阻止手动启动；实际构建失败时会报告构建命令的退出码。
 
 开发环境默认使用 `%TEMP%\PhotoOrganizer-dev-data` 保存测试数据库、缩略图和日志，不会自动扫描个人照片目录。需要测试已有应用数据时，再显式设置 `PHOTO_ORGANIZER_DATA_DIR`。
 

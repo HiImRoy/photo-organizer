@@ -309,7 +309,7 @@ try {
     if ($package -and $package.engines) {
         $nodeRequirement = [System.Text.RegularExpressions.Regex]::Match([string]$package.engines.node, '\d+\.\d+\.\d+')
         if ($nodeRequirement.Success -and $nodeVersion -and $nodeVersion -lt [version]$nodeRequirement.Value) {
-            Write-Check "Node.js engine requirement" ("package.json declares >= {0}; continuing with installed {1}" -f $nodeRequirement.Value, $nodeVersion) DarkYellow
+            Write-Check "Project Node.js engine requirement" ("package.json declares >= {0}; continuing with installed {1}" -f $nodeRequirement.Value, $nodeVersion) DarkYellow
         }
 
         $npmRequirement = [System.Text.RegularExpressions.Regex]::Match([string]$package.engines.npm, '\d+')
