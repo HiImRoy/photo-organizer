@@ -3778,8 +3778,8 @@ fn add_hue_range_filter(
 }
 
 const DEFAULT_COLOR_HUE_STRICTNESS: f64 = 0.5;
-const MIN_COLOR_HUE_AREA: f64 = 0.08;
-const MAX_COLOR_HUE_AREA: f64 = 0.45;
+const MIN_COLOR_HUE_AREA: f64 = 0.04;
+const MAX_COLOR_HUE_AREA: f64 = 0.32;
 const MAX_COLOR_HUE_ANGLE_TOLERANCE: f64 = 20.0;
 const MIN_COLOR_HUE_ANGLE_TOLERANCE: f64 = 2.0;
 const MAX_ACCENT_HUE_AREA_ASSIST_RATIO: f64 = 0.25;
@@ -3984,7 +3984,22 @@ fn palette_candidate(
         .and_then(parse_rgb_value)
         .or_else(|| object.get("rgb").and_then(parse_rgb_value))?;
     let category = object.get("category").and_then(serde_json::Value::as_str)?;
-    let is_chromatic = !category.eq_ignore_ascii_case("neutral");
+    let is_neutral = category.eq_ignore_ascii_case("neutral");
+    let (chroma, rgb_is_emphasis) = match parsed_fraction(object.get("chroma")) {
+        Some(chroma) => (
+            chroma,
+            !is_neutral
+                && chroma >= crate::imaging::MIN_ACCENT_CHROMA
+                && crate::imaging::is_emphasis_color_rgb(rgb[0], rgb[1], rgb[2]),
+        ),
+        None => {
+            let (chroma, is_emphasis) =
+                crate::imaging::oklab_chroma_and_emphasis_for_rgb(rgb[0], rgb[1], rgb[2]);
+            (chroma, !is_neutral && is_emphasis)
+        }
+    };
+    let is_chromatic =
+        !is_neutral && chroma >= crate::imaging::MIN_ACCENT_CHROMA && rgb_is_emphasis;
     Some(HuePaletteCandidate {
         rgb,
         is_chromatic,
@@ -3996,7 +4011,7 @@ fn palette_candidate(
         area_coverage: parsed_fraction(object.get("areaCoverage")).or(fallback_area)?,
         saliency_coverage: parsed_fraction(object.get("saliencyCoverage")).unwrap_or(0.5),
         local_contrast: parsed_fraction(object.get("localContrast")).unwrap_or(0.5),
-        chroma: parsed_fraction(object.get("chroma")).unwrap_or(0.11),
+        chroma,
         spatial_coherence: parsed_fraction(object.get("spatialCoherence")).unwrap_or(0.5),
     })
 }
@@ -5682,10 +5697,10 @@ mod tests {
 
     #[test]
     fn hue_match_threshold_scales_with_minimum_whole_image_area() {
-        assert!((color_hue_match_threshold(None) - 0.265).abs() < 1e-9);
-        assert!((color_hue_match_threshold(Some(0.0)) - 0.08).abs() < 1e-9);
-        assert!((color_hue_match_threshold(Some(1.0)) - 0.45).abs() < 1e-9);
-        assert!((color_hue_match_threshold(Some(2.0)) - 0.45).abs() < 1e-9);
+        assert!((color_hue_match_threshold(None) - 0.18).abs() < 1e-9);
+        assert!((color_hue_match_threshold(Some(0.0)) - 0.04).abs() < 1e-9);
+        assert!((color_hue_match_threshold(Some(1.0)) - 0.32).abs() < 1e-9);
+        assert!((color_hue_match_threshold(Some(2.0)) - 0.32).abs() < 1e-9);
     }
 
     #[test]
@@ -5767,13 +5782,47 @@ mod tests {
     }
 
     #[test]
-    fn low_saturation_blue_kept_by_palette_category_still_matches() {
+    fn low_chroma_blue_and_orange_candidates_do_not_match_as_white_balance_casts() {
         let mut blue = hue_candidate("#A0A4AA", 0.62);
         blue["category"] = serde_json::json!("blue");
-        assert!(matches_palette(vec![blue], vec![], 216.0, 15.0, 1.0));
-        let mut green = hue_candidate("#A0A6A0", 0.62);
-        green["category"] = serde_json::json!("green");
-        assert!(matches_palette(vec![green], vec![], 120.0, 15.0, 1.0));
+        blue["chroma"] = serde_json::json!(0.009);
+        assert!(!matches_palette(vec![blue], vec![], 216.0, 15.0, 0.0));
+        let mut orange = hue_candidate("#AFAAA5", 0.62);
+        orange["category"] = serde_json::json!("orange");
+        orange["chroma"] = serde_json::json!(0.009);
+        assert!(!matches_palette(vec![orange], vec![], 30.0, 15.0, 0.0));
+    }
+
+    #[test]
+    fn softly_colored_blue_remains_matchable_below_vivid_color_chroma() {
+        let mut soft_blue = hue_candidate("#8FB3D8", 0.62);
+        soft_blue["chroma"] = serde_json::json!(0.066);
+        soft_blue["category"] = serde_json::json!("blue");
+        assert!(matches_palette(vec![soft_blue], vec![], 216.0, 15.0, 1.0));
+    }
+
+    #[test]
+    fn skin_tone_gate_preserves_orange_leaf_and_brown_wood_hues() {
+        for (hex, chroma) in [("#D77A22", 0.1485), ("#A86B3C", 0.1000)] {
+            let mut warm_color = hue_candidate(hex, 0.62);
+            warm_color["chroma"] = serde_json::json!(chroma);
+            warm_color["category"] = serde_json::json!("orange");
+            assert!(matches_palette(vec![warm_color], vec![], 28.0, 30.0, 1.0));
+        }
+    }
+
+    #[test]
+    fn visibly_small_high_contrast_color_matches_at_a_reasonable_strictness() {
+        assert!(matches_palette(
+            vec![
+                hue_candidate("#E83A2F", 0.12),
+                hue_candidate("#777777", 0.88)
+            ],
+            vec![hue_candidate("#E83A2F", 0.12)],
+            0.0,
+            15.0,
+            0.25,
+        ));
     }
 
     #[test]
@@ -5814,6 +5863,15 @@ mod tests {
             0.0,
             15.0,
             1.0,
+        ));
+
+        let repeated_accents = vec![hue_candidate("#EF4A35", 0.40); 8];
+        assert!(!matches_palette(
+            vec![hue_candidate("#E83A2F", 0.05)],
+            repeated_accents,
+            0.0,
+            15.0,
+            0.5,
         ));
     }
 
@@ -7139,11 +7197,11 @@ mod tests {
         let connection = repository.open().expect("open database");
         let palette = serde_json::json!({
             "coveragePalette": [
-                {"rank":1,"color":"#E83A2F","category":"red","areaCoverage":0.30},
-                {"rank":2,"color":"#376BB5","category":"blue","areaCoverage":0.70}
+                {"rank":1,"color":"#E83A2F","category":"red","areaCoverage":0.30,"chroma":0.18},
+                {"rank":2,"color":"#376BB5","category":"blue","areaCoverage":0.70,"chroma":0.14}
             ],
             "prominentPalette": [
-                {"rank":1,"color":"#E83A2F","category":"red","areaCoverage":0.30}
+                {"rank":1,"color":"#E83A2F","category":"red","areaCoverage":0.30,"chroma":0.18}
             ]
         })
         .to_string();
@@ -7184,6 +7242,38 @@ mod tests {
         assert!(second_page.items.is_empty());
         assert_eq!(list_with_strictness(0.5, 1).total, 1);
         assert_eq!(list_with_strictness(1.0, 1).total, 0);
+
+        let cast_palette = serde_json::json!({
+            "coveragePalette": [
+                {"rank":1,"color":"#A0A4AA","category":"blue","areaCoverage":1.0,"chroma":0.009}
+            ],
+            "prominentPalette": []
+        })
+        .to_string();
+        repository
+            .open()
+            .expect("open database")
+            .execute(
+                "UPDATE color_features SET dominant_colors_json=?1 WHERE asset_id=?2",
+                params![cast_palette, asset_id],
+            )
+            .expect("seed low-chroma cast palette");
+        let cast_results = repository
+            .list_assets(
+                library_id,
+                AssetSortField::FileName,
+                SortDirection::Asc,
+                1,
+                10,
+                &AssetFilter {
+                    color_hue_center: Some(216.0),
+                    color_hue_width: Some(30.0),
+                    color_hue_strictness: Some(0.0),
+                    ..AssetFilter::default()
+                },
+            )
+            .expect("low-chroma cast query");
+        assert_eq!(cast_results.total, 0);
     }
 
     #[test]

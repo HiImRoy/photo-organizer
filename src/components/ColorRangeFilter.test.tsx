@@ -59,6 +59,22 @@ function setupWheel(center: number | null, width: number | null, strictness = 0.
 }
 
 describe("ColorRangeFilter", () => {
+  it("maps the top of the wheel to zero and neighboring positions across 360 consistently", () => {
+    const { wheel, onChange } = setupWheel(null, null);
+    const track = screen.getByTestId("color-range-track");
+
+    for (const [pointerId, angle] of [359, 0, 1].entries()) {
+      const point = pointAt(angle);
+      pointerEvent(track, "down", pointerId + 1, point.x, point.y);
+      pointerEvent(wheel, "up", pointerId + 1, point.x, point.y);
+    }
+
+    expect(onChange).toHaveBeenCalledTimes(3);
+    expect(onChange.mock.calls[0][0]).toBeCloseTo(359, 1);
+    expect(onChange.mock.calls[1]).toEqual([0, 60]);
+    expect(onChange.mock.calls[2][0]).toBeCloseTo(1, 1);
+  });
+
   it("creates a range on a blank-ring click and ignores blank drags", () => {
     const { wheel, onChange } = setupWheel(null, null);
     const track = screen.getByTestId("color-range-track");
@@ -196,7 +212,7 @@ describe("ColorRangeFilter", () => {
     const { onChange } = setupWheel(90, 60, 0.8);
     const startHandle = screen.getByRole("slider", { name: "调整色相范围起点" });
     expect(
-      screen.getByText("全图目标色面积 ≥ 38%；且主色候选须与所选色相一致"),
+      screen.getByText("全图目标色面积 ≥ 26%；且主色候选须与所选色相一致"),
     ).toBeInTheDocument();
     fireEvent.keyDown(startHandle, { key: "ArrowRight" });
     expect(onChange).toHaveBeenCalledWith(90.5, 59);

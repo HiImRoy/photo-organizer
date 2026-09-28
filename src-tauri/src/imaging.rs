@@ -19,8 +19,8 @@ use crate::wic_thumbnail;
 
 pub const THUMBNAIL_SPEC: &str = "grid-640-v1";
 pub const ANALYSIS_THUMBNAIL_MAX_DIMENSION: u32 = 640;
-pub const ANALYSIS_VERSION: &str = "basic-color-v6";
-pub const COLOR_ALGORITHM_VERSION: &str = "accent-oklab-v3";
+pub const ANALYSIS_VERSION: &str = "basic-color-v7";
+pub const COLOR_ALGORITHM_VERSION: &str = "accent-oklab-v4";
 pub const SCREEN_PREVIEW_SPEC: &str = "screen-bounded-v2";
 
 static SRGB_LINEAR_LUT: OnceLock<[f64; 256]> = OnceLock::new();
@@ -32,9 +32,11 @@ pub const MIN_MAIN_COLOR_AREA: f64 = 0.08;
 const MIN_ACCENT_AREA: f64 = MIN_PALETTE_AREA * 0.5;
 const CHROMATIC_MAIN_OVERRIDE_AREA: f64 = 0.20;
 const MIN_COLOR_DISTANCE: f64 = 0.045;
-const MIN_ACCENT_CHROMA: f64 = 0.0085;
-const MIN_SHADOW_ACCENT_CHROMA: f64 = 0.025;
-const MIN_HIGHLIGHT_ACCENT_CHROMA: f64 = 0.012;
+pub const MIN_ACCENT_CHROMA: f64 = 0.035;
+const MIN_SHADOW_ACCENT_CHROMA: f64 = 0.035;
+const MIN_HIGHLIGHT_ACCENT_CHROMA: f64 = 0.04;
+/// Muted orange skin hues need stronger evidence than saturated orange/brown.
+const MIN_SKIN_TONE_ACCENT_CHROMA: f64 = 0.08;
 /// Keep one pathological image from reserving hundreds of megabytes while
 /// the importer is already running alongside the desktop models.
 pub const MAX_DECODE_ALLOC_BYTES: u64 = 256 * 1024 * 1024;
@@ -556,7 +558,7 @@ fn analyze_rgba_with_step(image: &RgbaImage, sample_step: u32) -> BasicImageFeat
             let (sat, hue) = saturation_and_hue(r, g, b);
             let chroma = (r.max(g).max(b) - r.min(g).min(b)).clamp(0.0, 1.0);
             let oklab = oklab_grid[grid_y * grid_width + grid_x];
-            let is_accent = is_accent_color(oklab);
+            let is_accent = is_accent_color(oklab, Some(hue));
             let local_contrast = local_color_contrast_from_grid(
                 image,
                 &oklab_grid,
@@ -1069,7 +1071,7 @@ fn select_palette(
 ) -> Vec<ColorCandidate> {
     let mut selected = Vec::with_capacity(limit);
     for item in ordered {
-        if item.candidate.area_coverage < minimum_area && !selected.is_empty() {
+        if item.candidate.area_coverage < minimum_area {
             continue;
         }
         if selected.iter().any(|candidate: &ColorCandidate| {
@@ -1358,10 +1360,10 @@ fn color_category(red: u8, green: u8, blue: u8) -> &'static str {
     let r = f64::from(red) / 255.0;
     let g = f64::from(green) / 255.0;
     let b = f64::from(blue) / 255.0;
-    if !is_accent_color(rgb_to_oklab(red, green, blue)) {
+    let (_, hue) = saturation_and_hue(r, g, b);
+    if !is_accent_color(rgb_to_oklab(red, green, blue), Some(hue)) {
         return "neutral";
     }
-    let (_, hue) = saturation_and_hue(r, g, b);
     match hue {
         value if !(15.0..345.0).contains(&value) => "red",
         value if value < 45.0 => "orange",
@@ -1374,8 +1376,29 @@ fn color_category(red: u8, green: u8, blue: u8) -> &'static str {
     }
 }
 
-fn is_accent_color(color: OklabColor) -> bool {
-    let minimum_chroma = if color.l < 0.12 {
+pub fn is_emphasis_color_rgb(red: u8, green: u8, blue: u8) -> bool {
+    let (color, hue) = oklab_and_hue_for_rgb(red, green, blue);
+    is_accent_color(color, Some(hue))
+}
+
+pub fn oklab_chroma_and_emphasis_for_rgb(red: u8, green: u8, blue: u8) -> (f64, bool) {
+    let (color, hue) = oklab_and_hue_for_rgb(red, green, blue);
+    (color.chroma(), is_accent_color(color, Some(hue)))
+}
+
+fn oklab_and_hue_for_rgb(red: u8, green: u8, blue: u8) -> (OklabColor, f64) {
+    let r = f64::from(red) / 255.0;
+    let g = f64::from(green) / 255.0;
+    let b = f64::from(blue) / 255.0;
+    let (_, hue) = saturation_and_hue(r, g, b);
+    (rgb_to_oklab(red, green, blue), hue)
+}
+
+fn is_accent_color(color: OklabColor, hue: Option<f64>) -> bool {
+    let skin_tone_hue = hue.is_some_and(|value| (15.0..=45.0).contains(&value));
+    let minimum_chroma = if skin_tone_hue && (0.45..=0.92).contains(&color.l) {
+        MIN_SKIN_TONE_ACCENT_CHROMA
+    } else if color.l < 0.12 {
         MIN_SHADOW_ACCENT_CHROMA
     } else if color.l > 0.96 {
         MIN_HIGHLIGHT_ACCENT_CHROMA
@@ -1634,17 +1657,66 @@ mod tests {
     }
 
     #[test]
-    fn low_saturation_color_casts_keep_their_hue_instead_of_becoming_neutral() {
+    fn neutral_white_balance_casts_and_skin_tones_do_not_become_emphasis_hues() {
         let cool = RgbaImage::from_pixel(32, 32, Rgba([180, 185, 190, 255]));
         let warm = RgbaImage::from_pixel(32, 32, Rgba([175, 170, 165, 255]));
+        let skin = RgbaImage::from_pixel(32, 32, Rgba([223, 178, 148, 255]));
+        let white = RgbaImage::from_pixel(32, 32, Rgba([245, 246, 247, 255]));
+        let gray = RgbaImage::from_pixel(32, 32, Rgba([128, 130, 132, 255]));
 
         let cool_features = analyze_rgba(&cool);
         let warm_features = analyze_rgba(&warm);
+        let skin_features = analyze_rgba(&skin);
+        let white_features = analyze_rgba(&white);
+        let gray_features = analyze_rgba(&gray);
 
-        assert_eq!(cool_features.dominant_color_category, "blue");
-        assert_eq!(warm_features.dominant_color_category, "orange");
-        assert!(cool_features.neutral_ratio < 0.1);
-        assert!(warm_features.neutral_ratio < 0.1);
+        for features in [
+            cool_features,
+            warm_features,
+            skin_features,
+            white_features,
+            gray_features,
+        ] {
+            assert_eq!(features.dominant_color_category, "neutral");
+            assert!(features.neutral_ratio > 0.9);
+            let palette: ColorPalette =
+                serde_json::from_str(&features.dominant_colors_json).expect("palette JSON");
+            assert!(palette.prominent_palette.is_empty());
+        }
+    }
+
+    #[test]
+    fn softly_colored_blue_remains_a_real_emphasis_color() {
+        let image = RgbaImage::from_pixel(32, 32, Rgba([143, 179, 216, 255]));
+        let features = analyze_rgba(&image);
+        let palette: ColorPalette =
+            serde_json::from_str(&features.dominant_colors_json).expect("palette JSON");
+
+        assert_eq!(features.dominant_color_category, "blue");
+        assert!(
+            palette
+                .prominent_palette
+                .iter()
+                .any(|color| color.category == "blue")
+        );
+    }
+
+    #[test]
+    fn skin_tone_gate_preserves_saturated_orange_leaf_and_brown_wood() {
+        for pixel in [[215, 122, 34, 255], [168, 107, 60, 255]] {
+            let image = RgbaImage::from_pixel(32, 32, Rgba(pixel));
+            let features = analyze_rgba(&image);
+            let palette: ColorPalette =
+                serde_json::from_str(&features.dominant_colors_json).expect("palette JSON");
+
+            assert_eq!(features.dominant_color_category, "orange");
+            assert!(
+                palette
+                    .prominent_palette
+                    .iter()
+                    .any(|color| color.category == "orange")
+            );
+        }
     }
 
     #[test]
@@ -1735,6 +1807,18 @@ mod tests {
             serde_json::from_str(&isolated_features.dominant_colors_json).expect("palette JSON");
         assert!(
             !isolated_palette
+                .prominent_palette
+                .iter()
+                .any(|candidate| candidate.category == "red")
+        );
+
+        let mut gray_background = RgbaImage::from_pixel(64, 64, Rgba([124, 126, 128, 255]));
+        gray_background.put_pixel(32, 32, Rgba([235, 45, 35, 255]));
+        let gray_features = analyze_rgba(&gray_background);
+        let gray_palette: ColorPalette =
+            serde_json::from_str(&gray_features.dominant_colors_json).expect("palette JSON");
+        assert!(
+            !gray_palette
                 .prominent_palette
                 .iter()
                 .any(|candidate| candidate.category == "red")

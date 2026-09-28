@@ -1,7 +1,7 @@
 export const DEFAULT_COLOR_HUE_STRICTNESS = 0.5;
 
-const MIN_COLOR_HUE_MATCH_RATIO = 0.08;
-const MAX_COLOR_HUE_MATCH_RATIO = 0.45;
+const MIN_COLOR_HUE_MATCH_RATIO = 0.04;
+const MAX_COLOR_HUE_MATCH_RATIO = 0.32;
 const DOMINANT_COLOR_MATCH_STRICTNESS = 0.8;
 
 export function normalizeColorHueStrictness(value: number) {
@@ -10,7 +10,7 @@ export function normalizeColorHueStrictness(value: number) {
 
 /**
  * Convert strictness into the minimum share of the whole image covered by the
- * selected hue range. The backend uses this same 8%–45% contract.
+ * selected hue range. The backend uses this same 4%–32% contract.
  */
 export function colorHueMatchThreshold(strictness: number) {
   const normalized = normalizeColorHueStrictness(strictness);

@@ -250,7 +250,7 @@ export interface AssetFilter {
   colorLabels: ManualColorLabel[];
   colorHueCenter: number | null;
   colorHueWidth: number | null;
-  /** Strictness mapped to an 8%–45% whole-image target-hue area threshold. */
+  /** Strictness mapped to a 4%–32% whole-image target-hue area threshold. */
   colorHueStrictness: number;
   brightnessMin: number | null;
   brightnessMax: number | null;
