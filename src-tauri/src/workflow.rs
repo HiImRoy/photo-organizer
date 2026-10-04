@@ -10,7 +10,8 @@ use chrono::{SecondsFormat, Utc};
 use image::codecs::jpeg::JpegEncoder;
 use image::imageops::FilterType;
 use image::{DynamicImage, GenericImageView, ImageFormat, Rgba};
-use rusqlite::{Connection, OptionalExtension, Row, params};
+use rusqlite::functions::FunctionFlags;
+use rusqlite::{Connection, OptionalExtension, Row, TransactionBehavior, params};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -1015,7 +1016,7 @@ pub fn preview_edit_export(
     recipe: &EditRecipe,
 ) -> AppResult<EditExportPlan> {
     validate_recipe(recipe)?;
-    validate_export_target(repository, target_path)?;
+    let target_path = validate_export_target(repository, target_path)?;
     let (source_path, source_fingerprint) = repository.asset_source(asset_id)?;
     if !source_path.is_file() {
         return Err(AppError::NotFound(source_path.display().to_string()));
@@ -1048,7 +1049,7 @@ pub fn preview_edit_export(
 }
 
 pub fn execute_edit_export(repository: &Repository, plan_id: &str) -> AppResult<EditExportResult> {
-    let connection = open(repository)?;
+    let mut connection = open(repository)?;
     let stored = connection
         .query_row(
             "SELECT asset_id, source_fingerprint, target_path, recipe_json, status
@@ -1074,8 +1075,7 @@ pub fn execute_edit_export(repository: &Repository, plan_id: &str) -> AppResult<
     }
     let recipe: EditRecipe = serde_json::from_str(&recipe_json)?;
     validate_recipe(&recipe)?;
-    let target = PathBuf::from(&target_path);
-    validate_export_target(repository, &target)?;
+    let target = validate_export_target(repository, Path::new(&target_path))?;
     let (source, current_fingerprint) = repository.asset_source(asset_id)?;
     if current_fingerprint != planned_fingerprint || fingerprint(&source)? != planned_fingerprint {
         return Err(AppError::InvalidArgument(
@@ -1083,16 +1083,33 @@ pub fn execute_edit_export(repository: &Repository, plan_id: &str) -> AppResult<
         ));
     }
 
-    let job_id = Uuid::new_v4().to_string();
+    // The plan ID is the durable ownership key for this export's operation log.
+    let job_id = plan_id.to_owned();
     let timestamp = now();
-    connection.execute(
+    let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let rollback_in_progress: bool = transaction.query_row(
+        "SELECT EXISTS(
+             SELECT 1 FROM file_operations
+             WHERE operation_type='edit_copy'
+               AND path_identity_key(target_path)=?1
+               AND rollback_status='running'
+         )",
+        [identity_key(&target)],
+        |row| row.get(0),
+    )?;
+    if rollback_in_progress {
+        return Err(AppError::InvalidArgument(
+            "an edit export rollback is already in progress for this target path".into(),
+        ));
+    }
+    transaction.execute(
         "INSERT INTO file_operation_jobs(
             id, library_id, operation_type, status, dry_run, conflict_strategy, created_at, updated_at
          ) SELECT ?1, library_id, 'edit_copy', 'running', 0, 'skip', ?3, ?3
            FROM assets WHERE id=?2",
         params![job_id, asset_id, timestamp],
     )?;
-    connection.execute(
+    transaction.execute(
         "INSERT INTO file_operations(
             job_id, source_path, target_path, operation_type, plan_status, execution_status,
             conflict_strategy, source_hash
@@ -1104,6 +1121,7 @@ pub fn execute_edit_export(repository: &Repository, plan_id: &str) -> AppResult<
             planned_fingerprint
         ],
     )?;
+    transaction.commit()?;
 
     let result = write_edited_copy(&source, &target, &recipe);
     match result {
@@ -1161,6 +1179,8 @@ pub fn preview_edit_rollback(
     if !target.is_file() {
         return Err(AppError::NotFound(target_path));
     }
+    let canonical_target = target.canonicalize().map_err(AppError::from)?;
+    ensure_target_outside_libraries(repository, &canonical_target)?;
     if fingerprint(&target)? != target_hash {
         return Err(AppError::InvalidArgument(
             "generated copy changed after export and cannot be rolled back safely".into(),
@@ -1181,60 +1201,188 @@ pub fn execute_edit_rollback(
 ) -> AppResult<EditExportResult> {
     let preview = preview_edit_rollback(repository, plan_id)?;
     let target = PathBuf::from(&preview.target_path);
-    let connection = open(repository)?;
-    connection.execute(
+    let mut connection = open(repository)?;
+    let claim = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let claimed = claim.execute(
         "UPDATE file_operations
          SET rollback_status='running'
-         WHERE operation_type='edit_copy' AND target_path=?1 AND target_hash=?2",
-        params![preview.target_path, preview.target_hash],
+         WHERE job_id=?1 AND operation_type='edit_copy' AND target_path=?2
+           AND execution_status='completed' AND target_hash=?3
+           AND rollback_status IN ('not_requested', 'failed')
+           AND EXISTS (
+               SELECT 1 FROM edit_export_plans plan
+               WHERE plan.id=?1 AND plan.target_path=?2 AND plan.status='completed'
+           )
+           AND EXISTS (
+               SELECT 1 FROM file_operation_jobs job
+               WHERE job.id=file_operations.job_id AND job.status='completed'
+           )
+           AND NOT EXISTS (
+               SELECT 1 FROM file_operations newer
+               WHERE newer.operation_type='edit_copy'
+                 AND path_identity_key(newer.target_path)=
+                     path_identity_key(file_operations.target_path)
+                 AND newer.id>file_operations.id
+                 AND newer.execution_status='completed'
+           )
+           AND NOT EXISTS (
+               SELECT 1 FROM file_operations running_export
+               WHERE running_export.operation_type='edit_copy'
+                 AND path_identity_key(running_export.target_path)=
+                     path_identity_key(file_operations.target_path)
+                 AND running_export.id<>file_operations.id
+                 AND running_export.execution_status='running'
+           )
+           AND NOT EXISTS (
+               SELECT 1 FROM file_operations running_rollback
+               WHERE running_rollback.operation_type='edit_copy'
+                 AND path_identity_key(running_rollback.target_path)=
+                     path_identity_key(file_operations.target_path)
+                 AND running_rollback.job_id<>file_operations.job_id
+                 AND running_rollback.rollback_status='running'
+           )",
+        params![plan_id, preview.target_path, preview.target_hash],
     )?;
-    match std::fs::remove_file(&target) {
-        Ok(()) => {
-            let timestamp = now();
-            connection.execute(
-                "UPDATE file_operations
-                 SET rollback_status='completed'
-                 WHERE operation_type='edit_copy' AND target_path=?1 AND target_hash=?2",
-                params![preview.target_path, preview.target_hash],
-            )?;
-            connection.execute(
-                "UPDATE file_operation_jobs
-                 SET status='rolled_back', updated_at=?2
-                 WHERE id=(
-                    SELECT job_id FROM file_operations
-                    WHERE operation_type='edit_copy' AND target_path=?1 AND target_hash=?3
-                    ORDER BY id DESC LIMIT 1
-                 )",
-                params![preview.target_path, timestamp, preview.target_hash],
-            )?;
-            connection.execute(
-                "UPDATE edit_export_plans
-                 SET status='rolled_back', executed_at=?2, error_message=NULL
-                 WHERE id=?1",
-                params![plan_id, timestamp],
-            )?;
-            Ok(EditExportResult {
-                plan_id: plan_id.into(),
-                target_path: preview.target_path,
-                status: "rolled_back".into(),
-            })
-        }
-        Err(error) => {
-            let _ = connection.execute(
-                "UPDATE file_operations
-                 SET rollback_status='failed', error_message=?3
-                 WHERE operation_type='edit_copy' AND target_path=?1 AND target_hash=?2",
-                params![preview.target_path, preview.target_hash, error.to_string()],
-            );
-            Err(AppError::Io(error))
-        }
+    if claimed != 1 {
+        return Err(AppError::InvalidArgument(
+            "edit export rollback ownership changed, a later export is active, or rollback is already in progress".into(),
+        ));
     }
+    claim.commit()?;
+
+    if !target.is_file() {
+        mark_edit_rollback_failed(
+            repository,
+            plan_id,
+            &preview.target_path,
+            "generated copy disappeared before rollback deletion",
+        )?;
+        return Err(AppError::NotFound(preview.target_path));
+    }
+    let canonical_target = match target.canonicalize() {
+        Ok(path) => path,
+        Err(error) => {
+            mark_edit_rollback_failed(
+                repository,
+                plan_id,
+                &preview.target_path,
+                &error.to_string(),
+            )?;
+            return Err(AppError::Io(error));
+        }
+    };
+    if let Err(error) = ensure_target_outside_libraries(repository, &canonical_target) {
+        mark_edit_rollback_failed(
+            repository,
+            plan_id,
+            &preview.target_path,
+            &error.to_string(),
+        )?;
+        return Err(error);
+    }
+    let current_hash = match fingerprint(&target) {
+        Ok(hash) => hash,
+        Err(error) => {
+            mark_edit_rollback_failed(
+                repository,
+                plan_id,
+                &preview.target_path,
+                &error.to_string(),
+            )?;
+            return Err(error);
+        }
+    };
+    if current_hash != preview.target_hash {
+        mark_edit_rollback_failed(
+            repository,
+            plan_id,
+            &preview.target_path,
+            "generated copy changed after rollback preview",
+        )?;
+        return Err(AppError::InvalidArgument(
+            "generated copy changed after export and cannot be rolled back safely".into(),
+        ));
+    }
+
+    if let Err(error) = std::fs::remove_file(&target) {
+        mark_edit_rollback_failed(
+            repository,
+            plan_id,
+            &preview.target_path,
+            &error.to_string(),
+        )?;
+        return Err(AppError::Io(error));
+    }
+
+    let timestamp = now();
+    let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let operation_rows = transaction.execute(
+        "UPDATE file_operations
+         SET rollback_status='completed', error_message=NULL
+         WHERE job_id=?1 AND operation_type='edit_copy' AND target_path=?2
+           AND target_hash=?3 AND rollback_status='running'",
+        params![plan_id, preview.target_path, preview.target_hash],
+    )?;
+    let job_rows = transaction.execute(
+        "UPDATE file_operation_jobs
+         SET status='rolled_back', updated_at=?2
+         WHERE id=?1 AND status='completed'",
+        params![plan_id, timestamp],
+    )?;
+    let plan_rows = transaction.execute(
+        "UPDATE edit_export_plans
+         SET status='rolled_back', executed_at=?2, error_message=NULL
+         WHERE id=?1 AND status='completed'",
+        params![plan_id, timestamp],
+    )?;
+    if operation_rows != 1 || job_rows != 1 || plan_rows != 1 {
+        return Err(AppError::InvalidArgument(
+            "edit export rollback records changed unexpectedly after file removal".into(),
+        ));
+    }
+    transaction.commit()?;
+    Ok(EditExportResult {
+        plan_id: plan_id.into(),
+        target_path: preview.target_path,
+        status: "rolled_back".into(),
+    })
+}
+
+fn mark_edit_rollback_failed(
+    repository: &Repository,
+    plan_id: &str,
+    target_path: &str,
+    error_message: &str,
+) -> AppResult<()> {
+    let connection = open(repository)?;
+    let updated = connection.execute(
+        "UPDATE file_operations
+         SET rollback_status='failed', error_message=?3
+         WHERE job_id=?1 AND operation_type='edit_copy' AND target_path=?2
+           AND rollback_status='running'",
+        params![plan_id, target_path, error_message],
+    )?;
+    if updated != 1 {
+        return Err(AppError::InvalidArgument(
+            "edit export rollback claim could not be marked failed".into(),
+        ));
+    }
+    Ok(())
 }
 
 fn open(repository: &Repository) -> AppResult<Connection> {
     let connection = Connection::open(repository.database_path())?;
     connection.pragma_update(None, "foreign_keys", "ON")?;
     connection.busy_timeout(Duration::from_secs(5))?;
+    connection.create_scalar_function(
+        "path_identity_key",
+        1,
+        FunctionFlags::SQLITE_UTF8 | FunctionFlags::SQLITE_DETERMINISTIC,
+        |context| {
+            let path = context.get::<String>(0)?;
+            Ok(identity_key(Path::new(&path)))
+        },
+    )?;
     Ok(connection)
 }
 
@@ -1439,17 +1587,104 @@ fn rollback_target(repository: &Repository, plan_id: &str) -> AppResult<(String,
             "only completed edit exports can be rolled back: {status}"
         )));
     }
-    let target_hash = connection
+
+    let operations = {
+        let mut statement = connection.prepare(
+            "SELECT id, target_path, execution_status, target_hash, rollback_status
+             FROM file_operations
+             WHERE job_id=?1 AND operation_type='edit_copy'",
+        )?;
+        statement
+            .query_map([plan_id], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, Option<String>>(3)?,
+                    row.get::<_, String>(4)?,
+                ))
+            })?
+            .collect::<Result<Vec<_>, _>>()?
+    };
+    if operations.is_empty() {
+        return Err(AppError::InvalidArgument(format!(
+            "cannot safely roll back edit export plan {plan_id}: no file operation is associated with this plan; legacy operation ownership cannot be proven"
+        )));
+    }
+    if operations.len() != 1 {
+        return Err(AppError::InvalidArgument(format!(
+            "cannot safely roll back edit export plan {plan_id}: operation ownership is ambiguous"
+        )));
+    }
+    let (operation_id, operation_path, execution_status, target_hash, rollback_status) = operations
+        .into_iter()
+        .next()
+        .expect("one operation was checked");
+    if operation_path != target_path {
+        return Err(AppError::InvalidArgument(format!(
+            "cannot safely roll back edit export plan {plan_id}: operation target does not match the plan"
+        )));
+    }
+    if execution_status != "completed" {
+        return Err(AppError::InvalidArgument(format!(
+            "cannot safely roll back edit export plan {plan_id}: its operation is not completed"
+        )));
+    }
+    let target_hash = target_hash.ok_or_else(|| {
+        AppError::InvalidArgument(format!(
+            "cannot safely roll back edit export plan {plan_id}: operation target hash is missing"
+        ))
+    })?;
+    if !matches!(rollback_status.as_str(), "not_requested" | "failed") {
+        return Err(AppError::InvalidArgument(format!(
+            "edit export rollback is not available in its current state: {rollback_status}"
+        )));
+    }
+
+    let target_identity = identity_key(Path::new(&target_path));
+    let latest_successful_job = connection
         .query_row(
-            "SELECT target_hash FROM file_operations
-             WHERE operation_type='edit_copy' AND target_path=?1
-               AND execution_status='completed' AND target_hash IS NOT NULL
+            "SELECT job_id FROM file_operations
+             WHERE operation_type='edit_copy'
+               AND path_identity_key(target_path)=?1
+               AND execution_status='completed'
              ORDER BY id DESC LIMIT 1",
-            [&target_path],
+            [&target_identity],
             |row| row.get::<_, String>(0),
         )
-        .optional()?
-        .ok_or_else(|| AppError::NotFound(format!("operation log for {target_path}")))?;
+        .optional()?;
+    if latest_successful_job.as_deref() != Some(plan_id) {
+        return Err(AppError::InvalidArgument(format!(
+            "cannot safely roll back edit export plan {plan_id}: it was superseded by a newer successful export at the same target path"
+        )));
+    }
+    let (other_export_running, other_rollback_running): (bool, bool) = connection.query_row(
+        "SELECT
+             EXISTS(
+                 SELECT 1 FROM file_operations
+                 WHERE operation_type='edit_copy'
+                   AND path_identity_key(target_path)=?1
+                   AND id<>?2 AND execution_status='running'
+             ),
+             EXISTS(
+                 SELECT 1 FROM file_operations
+                 WHERE operation_type='edit_copy'
+                   AND path_identity_key(target_path)=?1
+                   AND id<>?2 AND rollback_status='running'
+             )",
+        params![target_identity, operation_id],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
+    if other_export_running {
+        return Err(AppError::InvalidArgument(format!(
+            "cannot safely roll back edit export plan {plan_id} while another export for the same target path is running"
+        )));
+    }
+    if other_rollback_running {
+        return Err(AppError::InvalidArgument(format!(
+            "cannot safely roll back edit export plan {plan_id} while another rollback for the same target path is running"
+        )));
+    }
     Ok((target_path, target_hash))
 }
 
@@ -1686,7 +1921,7 @@ fn apply_recipe(mut image: DynamicImage, recipe: &EditRecipe) -> AppResult<Dynam
     Ok(image)
 }
 
-fn validate_export_target(repository: &Repository, target: &Path) -> AppResult<()> {
+fn validate_export_target(repository: &Repository, target: &Path) -> AppResult<PathBuf> {
     if target.exists() {
         return Err(AppError::InvalidArgument(format!(
             "target already exists and will not be overwritten: {}",
@@ -1700,6 +1935,10 @@ fn validate_export_target(repository: &Repository, target: &Path) -> AppResult<(
             AppError::InvalidArgument("target parent directory does not exist".into())
         })?;
     let canonical_parent = parent.canonicalize().map_err(AppError::from)?;
+    let file_name = target
+        .file_name()
+        .ok_or_else(|| AppError::InvalidArgument("target path must include a file name".into()))?;
+    let canonical_target = canonical_parent.join(file_name);
     let extension = target
         .extension()
         .and_then(|value| value.to_str())
@@ -1710,8 +1949,12 @@ fn validate_export_target(repository: &Repository, target: &Path) -> AppResult<(
             "edited copies support JPEG, PNG, and WebP targets".into(),
         ));
     }
-    let target_identity =
-        identity_key(&canonical_parent.join(target.file_name().unwrap_or_default()));
+    ensure_target_outside_libraries(repository, &canonical_target)?;
+    Ok(canonical_target)
+}
+
+fn ensure_target_outside_libraries(repository: &Repository, target: &Path) -> AppResult<()> {
+    let target_identity = identity_key(target);
     let connection = open(repository)?;
     let mut statement = connection.prepare("SELECT source_identity_key FROM libraries")?;
     let roots = statement
@@ -2168,7 +2411,10 @@ mod tests {
         assert!(preview_edit_rollback(&repository, &plan.plan_id).is_err());
         std::fs::write(&target, exported_bytes).expect("restore generated test copy");
         let rollback = preview_edit_rollback(&repository, &plan.plan_id).expect("rollback plan");
-        assert_eq!(rollback.target_path, target.to_string_lossy());
+        assert_eq!(
+            identity_key(Path::new(&rollback.target_path)),
+            identity_key(&target)
+        );
         let rollback = execute_edit_rollback(&repository, &plan.plan_id).expect("rollback");
         assert_eq!(rollback.status, "rolled_back");
         assert!(!target.exists());
@@ -2176,5 +2422,409 @@ mod tests {
             fingerprint(&source_before).expect("post-rollback source hash"),
             before_hash
         );
+    }
+
+    #[test]
+    fn edit_export_rollback_cannot_target_a_newer_export_at_the_same_path() {
+        let (temporary, repository, _library_id, asset_id) = fixture_repository();
+        let target = temporary.path().join("重复内容-export.jpg");
+        let recipe = EditRecipe {
+            rotate_degrees: 90,
+            exposure: 0.1,
+            ..EditRecipe::default()
+        };
+
+        let first_plan =
+            preview_edit_export(&repository, asset_id, &target, &recipe).expect("first plan");
+        execute_edit_export(&repository, &first_plan.plan_id).expect("first export");
+        let first_hash = fingerprint(&target).expect("first export hash");
+        std::fs::remove_file(&target).expect("simulate external removal of generated copy");
+
+        let second_plan =
+            preview_edit_export(&repository, asset_id, &target, &recipe).expect("second plan");
+        execute_edit_export(&repository, &second_plan.plan_id).expect("second export");
+        let second_hash = fingerprint(&target).expect("second export hash");
+        assert_eq!(
+            second_hash, first_hash,
+            "fixture exports should be identical"
+        );
+
+        let first_preview = preview_edit_rollback(&repository, &first_plan.plan_id);
+        let first_rollback = execute_edit_rollback(&repository, &first_plan.plan_id);
+        assert!(
+            first_preview.is_err(),
+            "a superseded plan must not preview rollback of a later identical copy"
+        );
+        assert!(
+            first_rollback.is_err(),
+            "a superseded plan must not execute rollback of a later identical copy"
+        );
+        assert!(target.is_file(), "the second export must remain present");
+        assert_eq!(
+            fingerprint(&target).expect("preserved second export"),
+            second_hash
+        );
+
+        preview_edit_rollback(&repository, &second_plan.plan_id)
+            .expect("current export rollback preview");
+        let rollback =
+            execute_edit_rollback(&repository, &second_plan.plan_id).expect("current rollback");
+        assert_eq!(rollback.status, "rolled_back");
+        assert!(!target.exists());
+
+        let connection = open(&repository).expect("database");
+        let first_status: String = connection
+            .query_row(
+                "SELECT rollback_status FROM file_operations WHERE job_id=?1",
+                [&first_plan.plan_id],
+                |row| row.get(0),
+            )
+            .expect("first operation status");
+        let second_status: String = connection
+            .query_row(
+                "SELECT rollback_status FROM file_operations WHERE job_id=?1",
+                [&second_plan.plan_id],
+                |row| row.get(0),
+            )
+            .expect("second operation status");
+        let first_job_status: String = connection
+            .query_row(
+                "SELECT status FROM file_operation_jobs WHERE id=?1",
+                [&first_plan.plan_id],
+                |row| row.get(0),
+            )
+            .expect("first job status");
+        let second_job_status: String = connection
+            .query_row(
+                "SELECT status FROM file_operation_jobs WHERE id=?1",
+                [&second_plan.plan_id],
+                |row| row.get(0),
+            )
+            .expect("second job status");
+        assert_eq!(first_status, "not_requested");
+        assert_eq!(second_status, "completed");
+        assert_eq!(first_job_status, "completed");
+        assert_eq!(second_job_status, "rolled_back");
+    }
+
+    #[test]
+    fn edit_export_rollback_rejects_an_older_running_operation_for_same_path() {
+        let (temporary, repository, library_id, asset_id) = fixture_repository();
+        let target = temporary.path().join("running-export.jpg");
+        let source = repository.asset_source(asset_id).expect("source").0;
+        let source_hash = fingerprint(&source).expect("source hash");
+        let older_job_id = Uuid::new_v4().to_string();
+        let connection = open(&repository).expect("database");
+        let timestamp = now();
+        connection
+            .execute(
+                "INSERT INTO file_operation_jobs(
+                    id, library_id, operation_type, status, dry_run,
+                    conflict_strategy, created_at, updated_at
+                 ) VALUES(?1, ?2, 'edit_copy', 'running', 0, 'skip', ?3, ?3)",
+                params![older_job_id, library_id, timestamp],
+            )
+            .expect("older running job");
+        connection
+            .execute(
+                "INSERT INTO file_operations(
+                    job_id, source_path, target_path, operation_type, plan_status,
+                    execution_status, conflict_strategy, source_hash
+                 ) VALUES(?1, ?2, ?3, 'edit_copy', 'ready', 'running', 'skip', ?4)",
+                params![
+                    older_job_id,
+                    source.to_string_lossy(),
+                    target.to_string_lossy(),
+                    source_hash
+                ],
+            )
+            .expect("older running operation");
+        drop(connection);
+
+        let plan = preview_edit_export(&repository, asset_id, &target, &EditRecipe::default())
+            .expect("completed export plan");
+        execute_edit_export(&repository, &plan.plan_id).expect("completed export");
+        let connection = open(&repository).expect("operation ordering database");
+        let older_id: i64 = connection
+            .query_row(
+                "SELECT id FROM file_operations WHERE job_id=?1",
+                [&older_job_id],
+                |row| row.get(0),
+            )
+            .expect("older operation id");
+        let completed_id: i64 = connection
+            .query_row(
+                "SELECT id FROM file_operations WHERE job_id=?1",
+                [&plan.plan_id],
+                |row| row.get(0),
+            )
+            .expect("completed operation id");
+        assert!(older_id < completed_id);
+        drop(connection);
+
+        assert!(preview_edit_rollback(&repository, &plan.plan_id).is_err());
+        assert!(execute_edit_rollback(&repository, &plan.plan_id).is_err());
+        assert!(target.is_file(), "the completed export must remain present");
+    }
+
+    #[test]
+    fn durable_rollback_claim_survives_finalization_failure_and_blocks_export() {
+        let (temporary, repository, _library_id, asset_id) = fixture_repository();
+        let target = temporary.path().join("durable-rollback-claim.jpg");
+        let first_plan =
+            preview_edit_export(&repository, asset_id, &target, &EditRecipe::default())
+                .expect("first plan");
+        execute_edit_export(&repository, &first_plan.plan_id).expect("first export");
+
+        let connection = open(&repository).expect("trigger database");
+        connection
+            .execute_batch(
+                "CREATE TRIGGER reject_rollback_finalization
+                 BEFORE UPDATE OF rollback_status ON file_operations
+                 WHEN NEW.rollback_status='completed'
+                 BEGIN
+                     SELECT RAISE(FAIL, 'injected rollback finalization failure');
+                 END;",
+            )
+            .expect("finalization failure trigger");
+        drop(connection);
+
+        assert!(execute_edit_rollback(&repository, &first_plan.plan_id).is_err());
+        assert!(
+            !target.exists(),
+            "the injected database failure happens after the generated copy is removed"
+        );
+        let connection = open(&repository).expect("durable claim database");
+        let rollback_status: String = connection
+            .query_row(
+                "SELECT rollback_status FROM file_operations WHERE job_id=?1",
+                [&first_plan.plan_id],
+                |row| row.get(0),
+            )
+            .expect("durable rollback state");
+        assert_eq!(rollback_status, "running");
+        drop(connection);
+
+        let next_plan = preview_edit_export(&repository, asset_id, &target, &EditRecipe::default())
+            .expect("next export plan");
+        assert!(execute_edit_export(&repository, &next_plan.plan_id).is_err());
+        let connection = open(&repository).expect("blocked export database");
+        let next_job_exists: bool = connection
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM file_operation_jobs WHERE id=?1)",
+                [&next_plan.plan_id],
+                |row| row.get(0),
+            )
+            .expect("next job existence");
+        assert!(!next_job_exists, "blocked export must not register a job");
+    }
+
+    #[test]
+    fn edit_export_rollback_rejects_targets_inside_a_source_library() {
+        let (temporary, repository, _library_id, asset_id) = fixture_repository();
+        let generated_target = temporary.path().join("safe-export.jpg");
+        let plan = preview_edit_export(
+            &repository,
+            asset_id,
+            &generated_target,
+            &EditRecipe::default(),
+        )
+        .expect("export plan");
+        execute_edit_export(&repository, &plan.plan_id).expect("export");
+
+        let source = repository.asset_source(asset_id).expect("source").0;
+        let source_hash = fingerprint(&source).expect("source hash before tampering");
+        let connection = open(&repository).expect("database");
+        connection
+            .execute(
+                "UPDATE edit_export_plans SET target_path=?2 WHERE id=?1",
+                params![plan.plan_id, source.to_string_lossy()],
+            )
+            .expect("redirect plan to original source");
+        connection
+            .execute(
+                "UPDATE file_operations SET target_path=?2, target_hash=?3 WHERE job_id=?1",
+                params![plan.plan_id, source.to_string_lossy(), source_hash],
+            )
+            .expect("redirect owned operation to original source");
+        drop(connection);
+
+        assert!(matches!(
+            preview_edit_rollback(&repository, &plan.plan_id),
+            Err(AppError::UnsafePath(_))
+        ));
+        assert!(matches!(
+            execute_edit_rollback(&repository, &plan.plan_id),
+            Err(AppError::UnsafePath(_))
+        ));
+        assert_eq!(
+            fingerprint(&source).expect("source hash after rejected rollback"),
+            source_hash
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn edit_export_rollback_uses_windows_case_and_extended_path_identity() {
+        let (temporary, repository, _library_id, asset_id) = fixture_repository();
+        let first_target = temporary.path().join("Case-Alias.jpg");
+        let recipe = EditRecipe::default();
+        let first_plan =
+            preview_edit_export(&repository, asset_id, &first_target, &recipe).expect("first plan");
+        execute_edit_export(&repository, &first_plan.plan_id).expect("first export");
+        let first_hash = fingerprint(&first_target).expect("first export hash");
+        std::fs::remove_file(&first_target).expect("remove first generated copy");
+
+        let case_alias = temporary.path().join("case-alias.jpg");
+        let alias_text = case_alias.to_string_lossy();
+        let extended_alias = if alias_text.starts_with("\\\\?\\") {
+            alias_text.into_owned()
+        } else {
+            format!("\\\\?\\{alias_text}")
+        };
+        let second_target = PathBuf::from(extended_alias);
+        let second_plan = preview_edit_export(&repository, asset_id, &second_target, &recipe)
+            .expect("case and extended-prefix alias plan");
+
+        let connection = open(&repository).expect("rollback claim database");
+        connection
+            .execute(
+                "UPDATE file_operations SET rollback_status='running' WHERE job_id=?1",
+                [&first_plan.plan_id],
+            )
+            .expect("simulate durable rollback claim");
+        drop(connection);
+        assert!(execute_edit_export(&repository, &second_plan.plan_id).is_err());
+        let connection = open(&repository).expect("blocked alias export database");
+        let second_job_exists: bool = connection
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM file_operation_jobs WHERE id=?1)",
+                [&second_plan.plan_id],
+                |row| row.get(0),
+            )
+            .expect("second job existence");
+        assert!(!second_job_exists);
+        connection
+            .execute(
+                "UPDATE file_operations SET rollback_status='failed' WHERE job_id=?1",
+                [&first_plan.plan_id],
+            )
+            .expect("resolve simulated claim");
+        drop(connection);
+
+        execute_edit_export(&repository, &second_plan.plan_id).expect("second export");
+        assert_eq!(
+            fingerprint(&second_target).expect("second export hash"),
+            first_hash
+        );
+        assert_eq!(
+            identity_key(Path::new(&first_plan.target_path)),
+            identity_key(Path::new(&second_plan.target_path))
+        );
+
+        let source = repository.asset_source(asset_id).expect("source").0;
+        let source_hash = fingerprint(&source).expect("source hash");
+        let running_job_id = Uuid::new_v4().to_string();
+        let connection = open(&repository).expect("running alias database");
+        let timestamp = now();
+        connection
+            .execute(
+                "INSERT INTO file_operation_jobs(
+                    id, library_id, operation_type, status, dry_run,
+                    conflict_strategy, created_at, updated_at
+                 ) SELECT ?1, library_id, 'edit_copy', 'running', 0, 'skip', ?2, ?2
+                   FROM assets WHERE id=?3",
+                params![running_job_id, timestamp, asset_id],
+            )
+            .expect("running alias job");
+        connection
+            .execute(
+                "INSERT INTO file_operations(
+                    job_id, source_path, target_path, operation_type, plan_status,
+                    execution_status, conflict_strategy, source_hash
+                 ) VALUES(?1, ?2, ?3, 'edit_copy', 'ready', 'running', 'skip', ?4)",
+                params![
+                    running_job_id,
+                    source.to_string_lossy(),
+                    second_target.to_string_lossy(),
+                    source_hash
+                ],
+            )
+            .expect("running alias operation");
+        drop(connection);
+        assert!(preview_edit_rollback(&repository, &second_plan.plan_id).is_err());
+        assert!(execute_edit_rollback(&repository, &second_plan.plan_id).is_err());
+        let connection = open(&repository).expect("finish running alias database");
+        connection
+            .execute(
+                "UPDATE file_operations SET execution_status='failed' WHERE job_id=?1",
+                [&running_job_id],
+            )
+            .expect("finish running operation");
+        connection
+            .execute(
+                "UPDATE file_operation_jobs SET status='failed' WHERE id=?1",
+                [&running_job_id],
+            )
+            .expect("finish running job");
+        drop(connection);
+
+        assert!(preview_edit_rollback(&repository, &first_plan.plan_id).is_err());
+        assert!(execute_edit_rollback(&repository, &first_plan.plan_id).is_err());
+        preview_edit_rollback(&repository, &second_plan.plan_id)
+            .expect("current alias export preview");
+        execute_edit_rollback(&repository, &second_plan.plan_id).expect("current alias rollback");
+        assert!(!first_target.exists());
+    }
+
+    #[test]
+    fn legacy_edit_export_without_plan_owned_operation_is_rejected() {
+        let (temporary, repository, _library_id, asset_id) = fixture_repository();
+        let target = temporary.path().join("legacy-export.jpg");
+        let source = repository.asset_source(asset_id).expect("source").0;
+        let source_hash = fingerprint(&source).expect("source hash");
+        let plan = preview_edit_export(&repository, asset_id, &target, &EditRecipe::default())
+            .expect("legacy plan fixture");
+        let legacy_job_id = Uuid::new_v4().to_string();
+        let connection = open(&repository).expect("database");
+        let timestamp = now();
+        connection
+            .execute(
+                "INSERT INTO file_operation_jobs(
+                    id, library_id, operation_type, status, dry_run,
+                    conflict_strategy, created_at, updated_at
+                 ) VALUES(?1, ?2, 'edit_copy', 'completed', 0, 'skip', ?3, ?3)",
+                params![legacy_job_id, _library_id, timestamp],
+            )
+            .expect("legacy operation job");
+        connection
+            .execute(
+                "INSERT INTO file_operations(
+                    job_id, source_path, target_path, operation_type, plan_status,
+                    execution_status, conflict_strategy, source_hash, target_hash
+                 ) VALUES(?1, ?2, ?3, 'edit_copy', 'ready', 'completed', 'skip', ?4, ?5)",
+                params![
+                    legacy_job_id,
+                    source.to_string_lossy(),
+                    target.to_string_lossy(),
+                    source_hash,
+                    "legacy-target-hash"
+                ],
+            )
+            .expect("legacy operation");
+        connection
+            .execute(
+                "UPDATE edit_export_plans SET status='completed' WHERE id=?1",
+                [&plan.plan_id],
+            )
+            .expect("complete legacy plan");
+
+        let error = preview_edit_rollback(&repository, &plan.plan_id)
+            .expect_err("legacy operation ownership must not be guessed");
+        assert!(
+            matches!(error, AppError::InvalidArgument(ref message) if message.contains("ownership")),
+            "expected an explicit ownership error, got {error}"
+        );
+        assert!(!target.exists());
     }
 }

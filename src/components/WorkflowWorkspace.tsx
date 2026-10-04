@@ -865,6 +865,54 @@ function CompareView({ assetIds }: { assetIds: number[] }) {
   );
 }
 
+interface EditorPlanState {
+  plan: EditExportPlan;
+  assetId: number;
+  recipe: EditRecipe;
+  generation: number;
+}
+
+function cloneEditRecipe(recipe: EditRecipe): EditRecipe {
+  return {
+    ...recipe,
+    crop: recipe.crop ? { ...recipe.crop } : null,
+  };
+}
+
+function editRecipesEqual(left: EditRecipe, right: EditRecipe): boolean {
+  const cropEqual =
+    left.crop === null
+      ? right.crop === null
+      : right.crop !== null &&
+        left.crop.x === right.crop.x &&
+        left.crop.y === right.crop.y &&
+        left.crop.width === right.crop.width &&
+        left.crop.height === right.crop.height;
+
+  return (
+    cropEqual &&
+    left.rotateDegrees === right.rotateDegrees &&
+    left.flipHorizontal === right.flipHorizontal &&
+    left.flipVertical === right.flipVertical &&
+    left.exposure === right.exposure &&
+    left.contrast === right.contrast &&
+    left.saturation === right.saturation
+  );
+}
+
+function editorPlanMatches(
+  candidate: EditorPlanState,
+  assetId: number,
+  recipe: EditRecipe,
+  generation: number,
+): boolean {
+  return (
+    candidate.generation === generation &&
+    candidate.assetId === assetId &&
+    editRecipesEqual(candidate.recipe, recipe)
+  );
+}
+
 function EditorView({
   asset,
   onMessage,
@@ -876,11 +924,30 @@ function EditorView({
 }) {
   const [recipe, setRecipe] = useState<EditRecipe>(emptyEditRecipe);
   const [preview, setPreview] = useState<string | null>(null);
-  const [plan, setPlan] = useState<EditExportPlan | null>(null);
+  const [planState, setPlanState] = useState<EditorPlanState | null>(null);
   const [completedExport, setCompletedExport] = useState<EditExportResult | null>(null);
   const [rollbackPlan, setRollbackPlan] = useState<EditRollbackPlan | null>(null);
+  const [preparingPlanGeneration, setPreparingPlanGeneration] = useState<number | null>(null);
+  const [currentPlanRequestGeneration, setCurrentPlanRequestGeneration] = useState(0);
   const [busy, setBusy] = useState(false);
   const requestVersion = useRef(0);
+  const planRequestGeneration = useRef(0);
+  const activePlanRequestGeneration = useRef<number | null>(null);
+  const rollbackRequestGeneration = useRef(0);
+  const busyRef = useRef(false);
+  const mountedRef = useRef(true);
+  const recipeRef = useRef(recipe);
+  const assetIdRef = useRef(asset?.id ?? null);
+  const completedExportRef = useRef(completedExport);
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      planRequestGeneration.current += 1;
+      rollbackRequestGeneration.current += 1;
+    };
+  }, []);
 
   useEffect(() => {
     if (!asset) return;
@@ -894,14 +961,217 @@ function EditorView({
           if (requestVersion.current === version) onError(messageFrom(reason));
         });
     }, 180);
-    return () => window.clearTimeout(timer);
+    return () => {
+      window.clearTimeout(timer);
+      if (requestVersion.current === version) requestVersion.current += 1;
+    };
   }, [asset, onError, recipe]);
 
+  const advancePlanRequestGeneration = () => {
+    const generation = planRequestGeneration.current + 1;
+    planRequestGeneration.current = generation;
+    setCurrentPlanRequestGeneration(generation);
+    return generation;
+  };
+
+  const invalidatePlan = () => {
+    advancePlanRequestGeneration();
+    activePlanRequestGeneration.current = null;
+    setPlanState(null);
+    setPreparingPlanGeneration(null);
+  };
+
   const update = <K extends keyof EditRecipe>(key: K, value: EditRecipe[K]) => {
-    setPlan(null);
+    invalidatePlan();
+    const nextRecipe = { ...recipeRef.current, [key]: value };
+    recipeRef.current = nextRecipe;
+    setRecipe(nextRecipe);
+  };
+
+  const resetRecipe = () => {
+    invalidatePlan();
+    const nextRecipe = cloneEditRecipe(emptyEditRecipe);
+    recipeRef.current = nextRecipe;
+    setRecipe(nextRecipe);
+  };
+
+  const beginBusy = () => {
+    if (busyRef.current) return false;
+    busyRef.current = true;
+    setBusy(true);
+    return true;
+  };
+
+  const endBusy = () => {
+    busyRef.current = false;
+    if (mountedRef.current) setBusy(false);
+  };
+
+  const plan =
+    planState &&
+    asset &&
+    editorPlanMatches(planState, asset.id, recipe, currentPlanRequestGeneration)
+      ? planState.plan
+      : null;
+
+  const createPlan = () => {
+    if (
+      !asset ||
+      busyRef.current ||
+      activePlanRequestGeneration.current === planRequestGeneration.current
+    ) {
+      return;
+    }
+
+    const generation = advancePlanRequestGeneration();
+    activePlanRequestGeneration.current = generation;
+    const assetId = asset.id;
+    const requestedRecipe = cloneEditRecipe(recipeRef.current);
+    setPlanState(null);
+    setPreparingPlanGeneration(generation);
+    onError(null);
+
+    const isCurrentRequest = () =>
+      mountedRef.current &&
+      planRequestGeneration.current === generation &&
+      assetIdRef.current === assetId &&
+      editRecipesEqual(recipeRef.current, requestedRecipe);
+
+    void (async () => {
+      try {
+        const targetPath = await chooseEditedCopyTarget(asset.fileName);
+        if (!targetPath || !isCurrentRequest()) return;
+
+        const nextPlan = await previewEditExport(assetId, targetPath, requestedRecipe);
+        if (!isCurrentRequest()) return;
+        if (nextPlan.assetId !== assetId || !editRecipesEqual(nextPlan.recipe, requestedRecipe)) {
+          onError("导出计划与当前图片或配方不匹配，请重新预览。");
+          return;
+        }
+
+        setPlanState({
+          plan: nextPlan,
+          assetId,
+          recipe: requestedRecipe,
+          generation,
+        });
+      } catch (reason) {
+        if (isCurrentRequest()) onError(messageFrom(reason));
+      } finally {
+        if (activePlanRequestGeneration.current === generation) {
+          activePlanRequestGeneration.current = null;
+        }
+        if (mountedRef.current) {
+          setPreparingPlanGeneration((current) => (current === generation ? null : current));
+        }
+      }
+    })();
+  };
+
+  const confirmExport = () => {
+    const planStateAtConfirmation = planState;
+    if (
+      !plan ||
+      !asset ||
+      !planStateAtConfirmation ||
+      !editorPlanMatches(
+        planStateAtConfirmation,
+        asset.id,
+        recipeRef.current,
+        planRequestGeneration.current,
+      ) ||
+      planStateAtConfirmation.plan.planId !== plan.planId ||
+      !beginBusy()
+    ) {
+      return;
+    }
+
+    const planToExecute = planStateAtConfirmation.plan;
+
+    void executeEditExport(planToExecute.planId)
+      .then((result) => {
+        if (!mountedRef.current) return;
+        invalidatePlan();
+        rollbackRequestGeneration.current += 1;
+        completedExportRef.current = result;
+        setCompletedExport(result);
+        setRollbackPlan(null);
+        onMessage(`编辑副本已创建：${result.targetPath}`);
+      })
+      .catch((reason) => {
+        if (mountedRef.current) onError(messageFrom(reason));
+      })
+      .finally(endBusy);
+  };
+
+  const previewRollback = () => {
+    const exportToRollback = completedExportRef.current;
+    if (!exportToRollback || !beginBusy()) return;
+
+    const generation = ++rollbackRequestGeneration.current;
+    void previewEditRollback(exportToRollback.planId)
+      .then((nextPlan) => {
+        if (
+          mountedRef.current &&
+          rollbackRequestGeneration.current === generation &&
+          completedExportRef.current?.planId === exportToRollback.planId &&
+          nextPlan.planId === exportToRollback.planId
+        ) {
+          setRollbackPlan(nextPlan);
+        } else if (
+          mountedRef.current &&
+          rollbackRequestGeneration.current === generation &&
+          completedExportRef.current?.planId === exportToRollback.planId
+        ) {
+          onError("回滚计划与当前生成副本不匹配，未执行回滚。");
+        }
+      })
+      .catch((reason) => {
+        if (
+          mountedRef.current &&
+          rollbackRequestGeneration.current === generation &&
+          completedExportRef.current?.planId === exportToRollback.planId
+        ) {
+          onError(messageFrom(reason));
+        }
+      })
+      .finally(endBusy);
+  };
+
+  const confirmRollback = () => {
+    const exportToRollback = completedExportRef.current;
+    if (
+      !rollbackPlan ||
+      !exportToRollback ||
+      rollbackPlan.planId !== exportToRollback.planId ||
+      !beginBusy()
+    ) {
+      return;
+    }
+
+    void executeEditRollback(rollbackPlan.planId)
+      .then(() => {
+        if (!mountedRef.current || completedExportRef.current?.planId !== exportToRollback.planId) {
+          return;
+        }
+        rollbackRequestGeneration.current += 1;
+        completedExportRef.current = null;
+        setCompletedExport(null);
+        setRollbackPlan(null);
+        onMessage("编辑副本已回滚；原图未改变。");
+      })
+      .catch((reason) => {
+        if (mountedRef.current) onError(messageFrom(reason));
+      })
+      .finally(endBusy);
+  };
+
+  const dismissCompletedExport = () => {
+    if (busyRef.current) return;
+    rollbackRequestGeneration.current += 1;
+    completedExportRef.current = null;
     setCompletedExport(null);
     setRollbackPlan(null);
-    setRecipe((current) => ({ ...current, [key]: value }));
   };
 
   const squareCrop = useMemo(() => {
@@ -1006,23 +1276,12 @@ function EditorView({
         <div className="editor-export">
           <button
             type="button"
-            disabled={busy}
-            onClick={() => {
-              setBusy(true);
-              setPlan(null);
-              setCompletedExport(null);
-              setRollbackPlan(null);
-              onError(null);
-              void chooseEditedCopyTarget(asset.fileName)
-                .then((target) => (target ? previewEditExport(asset.id, target, recipe) : null))
-                .then((nextPlan) => setPlan(nextPlan))
-                .catch((reason) => onError(messageFrom(reason)))
-                .finally(() => setBusy(false));
-            }}
+            disabled={busy || preparingPlanGeneration === currentPlanRequestGeneration}
+            onClick={createPlan}
           >
-            {busy ? "准备中…" : "预览另存计划"}
+            {preparingPlanGeneration === currentPlanRequestGeneration ? "准备中…" : "预览另存计划"}
           </button>
-          <button type="button" onClick={() => setRecipe(emptyEditRecipe)}>
+          <button type="button" onClick={resetRecipe}>
             重置配方
           </button>
         </div>
@@ -1031,20 +1290,7 @@ function EditorView({
             <strong>确认创建新文件</strong>
             <span title={plan.targetPath}>{plan.targetPath}</span>
             <small>目标已校验：不存在、位于图库根目录之外。执行前会再次校验源指纹。</small>
-            <button
-              type="button"
-              onClick={() => {
-                setBusy(true);
-                void executeEditExport(plan.planId)
-                  .then((result) => {
-                    setPlan(null);
-                    setCompletedExport(result);
-                    onMessage(`编辑副本已创建：${result.targetPath}`);
-                  })
-                  .catch((reason) => onError(messageFrom(reason)))
-                  .finally(() => setBusy(false));
-              }}
-            >
+            <button type="button" disabled={busy} onClick={confirmExport}>
               确认另存副本
             </button>
           </div>
@@ -1055,36 +1301,18 @@ function EditorView({
             <span title={completedExport.targetPath}>{completedExport.targetPath}</span>
             <small>回滚前会重新校验目标哈希；如果文件已被修改，将拒绝删除。</small>
             {rollbackPlan ? (
-              <button
-                type="button"
-                onClick={() => {
-                  setBusy(true);
-                  void executeEditRollback(rollbackPlan.planId)
-                    .then(() => {
-                      setCompletedExport(null);
-                      setRollbackPlan(null);
-                      onMessage("编辑副本已回滚；原图未改变。");
-                    })
-                    .catch((reason) => onError(messageFrom(reason)))
-                    .finally(() => setBusy(false));
-                }}
-              >
+              <button type="button" disabled={busy} onClick={confirmRollback}>
                 确认删除该生成副本
               </button>
             ) : (
-              <button
-                type="button"
-                onClick={() => {
-                  setBusy(true);
-                  void previewEditRollback(completedExport.planId)
-                    .then(setRollbackPlan)
-                    .catch((reason) => onError(messageFrom(reason)))
-                    .finally(() => setBusy(false));
-                }}
-              >
+              <button type="button" disabled={busy} onClick={previewRollback}>
                 预览撤销
               </button>
             )}
+            <small>关闭记录不会删除已生成的副本。</small>
+            <button type="button" disabled={busy} onClick={dismissCompletedExport}>
+              关闭记录
+            </button>
           </div>
         ) : null}
       </aside>

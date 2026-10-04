@@ -3513,9 +3513,13 @@ fn asset_filter_sql(query: &AssetQuery) -> (String, Vec<Value>) {
         .iter()
         .filter_map(|value| {
             canonical_topic_id(value).map(|canonical| {
-                [canonical.to_owned(), value.clone()]
-                    .into_iter()
-                    .collect::<Vec<_>>()
+                let mut ids = vec![canonical.to_owned()];
+                ids.extend(
+                    legacy_topic_filter_aliases(canonical)
+                        .iter()
+                        .map(|alias| (*alias).to_owned()),
+                );
+                ids
             })
         })
         .flatten()
@@ -3524,15 +3528,25 @@ fn asset_filter_sql(query: &AssetQuery) -> (String, Vec<Value>) {
     primary_categories.sort();
     primary_categories.dedup();
     let auxiliary_filter_requested = !filter.auxiliary_tags.is_empty();
-    let auxiliary_tags = filter
+    let mut auxiliary_tags = filter
         .auxiliary_tags
         .iter()
         .map(|value| {
-            canonical_subject_id(value)
-                .map(str::to_owned)
-                .unwrap_or_else(|| value.clone())
+            if let Some(canonical) = canonical_subject_id(value) {
+                let mut ids = vec![canonical.to_owned()];
+                ids.extend(
+                    legacy_subject_filter_aliases(canonical)
+                        .iter()
+                        .map(|alias| (*alias).to_owned()),
+                );
+                ids
+            } else {
+                vec![value.clone()]
+            }
         })
         .collect::<Vec<_>>();
+    auxiliary_tags.sort();
+    auxiliary_tags.dedup();
     if let Some(search) = filter
         .search
         .as_deref()
@@ -3548,6 +3562,7 @@ fn asset_filter_sql(query: &AssetQuery) -> (String, Vec<Value>) {
     if primary_filter_requested && primary_categories.is_empty() {
         clauses.push("0=1".into());
     } else if !primary_categories.is_empty() {
+        let known_topic_ids = known_topic_filter_ids();
         let expression = effective_scalar_expression(
             FIELD_PRIMARY_CATEGORY,
             &format!(
@@ -3558,13 +3573,16 @@ fn asset_filter_sql(query: &AssetQuery) -> (String, Vec<Value>) {
                     AND sl.model_name={model_name} AND sl.model_version={model_version}
                     AND sl.analysis_version={analysis_version}
                     AND sl.taxonomy_version={taxonomy_version}
+                    AND sl.label IN ({known_topic_ids})
                   ORDER BY sl.similarity DESC, sl.label ASC LIMIT 1)",
                 model_name = active_model_name,
                 model_version = active_model_version,
                 analysis_version = active_analysis_version,
                 taxonomy_version = sql_literal(TAXONOMY_VERSION),
+                known_topic_ids = placeholders(known_topic_ids.len()),
             ),
         );
+        values.extend(known_topic_ids.into_iter().map(Value::Text));
         clauses.push(format!(
             "{expression} IN ({})",
             placeholders(primary_categories.len())
@@ -3576,17 +3594,23 @@ fn asset_filter_sql(query: &AssetQuery) -> (String, Vec<Value>) {
     } else if !auxiliary_tags.is_empty() {
         let predicates = auxiliary_tags
             .iter()
-            .map(|_| {
+            .map(|tag_ids| {
+                let add_tag_ids = placeholders(tag_ids.len());
+                let semantic_tag_ids = placeholders(tag_ids.len());
+                let subject_tag_ids = placeholders(tag_ids.len());
+                let remove_tag_ids = placeholders(tag_ids.len());
                 format!(
                     "(EXISTS(SELECT 1 FROM manual_tag_overrides add_tag
-                            WHERE add_tag.asset_id=a.id AND add_tag.tag_id=? AND add_tag.state='add')
+                            WHERE add_tag.asset_id=a.id AND add_tag.tag_id IN ({add_tag_ids})
+                              AND add_tag.state='add')
                      OR ((EXISTS(SELECT 1 FROM semantic_labels sl
                                   WHERE sl.asset_id=a.id AND sl.source_fingerprint=a.fingerprint
                                   AND sl.is_manual=0 AND sl.is_primary=0
                                     AND sl.category_group='subject'
                                     AND sl.model_name={model_name} AND sl.model_version={model_version}
                                     AND sl.analysis_version={analysis_version}
-                                    AND sl.taxonomy_version={taxonomy_version} AND sl.label=?)
+                                    AND sl.taxonomy_version={taxonomy_version}
+                                    AND sl.label IN ({semantic_tag_ids}))
                             OR EXISTS(SELECT 1 FROM subject_labels subject
                                       WHERE subject.asset_id=a.id
                                         AND subject.source_fingerprint=a.fingerprint
@@ -3594,9 +3618,10 @@ fn asset_filter_sql(query: &AssetQuery) -> (String, Vec<Value>) {
                                         AND subject.model_version={subject_model_version}
                                         AND subject.analysis_version={subject_analysis_version}
                                         AND subject.taxonomy_version={subject_taxonomy_version}
-                                        AND subject.label=?))
+                                        AND subject.label IN ({subject_tag_ids})))
                          AND NOT EXISTS(SELECT 1 FROM manual_tag_overrides remove_tag
-                                        WHERE remove_tag.asset_id=a.id AND remove_tag.tag_id=?
+                                        WHERE remove_tag.asset_id=a.id
+                                           AND remove_tag.tag_id IN ({remove_tag_ids})
                                            AND remove_tag.state='remove')))" ,
                     model_name = active_model_name,
                      model_version = active_model_version,
@@ -3614,11 +3639,10 @@ fn asset_filter_sql(query: &AssetQuery) -> (String, Vec<Value>) {
             SemanticMatchMode::All => " AND ",
         };
         clauses.push(format!("({})", predicates.join(joiner)));
-        for tag in &auxiliary_tags {
-            values.push(Value::Text(tag.clone()));
-            values.push(Value::Text(tag.clone()));
-            values.push(Value::Text(tag.clone()));
-            values.push(Value::Text(tag.clone()));
+        for tag_ids in &auxiliary_tags {
+            for _ in 0..4 {
+                values.extend(tag_ids.iter().cloned().map(Value::Text));
+            }
         }
     }
     add_string_in_filter(
@@ -3705,6 +3729,58 @@ fn asset_filter_sql(query: &AssetQuery) -> (String, Vec<Value>) {
         _ => {}
     }
     (clauses.join(" AND "), values)
+}
+
+fn legacy_topic_filter_aliases(canonical_id: &str) -> &'static [&'static str] {
+    match canonical_id {
+        "photo_portrait" => &["person", "portrait"],
+        "photo_landscape" => &["landscape"],
+        "photo_street" => &["street", "photo_urban"],
+        "photo_architecture" => &["architecture"],
+        "photo_still_life" => &["product", "still_life", "photo_food", "photo_commercial"],
+        "photo_wildlife" => &["animal"],
+        "photo_macro" => &["plant", "photo_plant"],
+        "photo_vehicle" => &["vehicle", "photo_transport"],
+        "photo_abstract" => &["abstract"],
+        _ => &[],
+    }
+}
+
+fn known_topic_filter_ids() -> Vec<String> {
+    let canonical_ids = [
+        "photo_portrait",
+        "photo_landscape",
+        "photo_street",
+        "photo_architecture",
+        "photo_still_life",
+        "photo_wildlife",
+        "photo_macro",
+        "photo_vehicle",
+        "photo_abstract",
+    ];
+    let mut ids = Vec::new();
+    for canonical_id in canonical_ids {
+        if canonical_topic_id(canonical_id).is_some() {
+            ids.push(canonical_id.to_owned());
+        }
+        for alias in legacy_topic_filter_aliases(canonical_id) {
+            if canonical_topic_id(alias).is_some() {
+                ids.push((*alias).to_owned());
+            }
+        }
+    }
+    ids.sort();
+    ids.dedup();
+    ids
+}
+
+fn legacy_subject_filter_aliases(canonical_id: &str) -> &'static [&'static str] {
+    match canonical_id {
+        "single_person" => &["person", "portrait"],
+        "multiple_people" => &["group"],
+        "animal" => &["pet"],
+        _ => &[],
+    }
 }
 
 fn effective_scalar_expression(field: &str, auto_expression: &str) -> String {
@@ -6731,6 +6807,489 @@ mod tests {
     }
 
     #[test]
+    fn canonical_filters_match_current_legacy_labels_and_effective_manual_tags() {
+        fn insert_asset(
+            connection: &Connection,
+            library_id: i64,
+            file_name: &str,
+            fingerprint: &str,
+        ) -> i64 {
+            let absolute_path = format!(r"C:\fixtures\canonical-filter\{file_name}");
+            let timestamp = now();
+            connection
+                .execute(
+                    "INSERT INTO assets(
+                        library_id, asset_identity_key, absolute_path, relative_path, file_name,
+                        extension, file_size, modified_at, fingerprint, file_status, scan_status,
+                        analysis_status, first_seen_at, last_seen_at
+                     ) VALUES(?1, ?2, ?3, ?4, ?4, 'jpg', 42, 123, ?5, 'present', 'indexed',
+                              'completed', ?6, ?6)",
+                    params![
+                        library_id,
+                        identity_key(Path::new(&absolute_path)),
+                        absolute_path,
+                        file_name,
+                        fingerprint,
+                        timestamp
+                    ],
+                )
+                .expect("insert canonical-filter asset");
+            connection.last_insert_rowid()
+        }
+
+        fn insert_topic_label(
+            connection: &Connection,
+            asset_id: i64,
+            label: &str,
+            model_version: &str,
+            analysis_version: &str,
+            taxonomy_version: &str,
+            source_fingerprint: &str,
+        ) {
+            connection
+                .execute(
+                    "INSERT INTO semantic_labels(
+                        asset_id, label, display_name, similarity, threshold, model_name,
+                        model_version, analysis_version, taxonomy_version, category_group,
+                        generated_at, source_fingerprint, is_primary, is_manual
+                     ) VALUES(?1, ?2, ?2, 0.91, 0.2, ?3, ?4, ?5, ?6, 'scene', ?7, ?8, 1, 0)",
+                    params![
+                        asset_id,
+                        label,
+                        SIGLIP2_MODEL_NAME,
+                        model_version,
+                        analysis_version,
+                        taxonomy_version,
+                        now(),
+                        source_fingerprint
+                    ],
+                )
+                .expect("insert topic fixture label");
+        }
+
+        fn insert_subject_label(
+            connection: &Connection,
+            asset_id: i64,
+            label: &str,
+            model_version: &str,
+            analysis_version: &str,
+            taxonomy_version: &str,
+            source_fingerprint: &str,
+        ) {
+            connection
+                .execute(
+                    "INSERT INTO subject_labels(
+                        asset_id, label, display_name, similarity, threshold, model_name,
+                        model_version, analysis_version, taxonomy_version, source_fingerprint,
+                        generated_at
+                     ) VALUES(?1, ?2, ?2, 0.91, 0.45, ?3, ?4, ?5, ?6, ?7, ?8)",
+                    params![
+                        asset_id,
+                        label,
+                        SUBJECT_MODEL_NAME,
+                        model_version,
+                        analysis_version,
+                        taxonomy_version,
+                        source_fingerprint,
+                        now()
+                    ],
+                )
+                .expect("insert subject fixture label");
+        }
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let repository = Repository::new(temp.path().join("database.sqlite3"));
+        repository.initialize().expect("initialize");
+        let (library_id, person_asset_id) =
+            seed_classifiable_asset(&repository, "canonical-filter-person");
+        let connection = repository.open().expect("open fixture database");
+        let person_fingerprint = "fingerprint-canonical-filter-person";
+        let portrait_asset_id = insert_asset(
+            &connection,
+            library_id,
+            "portrait.jpg",
+            "fingerprint-canonical-filter-portrait",
+        );
+        let animal_asset_id = insert_asset(
+            &connection,
+            library_id,
+            "animal.jpg",
+            "fingerprint-canonical-filter-animal",
+        );
+        let stale_asset_id = insert_asset(
+            &connection,
+            library_id,
+            "stale.jpg",
+            "fingerprint-canonical-filter-stale",
+        );
+
+        for asset in [
+            (portrait_asset_id, "fingerprint-canonical-filter-portrait"),
+            (animal_asset_id, "fingerprint-canonical-filter-animal"),
+        ] {
+            insert_topic_label(
+                &connection,
+                asset.0,
+                "landscape",
+                SIGLIP2_MODEL_VERSION,
+                SIGLIP2_ANALYSIS_VERSION,
+                TAXONOMY_VERSION,
+                asset.1,
+            );
+        }
+        insert_subject_label(
+            &connection,
+            person_asset_id,
+            "person",
+            SUBJECT_MODEL_VERSION,
+            SUBJECT_ANALYSIS_VERSION,
+            SUBJECT_TAXONOMY_VERSION,
+            person_fingerprint,
+        );
+        insert_subject_label(
+            &connection,
+            portrait_asset_id,
+            "portrait",
+            SUBJECT_MODEL_VERSION,
+            SUBJECT_ANALYSIS_VERSION,
+            SUBJECT_TAXONOMY_VERSION,
+            "fingerprint-canonical-filter-portrait",
+        );
+        insert_subject_label(
+            &connection,
+            animal_asset_id,
+            "pet",
+            SUBJECT_MODEL_VERSION,
+            SUBJECT_ANALYSIS_VERSION,
+            SUBJECT_TAXONOMY_VERSION,
+            "fingerprint-canonical-filter-animal",
+        );
+
+        let stale_model_version = format!("{SIGLIP2_MODEL_VERSION}-stale");
+        let stale_analysis_version = format!("{SIGLIP2_ANALYSIS_VERSION}-stale");
+        let stale_taxonomy_version = format!("{TAXONOMY_VERSION}-stale");
+        let stale_subject_model_version = format!("{SUBJECT_MODEL_VERSION}-stale");
+        let stale_subject_analysis_version = format!("{SUBJECT_ANALYSIS_VERSION}-stale");
+        let stale_subject_taxonomy_version = format!("{SUBJECT_TAXONOMY_VERSION}-stale");
+        for (label, model_version, analysis_version, taxonomy_version, fingerprint) in [
+            (
+                "landscape",
+                SIGLIP2_MODEL_VERSION,
+                stale_analysis_version.as_str(),
+                TAXONOMY_VERSION,
+                "fingerprint-canonical-filter-stale",
+            ),
+            (
+                "street",
+                SIGLIP2_MODEL_VERSION,
+                SIGLIP2_ANALYSIS_VERSION,
+                stale_taxonomy_version.as_str(),
+                "fingerprint-canonical-filter-stale",
+            ),
+            (
+                "architecture",
+                stale_model_version.as_str(),
+                SIGLIP2_ANALYSIS_VERSION,
+                TAXONOMY_VERSION,
+                "fingerprint-canonical-filter-stale",
+            ),
+            (
+                "abstract",
+                SIGLIP2_MODEL_VERSION,
+                SIGLIP2_ANALYSIS_VERSION,
+                TAXONOMY_VERSION,
+                "different-source-fingerprint",
+            ),
+        ] {
+            insert_topic_label(
+                &connection,
+                stale_asset_id,
+                label,
+                model_version,
+                analysis_version,
+                taxonomy_version,
+                fingerprint,
+            );
+        }
+        for (label, model_version, analysis_version, taxonomy_version, fingerprint) in [
+            (
+                "person",
+                stale_subject_model_version.as_str(),
+                SUBJECT_ANALYSIS_VERSION,
+                SUBJECT_TAXONOMY_VERSION,
+                "fingerprint-canonical-filter-stale",
+            ),
+            (
+                "portrait",
+                SUBJECT_MODEL_VERSION,
+                stale_subject_analysis_version.as_str(),
+                SUBJECT_TAXONOMY_VERSION,
+                "fingerprint-canonical-filter-stale",
+            ),
+            (
+                "group",
+                SUBJECT_MODEL_VERSION,
+                SUBJECT_ANALYSIS_VERSION,
+                stale_subject_taxonomy_version.as_str(),
+                "fingerprint-canonical-filter-stale",
+            ),
+            (
+                "pet",
+                SUBJECT_MODEL_VERSION,
+                SUBJECT_ANALYSIS_VERSION,
+                SUBJECT_TAXONOMY_VERSION,
+                "different-source-fingerprint",
+            ),
+        ] {
+            insert_subject_label(
+                &connection,
+                stale_asset_id,
+                label,
+                model_version,
+                analysis_version,
+                taxonomy_version,
+                fingerprint,
+            );
+        }
+        drop(connection);
+
+        let person_detail = repository
+            .get_asset_detail(person_asset_id)
+            .expect("person detail");
+        assert_eq!(
+            person_detail
+                .asset
+                .classification
+                .primary_category
+                .effective
+                .as_deref(),
+            Some("photo_landscape")
+        );
+        assert_eq!(
+            person_detail.asset.classification.auxiliary_tags.effective,
+            vec!["single_person"]
+        );
+        assert_eq!(
+            repository
+                .get_asset_detail(portrait_asset_id)
+                .expect("portrait detail")
+                .asset
+                .classification
+                .auxiliary_tags
+                .effective,
+            vec!["single_person"]
+        );
+        assert_eq!(
+            repository
+                .get_asset_detail(animal_asset_id)
+                .expect("animal detail")
+                .asset
+                .classification
+                .auxiliary_tags
+                .effective,
+            vec!["animal"]
+        );
+        let stale_detail = repository
+            .get_asset_detail(stale_asset_id)
+            .expect("stale detail");
+        assert!(stale_detail.asset.semantic_labels.is_empty());
+        assert_eq!(
+            stale_detail.asset.classification.primary_category.effective,
+            None
+        );
+        assert!(
+            stale_detail
+                .asset
+                .classification
+                .auxiliary_tags
+                .effective
+                .is_empty()
+        );
+
+        let topic_page_one = repository
+            .list_assets(
+                library_id,
+                AssetSortField::FileName,
+                SortDirection::Asc,
+                1,
+                1,
+                &AssetFilter {
+                    primary_categories: vec!["photo_landscape".into()],
+                    ..AssetFilter::default()
+                },
+            )
+            .expect("canonical topic page one");
+        let topic_page_two = repository
+            .list_assets(
+                library_id,
+                AssetSortField::FileName,
+                SortDirection::Asc,
+                2,
+                1,
+                &AssetFilter {
+                    primary_categories: vec!["photo_landscape".into()],
+                    ..AssetFilter::default()
+                },
+            )
+            .expect("canonical topic page two");
+        assert_eq!(topic_page_one.total, 3);
+        assert_eq!(topic_page_one.items.len(), 1);
+        assert_eq!(topic_page_two.total, 3);
+        assert_eq!(topic_page_two.items.len(), 1);
+        assert_ne!(topic_page_one.items[0].id, topic_page_two.items[0].id);
+        let topic_page_three = repository
+            .list_assets(
+                library_id,
+                AssetSortField::FileName,
+                SortDirection::Asc,
+                3,
+                1,
+                &AssetFilter {
+                    primary_categories: vec!["photo_landscape".into()],
+                    ..AssetFilter::default()
+                },
+            )
+            .expect("canonical topic page three");
+        assert_eq!(topic_page_three.total, 3);
+        assert_eq!(topic_page_three.items.len(), 1);
+        assert!(
+            ![
+                topic_page_one.items[0].id,
+                topic_page_two.items[0].id,
+                topic_page_three.items[0].id,
+            ]
+            .contains(&stale_asset_id)
+        );
+
+        let person_filter = repository
+            .list_assets(
+                library_id,
+                AssetSortField::FileName,
+                SortDirection::Asc,
+                1,
+                20,
+                &AssetFilter {
+                    auxiliary_tags: vec!["single_person".into()],
+                    ..AssetFilter::default()
+                },
+            )
+            .expect("canonical subject filter");
+        assert_eq!(person_filter.total, 2);
+        assert!(
+            person_filter
+                .items
+                .iter()
+                .all(|item| item.id != stale_asset_id)
+        );
+        let any_subject_filter = repository
+            .list_assets(
+                library_id,
+                AssetSortField::FileName,
+                SortDirection::Asc,
+                1,
+                20,
+                &AssetFilter {
+                    auxiliary_tags: vec!["single_person".into(), "animal".into()],
+                    semantic_match: SemanticMatchMode::Any,
+                    ..AssetFilter::default()
+                },
+            )
+            .expect("any canonical subject filter");
+        assert_eq!(any_subject_filter.total, 3);
+        let all_subject_filter = repository
+            .list_assets(
+                library_id,
+                AssetSortField::FileName,
+                SortDirection::Asc,
+                1,
+                20,
+                &AssetFilter {
+                    auxiliary_tags: vec!["single_person".into(), "animal".into()],
+                    semantic_match: SemanticMatchMode::All,
+                    ..AssetFilter::default()
+                },
+            )
+            .expect("all canonical subject filter");
+        assert_eq!(all_subject_filter.total, 0);
+
+        repository
+            .update_tag_override(person_asset_id, "portrait", Some("remove"))
+            .expect("remove legacy person alias");
+        let detail = repository
+            .update_tag_override(animal_asset_id, "portrait", Some("add"))
+            .expect("add legacy person alias");
+        assert!(
+            detail
+                .asset
+                .classification
+                .auxiliary_tags
+                .effective
+                .contains(&"single_person".to_owned())
+        );
+        let detail = repository
+            .update_tag_override(animal_asset_id, "single_person", Some("remove"))
+            .expect("also remove canonical person alias");
+        assert!(
+            detail
+                .asset
+                .classification
+                .auxiliary_tags
+                .effective
+                .contains(&"single_person".to_owned()),
+            "remove is applied first; a matching add is applied afterward and wins"
+        );
+        let effective_person_filter = repository
+            .list_assets(
+                library_id,
+                AssetSortField::FileName,
+                SortDirection::Asc,
+                1,
+                20,
+                &AssetFilter {
+                    auxiliary_tags: vec!["single_person".into()],
+                    ..AssetFilter::default()
+                },
+            )
+            .expect("filter effective manual subject tags");
+        assert_eq!(effective_person_filter.total, 2);
+        assert!(
+            effective_person_filter
+                .items
+                .iter()
+                .all(|item| item.id != person_asset_id && item.id != stale_asset_id)
+        );
+        assert!(
+            effective_person_filter
+                .items
+                .iter()
+                .any(|item| item.id == portrait_asset_id)
+        );
+        assert!(
+            effective_person_filter
+                .items
+                .iter()
+                .any(|item| item.id == animal_asset_id)
+        );
+        assert_eq!(
+            repository
+                .list_assets(
+                    library_id,
+                    AssetSortField::FileName,
+                    SortDirection::Asc,
+                    1,
+                    20,
+                    &AssetFilter {
+                        auxiliary_tags: vec!["multiple_people".into()],
+                        ..AssetFilter::default()
+                    },
+                )
+                .expect("stale group alias is not filterable")
+                .total,
+            0
+        );
+    }
+
+    #[test]
     fn identity_backfill_merges_asset_state_and_all_user_relations() {
         let temp = tempfile::tempdir().expect("temp dir");
         let repository = Repository::new(temp.path().join("database.sqlite3"));
@@ -7797,6 +8356,112 @@ mod tests {
                 .iter()
                 .any(|group| group.label_id == "photo_abstract")
         );
+    }
+
+    #[test]
+    fn primary_filter_selects_highest_scored_canonical_topic() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let repository = Repository::new(temp.path().join("database.sqlite3"));
+        repository.initialize().expect("initialize");
+        let (library_id, asset_id) = seed_classifiable_asset(&repository, "primary-filter-order");
+        let connection = repository.open().expect("open database");
+        connection
+            .execute(
+                "UPDATE semantic_labels SET similarity=0.80
+                 WHERE asset_id=?1 AND label='landscape'",
+                [asset_id],
+            )
+            .expect("lower landscape score");
+        for (label, display_name, similarity) in [
+            ("document", "Document", 0.99),
+            ("photo_abstract", "Abstract", 0.70),
+        ] {
+            connection
+                .execute(
+                    "INSERT INTO semantic_labels(
+                        asset_id, label, display_name, similarity, threshold, model_name,
+                        model_version, analysis_version, taxonomy_version, category_group,
+                        generated_at, source_fingerprint, is_primary, is_manual
+                     ) VALUES(?1, ?2, ?3, ?4, 0.2, ?5, ?6, ?7, ?8, 'scene', ?9, ?10, 1, 0)",
+                    params![
+                        asset_id,
+                        label,
+                        display_name,
+                        similarity,
+                        SIGLIP2_MODEL_NAME,
+                        SIGLIP2_MODEL_VERSION,
+                        SIGLIP2_ANALYSIS_VERSION,
+                        TAXONOMY_VERSION,
+                        now(),
+                        "fingerprint-primary-filter-order"
+                    ],
+                )
+                .expect("insert current topic fixture label");
+        }
+        let stored_invalid_label: String = connection
+            .query_row(
+                "SELECT label FROM semantic_labels WHERE asset_id=?1 AND label='document'",
+                [asset_id],
+                |row| row.get(0),
+            )
+            .expect("invalid source label remains stored");
+        assert_eq!(stored_invalid_label, "document");
+        drop(connection);
+
+        let detail = repository.get_asset_detail(asset_id).expect("asset detail");
+        assert_eq!(
+            detail
+                .asset
+                .classification
+                .primary_category
+                .effective
+                .as_deref(),
+            Some("photo_landscape")
+        );
+        assert!(
+            detail
+                .asset
+                .semantic_labels
+                .iter()
+                .any(|label| label.label_id == "photo_abstract")
+        );
+        assert!(
+            detail
+                .asset
+                .semantic_labels
+                .iter()
+                .all(|label| label.label_id != "document")
+        );
+
+        let landscape = repository
+            .list_assets(
+                library_id,
+                AssetSortField::FileName,
+                SortDirection::Asc,
+                1,
+                20,
+                &AssetFilter {
+                    primary_categories: vec!["photo_landscape".into()],
+                    ..AssetFilter::default()
+                },
+            )
+            .expect("filter displayed landscape topic");
+        assert_eq!(landscape.total, 1);
+        assert_eq!(landscape.items[0].id, asset_id);
+        let abstract_topic = repository
+            .list_assets(
+                library_id,
+                AssetSortField::FileName,
+                SortDirection::Asc,
+                1,
+                20,
+                &AssetFilter {
+                    primary_categories: vec!["photo_abstract".into()],
+                    ..AssetFilter::default()
+                },
+            )
+            .expect("lower-scored valid topic is not effective primary");
+        assert_eq!(abstract_topic.total, 0);
     }
 
     #[test]
