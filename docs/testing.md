@@ -55,6 +55,8 @@ npm.cmd run typecheck
 
 以下是全量验证示例，不是每次小改动的本地必跑清单。CI 当前执行完整前端格式/lint/typecheck/Vitest、Rustfmt、Rust all-targets/all-features tests、Clippy 和前端 production build；发布流程还构建 Windows 安装包。不得通过本地分层策略降低这些 CI/发布门槛。
 
+Windows workflow 在 Node 安装后直接运行 `pwsh -NoLogo -NoProfile -ExecutionPolicy Bypass -File ./scripts/test-invoke-ci-command.ps1`，独立验证 CI 命令包装器；测试只使用自有临时目录，并在 PowerShell 7 与可用的 Windows PowerShell 5.1 中检查原生命令参数、标准输出/错误和精确退出码。workflow 中每个包装器调用都显式传入 `-Command @(...)` 字符串数组，并在该调用后执行 `exit $LASTEXITCODE`，确保自定义 `pwsh -File` 步骤把原生失败状态交给 Actions。结构断言同时检查两个 checkout 的 `lfs: true` 及日志/安装包 artifact 保留策略。
+
 ```powershell
 npm.cmd run format:check
 npm.cmd run lint

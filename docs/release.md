@@ -37,7 +37,7 @@ CI 在 Windows runner 执行相同检查并上传 bundle artifact。版本由 `p
 
 `.github/workflows/windows-build.yml` 执行验证与 bundle。安装配置使用 Tauri 的 `offlineInstaller` 模式随安装器携带 WebView2 离线安装程序，以包体增大换取无网络安装能力。若本机缺少 MSVC、WebView2、WiX/NSIS 下载能力或签名证书，只能报告配置完成和具体错误，不得声称安装包通过。
 
-普通 push 和 pull request 只运行 `windows-latest` MSVC 验证：资源校验、npm ci、Prettier、ESLint、TypeScript、Vitest、Rustfmt、Rust tests、Clippy 和前端 production build。只有手动 `workflow_dispatch` 或 `v*` tag 在验证成功后进入 bundle job：NSIS 是必需产物，MSI 是允许失败但保留日志的可选产物；成功安装包复制到独立 artifact，并同时上传 `SHA256SUMS.txt`。每条命令通过 `scripts/invoke-ci-command.ps1` 写入日志，验证和打包 job 都在 `always()` 步骤上传日志。
+普通 push 和 pull request 只运行 `windows-latest` MSVC 验证：资源校验、npm ci、Prettier、ESLint、TypeScript、Vitest、Rustfmt、Rust tests、Clippy 和前端 production build。验证与打包 job 的 checkout 都启用 Git LFS，使 SigLIP 模型在固定 SHA-256 校验前解析为真实文件。只有手动 `workflow_dispatch` 或 `v*` tag 在验证成功后进入 bundle job：NSIS 是必需产物，MSI 是允许失败的可选产物；成功安装包复制到独立 artifact，并同时上传 `SHA256SUMS.txt`，保留 7 天。每条命令通过 `scripts/invoke-ci-command.ps1` 写入日志，仍可在 Actions 页面查看；诊断日志 artifact 默认关闭，只有手动运行时显式启用 `upload_diagnostic_logs` 才上传，保留 3 天。此策略仅影响后续产物，不会删除已有 artifact/cache，也不会清空或重置本月累计计费额度。
 
 `scripts/verify-release-resources.ps1` 在本地和 CI 中验证 Places365、SigLIP 2、PicoDet/YuNet 以及 ONNX Runtime DLL 的固定 SHA-256，并要求模型配置、许可、第三方声明和来源文件存在。正式模型与 runtime 是离线功能所需资源，应提交；历史 TinyCLIP/MobileCLIP 不应重新加入资源目录；临时模型下载、缓存和 `.part`/`.download` 文件必须被忽略。
 

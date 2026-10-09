@@ -2,6 +2,12 @@ name: Windows validation and installers
 
 on:
   workflow_dispatch:
+    inputs:
+      upload_diagnostic_logs:
+        description: Upload command logs as a 3-day artifact; job logs remain available in Actions
+        required: false
+        type: boolean
+        default: false
   pull_request:
   push:
 
@@ -28,10 +34,14 @@ jobs:
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
+        with:
+          lfs: true
       - uses: actions/setup-node@v4
         with:
           node-version: 22
           cache: npm
+      - name: Test CI command argument forwarding
+        run: pwsh -NoLogo -NoProfile -ExecutionPolicy Bypass -File ./scripts/test-invoke-ci-command.ps1
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: x86_64-pc-windows-msvc
@@ -41,35 +51,35 @@ jobs:
         with:
           arch: x64
       - name: Diagnose Windows toolchain
-        run: ./scripts/invoke-ci-command.ps1 -Name toolchain pwsh -NoProfile -File ./scripts/diagnose-msvc.ps1
+        run: ./scripts/invoke-ci-command.ps1 -Name toolchain -Command @('pwsh', '-NoProfile', '-File', './scripts/diagnose-msvc.ps1'); exit $LASTEXITCODE
       - name: Install JavaScript dependencies
-        run: ./scripts/invoke-ci-command.ps1 -Name npm-ci npm.cmd ci
+        run: ./scripts/invoke-ci-command.ps1 -Name npm-ci -Command @('npm.cmd', 'ci'); exit $LASTEXITCODE
       - name: Verify bundled model and runtime resources
-        run: ./scripts/invoke-ci-command.ps1 -Name release-resources pwsh -NoProfile -ExecutionPolicy Bypass -File ./scripts/verify-release-resources.ps1
+        run: ./scripts/invoke-ci-command.ps1 -Name release-resources -Command @('pwsh', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', './scripts/verify-release-resources.ps1'); exit $LASTEXITCODE
       - name: Prettier
-        run: ./scripts/invoke-ci-command.ps1 -Name prettier npm.cmd run format:check
+        run: ./scripts/invoke-ci-command.ps1 -Name prettier -Command @('npm.cmd', 'run', 'format:check'); exit $LASTEXITCODE
       - name: ESLint
-        run: ./scripts/invoke-ci-command.ps1 -Name eslint npm.cmd run lint
+        run: ./scripts/invoke-ci-command.ps1 -Name eslint -Command @('npm.cmd', 'run', 'lint'); exit $LASTEXITCODE
       - name: TypeScript
-        run: ./scripts/invoke-ci-command.ps1 -Name typescript npm.cmd run typecheck
+        run: ./scripts/invoke-ci-command.ps1 -Name typescript -Command @('npm.cmd', 'run', 'typecheck'); exit $LASTEXITCODE
       - name: Vitest
-        run: ./scripts/invoke-ci-command.ps1 -Name vitest npm.cmd test -- --run
+        run: ./scripts/invoke-ci-command.ps1 -Name vitest -Command @('npm.cmd', 'test', '--', '--run'); exit $LASTEXITCODE
       - name: Rustfmt
-        run: ./scripts/invoke-ci-command.ps1 -Name rustfmt cargo fmt --manifest-path src-tauri/Cargo.toml -- --check
+        run: ./scripts/invoke-ci-command.ps1 -Name rustfmt -Command @('cargo', 'fmt', '--manifest-path', 'src-tauri/Cargo.toml', '--', '--check'); exit $LASTEXITCODE
       - name: Rust tests
-        run: ./scripts/invoke-ci-command.ps1 -Name cargo-test cargo test --manifest-path src-tauri/Cargo.toml --all-targets --all-features
+        run: ./scripts/invoke-ci-command.ps1 -Name cargo-test -Command @('cargo', 'test', '--manifest-path', 'src-tauri/Cargo.toml', '--all-targets', '--all-features'); exit $LASTEXITCODE
       - name: Clippy
-        run: ./scripts/invoke-ci-command.ps1 -Name clippy cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --all-features -- -D warnings
+        run: ./scripts/invoke-ci-command.ps1 -Name clippy -Command @('cargo', 'clippy', '--manifest-path', 'src-tauri/Cargo.toml', '--all-targets', '--all-features', '--', '-D', 'warnings'); exit $LASTEXITCODE
       - name: Frontend production build
-        run: ./scripts/invoke-ci-command.ps1 -Name frontend-build npm.cmd run build
+        run: ./scripts/invoke-ci-command.ps1 -Name frontend-build -Command @('npm.cmd', 'run', 'build'); exit $LASTEXITCODE
       - name: Upload validation logs
-        if: always()
+        if: always() && github.event_name == 'workflow_dispatch' && inputs.upload_diagnostic_logs
         uses: actions/upload-artifact@v4
         with:
           name: windows-validation-logs-${{ github.run_number }}
           path: artifacts/logs/**
           if-no-files-found: warn
-          retention-days: 14
+          retention-days: 3
 
   bundle:
     name: Build Windows installers
@@ -79,6 +89,8 @@ jobs:
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
+        with:
+          lfs: true
       - uses: actions/setup-node@v4
         with:
           node-version: 22
@@ -92,20 +104,20 @@ jobs:
         with:
           arch: x64
       - name: Diagnose Windows toolchain
-        run: ./scripts/invoke-ci-command.ps1 -Name bundle-toolchain pwsh -NoProfile -File ./scripts/diagnose-msvc.ps1
+        run: ./scripts/invoke-ci-command.ps1 -Name bundle-toolchain -Command @('pwsh', '-NoProfile', '-File', './scripts/diagnose-msvc.ps1'); exit $LASTEXITCODE
       - name: Install JavaScript dependencies
-        run: ./scripts/invoke-ci-command.ps1 -Name bundle-npm-ci npm.cmd ci
+        run: ./scripts/invoke-ci-command.ps1 -Name bundle-npm-ci -Command @('npm.cmd', 'ci'); exit $LASTEXITCODE
       - name: Verify bundled model and runtime resources
-        run: ./scripts/invoke-ci-command.ps1 -Name bundle-resources pwsh -NoProfile -ExecutionPolicy Bypass -File ./scripts/verify-release-resources.ps1
+        run: ./scripts/invoke-ci-command.ps1 -Name bundle-resources -Command @('pwsh', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', './scripts/verify-release-resources.ps1'); exit $LASTEXITCODE
       - name: Build NSIS installer
-        run: ./scripts/invoke-ci-command.ps1 -Name tauri-nsis npm.cmd run tauri build -- --target x86_64-pc-windows-msvc --bundles nsis
+        run: ./scripts/invoke-ci-command.ps1 -Name tauri-nsis -Command @('npm.cmd', 'run', 'tauri', 'build', '--', '--target', 'x86_64-pc-windows-msvc', '--bundles', 'nsis'); exit $LASTEXITCODE
       - name: Build MSI installer when WiX succeeds
         id: msi
         continue-on-error: true
-        run: ./scripts/invoke-ci-command.ps1 -Name tauri-msi npm.cmd run tauri build -- --target x86_64-pc-windows-msvc --bundles msi
+        run: ./scripts/invoke-ci-command.ps1 -Name tauri-msi -Command @('npm.cmd', 'run', 'tauri', 'build', '--', '--target', 'x86_64-pc-windows-msvc', '--bundles', 'msi'); exit $LASTEXITCODE
       - name: Record optional MSI result
         if: steps.msi.outcome == 'failure'
-        run: Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY -Value 'MSI generation failed; the required NSIS build completed. See the uploaded tauri-msi log.'
+        run: Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY -Value 'MSI generation failed; the required NSIS build completed. Review the tauri-msi step output or opt in to diagnostic log artifacts.'
       - name: Collect installers and SHA-256
         shell: pwsh
         run: |
@@ -128,12 +140,12 @@ jobs:
             artifacts/installers/**
             artifacts/hashes/SHA256SUMS.txt
           if-no-files-found: error
-          retention-days: 30
+          retention-days: 7
       - name: Upload bundle logs
-        if: always()
+        if: always() && github.event_name == 'workflow_dispatch' && inputs.upload_diagnostic_logs
         uses: actions/upload-artifact@v4
         with:
           name: windows-bundle-logs-${{ github.run_number }}
           path: artifacts/logs/**
           if-no-files-found: warn
-          retention-days: 30
+          retention-days: 3

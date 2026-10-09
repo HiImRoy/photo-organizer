@@ -20,30 +20,33 @@ $logRoot = if ($env:CI_LOG_DIR) { $env:CI_LOG_DIR } else { Join-Path $projectRoo
 New-Item -ItemType Directory -Force -Path $logRoot | Out-Null
 $logPath = Join-Path $logRoot "$Name.log"
 $executable = $Command[0]
-$arguments = if ($Command.Count -gt 1) { @($Command[1..($Command.Count - 1)]) } else { @() }
+[string[]]$arguments = @()
+if ($Command.Count -gt 1) {
+    $arguments = [string[]]@($Command[1..($Command.Count - 1)])
+}
 
 "command: $executable $($arguments -join ' ')" | Tee-Object -FilePath $logPath
 "startedAt: $([DateTimeOffset]::UtcNow.ToString('O'))" | Tee-Object -FilePath $logPath -Append
 
 $exitCode = 1
 $nativePreferenceAvailable = Test-Path Variable:PSNativeCommandUseErrorActionPreference
+$previousErrorPreference = $ErrorActionPreference
 if ($nativePreferenceAvailable) {
     $previousNativePreference = $PSNativeCommandUseErrorActionPreference
     $PSNativeCommandUseErrorActionPreference = $false
 }
 
 try {
-    $previousErrorPreference = $ErrorActionPreference
     $ErrorActionPreference = 'Continue'
     & $executable @arguments 2>&1 | Tee-Object -FilePath $logPath -Append
     $exitCode = $LASTEXITCODE
-    $ErrorActionPreference = $previousErrorPreference
 }
 catch {
     $_ | Out-String | Tee-Object -FilePath $logPath -Append
     $exitCode = 1
 }
 finally {
+    $ErrorActionPreference = $previousErrorPreference
     if ($nativePreferenceAvailable) {
         $PSNativeCommandUseErrorActionPreference = $previousNativePreference
     }
