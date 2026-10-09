@@ -139,6 +139,7 @@ scripts/             开发、检查和 Windows 构建脚本
 
 ## 文档
 
+- [当前换机交接（2026-10-10）](docs/handoff/2026-10-10.md)
 - [换机开发交接与待办](docs/HANDOFF.md)
 - [架构](docs/architecture.md)
 - [数据模型](docs/data-model.md)

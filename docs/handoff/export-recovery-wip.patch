@@ -1,0 +1,1562 @@
+diff --git a/src-tauri/Cargo.toml b/src-tauri/Cargo.toml
+index 39ef17a..85af7a8 100644
+--- a/src-tauri/Cargo.toml
++++ b/src-tauri/Cargo.toml
+@@ -32,0 +33,2 @@ windows = { version = "0.61.3", features = [
++    "Win32_System_Threading",
++    "Win32_Storage_FileSystem",
+diff --git a/src-tauri/src/db.rs b/src-tauri/src/db.rs
+index 8318e17..4d17982 100644
+--- a/src-tauri/src/db.rs
++++ b/src-tauri/src/db.rs
+@@ -65,0 +66,2 @@ const SEMANTIC_ANALYSIS_TAXONOMY_MIGRATION: &str =
++const EDIT_EXPORT_AUDIT_RECOVERY_MIGRATION: &str =
++    include_str!("../migrations/0018_edit_export_audit_recovery.sql");
+@@ -222,0 +225 @@ impl Repository {
++            (18_i64, EDIT_EXPORT_AUDIT_RECOVERY_MIGRATION),
+@@ -229,0 +233,3 @@ impl Repository {
++                if version == 18 {
++                    migrate_edit_export_audit_recovery(&transaction)?;
++                }
+@@ -5386,0 +5393,42 @@ fn migrate_unified_source_collection(transaction: &Transaction<'_>) -> AppResult
++fn migrate_edit_export_audit_recovery(transaction: &Transaction<'_>) -> AppResult<()> {
++    let library_roots = {
++        let mut statement = transaction.prepare(
++            "SELECT source_identity_key, source_path, root_path
++             FROM libraries ORDER BY id",
++        )?;
++        statement
++            .query_map([], |row| {
++                Ok((
++                    row.get::<_, String>(0)?,
++                    row.get::<_, String>(1)?,
++                    row.get::<_, String>(2)?,
++                ))
++            })?
++            .collect::<Result<Vec<_>, _>>()?
++    };
++    let mut protected_roots = library_roots
++        .into_iter()
++        .filter_map(|(stored_identity, source_path, root_path)| {
++            let identity = if !stored_identity.is_empty() {
++                stored_identity
++            } else {
++                let fallback_path = if !source_path.is_empty() {
++                    source_path
++                } else {
++                    root_path
++                };
++                identity_key(Path::new(&fallback_path))
++            };
++            (!identity.is_empty()).then_some(identity)
++        })
++        .collect::<Vec<_>>();
++    protected_roots.sort();
++    protected_roots.dedup();
++    let protected_roots_json = serde_json::to_string(&protected_roots)?;
++    transaction.execute(
++        "UPDATE edit_export_plans SET protected_roots_json=?1",
++        [protected_roots_json],
++    )?;
++    Ok(())
++}
++
+@@ -6087 +6135 @@ mod tests {
+-        assert_eq!(repository.migration_version().expect("version"), 17);
++        assert_eq!(repository.migration_version().expect("version"), 18);
+@@ -6174,0 +6223,470 @@ mod tests {
++    fn initialize_legacy_schema_at_version_17(repository: &Repository) {
++        initialize_legacy_schema_at_version_15(repository);
++        let mut connection = repository.open().expect("legacy database at version 15");
++        for (version, sql) in [
++            (16_i64, UNIFIED_SOURCE_COLLECTION_MIGRATION),
++            (17_i64, SEMANTIC_ANALYSIS_TAXONOMY_MIGRATION),
++        ] {
++            let transaction = connection
++                .transaction()
++                .expect("legacy migration transaction");
++            transaction
++                .execute_batch(sql)
++                .expect("legacy migration SQL");
++            if version == 16 {
++                migrate_unified_source_collection(&transaction)
++                    .expect("legacy unified source post-step");
++            }
++            transaction
++                .execute(
++                    "INSERT INTO schema_migrations(version, applied_at)
++                     VALUES(?1, ?2)",
++                    params![version, now()],
++                )
++                .expect("legacy migration marker");
++            transaction.commit().expect("legacy migration commit");
++        }
++    }
++
++    fn insert_legacy_audit_library(
++        connection: &Connection,
++        root_path: &str,
++        source_path: &str,
++        source_identity_key: &str,
++        name: &str,
++    ) -> i64 {
++        connection
++            .execute(
++                "INSERT INTO libraries(
++                    root_path, created_at, name, source_path, source_identity_key
++                 ) VALUES(?1, ?2, ?3, ?4, ?5)",
++                params![root_path, now(), name, source_path, source_identity_key],
++            )
++            .expect("legacy audit library");
++        connection.last_insert_rowid()
++    }
++
++    fn insert_legacy_audit_asset(
++        connection: &Connection,
++        library_id: i64,
++        absolute_path: &str,
++        file_name: &str,
++        fingerprint: &str,
++    ) -> i64 {
++        let timestamp = now();
++        connection
++            .execute(
++                "INSERT INTO assets(
++                    library_id, asset_identity_key, absolute_path, relative_path,
++                    file_name, extension, file_size, modified_at, fingerprint,
++                    file_status, scan_status, analysis_status, first_seen_at,
++                    last_seen_at, last_seen_scan
++                 ) VALUES(?1, ?2, ?3, ?4, ?5, 'jpg', 123, 1, ?6,
++                          'present', 'indexed', 'pending', ?7, ?7, 1)",
++                params![
++                    library_id,
++                    identity_key(Path::new(absolute_path)),
++                    absolute_path,
++                    file_name,
++                    file_name,
++                    fingerprint,
++                    timestamp,
++                ],
++            )
++            .expect("legacy audit asset");
++        connection.last_insert_rowid()
++    }
++
++    fn seed_legacy_edit_export_audit_fixture(connection: &Connection) -> (i64, i64) {
++        let known_root_path = "C:\\known-root";
++        let library_with_stored_identity = insert_legacy_audit_library(
++            connection,
++            known_root_path,
++            known_root_path,
++            &identity_key(Path::new(known_root_path)),
++            "known root",
++        );
++        let source_fallback_path = "C:\\图库\\Фото";
++        let library_with_source_fallback = insert_legacy_audit_library(
++            connection,
++            "C:\\must-not-win",
++            source_fallback_path,
++            "",
++            "source fallback",
++        );
++        let root_fallback_path = "D:\\备用根\\档案";
++        let library_with_root_fallback =
++            insert_legacy_audit_library(connection, root_fallback_path, "", "", "root fallback");
++
++        let source_one = "C:\\图库\\Фото\\原片 01.jpg";
++        let asset_one = insert_legacy_audit_asset(
++            connection,
++            library_with_source_fallback,
++            source_one,
++            "原片 01.jpg",
++            "source-fingerprint-one",
++        );
++        let source_two = "D:\\备用根\\档案\\Фото\\снимок.jpg";
++        let asset_two = insert_legacy_audit_asset(
++            connection,
++            library_with_root_fallback,
++            source_two,
++            "снимок.jpg",
++            "source-fingerprint-two",
++        );
++
++        connection
++            .execute(
++                "INSERT INTO edit_export_plans(
++                    id, asset_id, source_fingerprint, target_path, recipe_json,
++                    status, created_at, executed_at, error_message
++                 ) VALUES(
++                    'audit-plan-asset-delete', ?1, 'source-fingerprint-one',
++                    'E:\\导出\\preview.jpg', '{ \"exposure\": 1.25, \"note\": \"变更\" }',
++                    'failed', '2026-09-01T00:00:00Z', '2026-09-02T01:00:00Z',
++                    '导出失败：文件被占用'
++                 )",
++                [asset_one],
++            )
++            .expect("legacy failed edit export plan");
++        connection
++            .execute(
++                "INSERT INTO edit_export_plans(
++                    id, asset_id, source_fingerprint, target_path, recipe_json,
++                    status, created_at, executed_at, error_message
++                 ) VALUES(
++                    'audit-plan-library-delete', ?1, 'source-fingerprint-two',
++                    'E:\\导出\\copy.jpg', '{\"rotation\":90}', 'ready',
++                    '2026-09-03T00:00:00Z', NULL, NULL
++                 )",
++                [asset_two],
++            )
++            .expect("legacy ready edit export plan");
++
++        connection
++            .execute(
++                "INSERT INTO file_operation_jobs(
++                    id, library_id, operation_type, status, dry_run,
++                    conflict_strategy, created_at, updated_at
++                 ) VALUES(
++                    'audit-running-job', ?1, 'edit_copy', 'running', 0,
++                    'skip', '2026-09-04T00:00:00Z', '2026-09-04T00:01:00Z'
++                 )",
++                [library_with_root_fallback],
++            )
++            .expect("legacy running file operation job");
++        connection
++            .execute(
++                "INSERT INTO file_operations(
++                    job_id, source_path, target_path, operation_type, plan_status,
++                    execution_status, conflict_strategy, rollback_status
++                 ) VALUES(
++                    'audit-running-job', ?1, 'E:\\导出\\copy.jpg', 'edit_copy',
++                    'planned', 'running', 'skip', 'not_requested'
++                 )",
++                [source_two],
++            )
++            .expect("legacy running file operation");
++
++        (library_with_root_fallback, asset_one)
++    }
++
++    #[test]
++    fn edit_export_audit_migration_preserves_plans_roots_and_deletion_history() {
++        let temp = tempfile::tempdir().expect("temp dir");
++        let repository = Repository::new(temp.path().join("legacy.sqlite3"));
++        initialize_legacy_schema_at_version_17(&repository);
++        let (library_with_root_fallback, asset_one) = {
++            let connection = repository.open().expect("legacy fixture connection");
++            seed_legacy_edit_export_audit_fixture(&connection)
++        };
++
++        repository.initialize().expect("migrate version 17 to 18");
++        assert_eq!(
++            repository.migration_version().expect("migration version"),
++            18
++        );
++
++        let expected_source_path = "C:\\图库\\Фото\\原片 01.jpg";
++        let expected_library_roots = {
++            let mut roots = vec![
++                identity_key(Path::new("C:\\known-root")),
++                identity_key(Path::new("C:\\图库\\Фото")),
++                identity_key(Path::new("D:\\备用根\\档案")),
++            ];
++            roots.sort();
++            roots.dedup();
++            serde_json::to_string(&roots).expect("serialize expected roots")
++        };
++        let connection = repository.open().expect("migrated connection");
++        let plan_one: (
++            Option<i64>,
++            String,
++            String,
++            String,
++            String,
++            String,
++            Option<String>,
++            Option<String>,
++            String,
++            Option<String>,
++            String,
++        ) = connection
++            .query_row(
++                "SELECT asset_id, source_fingerprint, target_path, recipe_json,
++                        status, created_at, executed_at, error_message, source_path,
++                        source_file_identity, protected_roots_json
++                 FROM edit_export_plans WHERE id='audit-plan-asset-delete'",
++                [],
++                |row| {
++                    Ok((
++                        row.get(0)?,
++                        row.get(1)?,
++                        row.get(2)?,
++                        row.get(3)?,
++                        row.get(4)?,
++                        row.get(5)?,
++                        row.get(6)?,
++                        row.get(7)?,
++                        row.get(8)?,
++                        row.get(9)?,
++                        row.get(10)?,
++                    ))
++                },
++            )
++            .expect("first migrated plan");
++        assert!(plan_one.0.is_some());
++        assert_eq!(plan_one.1, "source-fingerprint-one");
++        assert_eq!(plan_one.2, "E:\\导出\\preview.jpg");
++        assert_eq!(plan_one.3, "{ \"exposure\": 1.25, \"note\": \"变更\" }");
++        assert_eq!(plan_one.4, "failed");
++        assert_eq!(plan_one.5, "2026-09-01T00:00:00Z");
++        assert_eq!(plan_one.6.as_deref(), Some("2026-09-02T01:00:00Z"));
++        assert_eq!(plan_one.7.as_deref(), Some("导出失败：文件被占用"));
++        assert_eq!(plan_one.8, expected_source_path);
++        assert_eq!(plan_one.9, None);
++        assert_eq!(plan_one.10, expected_library_roots);
++
++        let plan_two: (
++            Option<i64>,
++            String,
++            String,
++            String,
++            String,
++            String,
++            Option<String>,
++            Option<String>,
++            String,
++            Option<String>,
++            String,
++        ) = connection
++            .query_row(
++                "SELECT asset_id, source_fingerprint, target_path, recipe_json,
++                        status, created_at, executed_at, error_message, source_path,
++                        source_file_identity, protected_roots_json
++                 FROM edit_export_plans
++                 WHERE id='audit-plan-library-delete'",
++                [],
++                |row| {
++                    Ok((
++                        row.get(0)?,
++                        row.get(1)?,
++                        row.get(2)?,
++                        row.get(3)?,
++                        row.get(4)?,
++                        row.get(5)?,
++                        row.get(6)?,
++                        row.get(7)?,
++                        row.get(8)?,
++                        row.get(9)?,
++                        row.get(10)?,
++                    ))
++                },
++            )
++            .expect("second migrated plan");
++        assert!(plan_two.0.is_some());
++        assert_eq!(plan_two.1, "source-fingerprint-two");
++        assert_eq!(plan_two.2, "E:\\导出\\copy.jpg");
++        assert_eq!(plan_two.3, "{\"rotation\":90}");
++        assert_eq!(plan_two.4, "ready");
++        assert_eq!(plan_two.5, "2026-09-03T00:00:00Z");
++        assert_eq!(plan_two.6, None);
++        assert_eq!(plan_two.7, None);
++        assert_eq!(plan_two.8, "D:\\备用根\\档案\\Фото\\снимок.jpg");
++        assert_eq!(plan_two.9, None);
++        assert_eq!(plan_two.10, expected_library_roots);
++
++        let operation_before_delete: (
++            String,
++            String,
++            String,
++            Option<String>,
++            Option<i64>,
++            Option<String>,
++            Option<i64>,
++            Option<String>,
++        ) = connection
++            .query_row(
++                "SELECT job.status, operation.execution_status,
++                        operation.rollback_status, operation.target_file_identity,
++                        operation.execution_owner_pid,
++                        operation.execution_owner_started_at,
++                        operation.rollback_owner_pid,
++                        operation.rollback_owner_started_at
++                 FROM file_operation_jobs job
++                 JOIN file_operations operation ON operation.job_id=job.id
++                 WHERE job.id='audit-running-job'",
++                [],
++                |row| {
++                    Ok((
++                        row.get(0)?,
++                        row.get(1)?,
++                        row.get(2)?,
++                        row.get(3)?,
++                        row.get(4)?,
++                        row.get(5)?,
++                        row.get(6)?,
++                        row.get(7)?,
++                    ))
++                },
++            )
++            .expect("running file operation preserved");
++        assert_eq!(
++            operation_before_delete,
++            (
++                "running".into(),
++                "running".into(),
++                "not_requested".into(),
++                None,
++                None,
++                None,
++                None,
++                None,
++            )
++        );
++        drop(connection);
++
++        repository.initialize().expect("repeat initialization");
++        let connection = repository.open().expect("reopened migrated connection");
++        let repeated_snapshot: String = connection
++            .query_row(
++                "SELECT protected_roots_json FROM edit_export_plans
++                 WHERE id='audit-plan-asset-delete'",
++                [],
++                |row| row.get(0),
++            )
++            .expect("snapshot after repeated initialization");
++        assert_eq!(repeated_snapshot, expected_library_roots);
++        drop(connection);
++
++        let connection = repository.open().expect("asset deletion connection");
++        connection
++            .execute("DELETE FROM assets WHERE id=?1", [asset_one])
++            .expect("delete indexed asset");
++        let detached_asset: Option<i64> = connection
++            .query_row(
++                "SELECT asset_id FROM edit_export_plans
++                 WHERE id='audit-plan-asset-delete'",
++                [],
++                |row| row.get(0),
++            )
++            .expect("audit plan remains after asset deletion");
++        assert_eq!(detached_asset, None);
++        drop(connection);
++
++        let removal = repository
++            .remove_library_with_reconciliation(library_with_root_fallback)
++            .expect("remove full source library");
++        assert!(removal.removed);
++        let connection = repository.open().expect("post-removal connection");
++        let detached_library_plan: (Option<i64>, String) = connection
++            .query_row(
++                "SELECT asset_id, protected_roots_json FROM edit_export_plans
++                 WHERE id='audit-plan-library-delete'",
++                [],
++                |row| Ok((row.get(0)?, row.get(1)?)),
++            )
++            .expect("audit plan remains after library removal");
++        assert_eq!(detached_library_plan.0, None);
++        assert_eq!(detached_library_plan.1, expected_library_roots);
++        let job_and_operation_counts: (i64, i64, Option<i64>, String) = connection
++            .query_row(
++                "SELECT
++                    (SELECT COUNT(*) FROM file_operation_jobs WHERE id='audit-running-job'),
++                    (SELECT COUNT(*) FROM file_operations WHERE job_id='audit-running-job'),
++                    (SELECT library_id FROM file_operation_jobs WHERE id='audit-running-job'),
++                    (SELECT execution_status FROM file_operations WHERE job_id='audit-running-job')",
++                [],
++                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
++            )
++            .expect("file-operation history after library removal");
++        assert_eq!(job_and_operation_counts, (1, 1, None, "running".into()));
++    }
++
++    #[test]
++    fn edit_export_audit_migration_failure_rolls_back_schema_and_data() {
++        let temp = tempfile::tempdir().expect("temp dir");
++        let repository = Repository::new(temp.path().join("legacy.sqlite3"));
++        initialize_legacy_schema_at_version_17(&repository);
++        {
++            let connection = repository.open().expect("legacy fixture connection");
++            seed_legacy_edit_export_audit_fixture(&connection);
++            connection
++                .execute_batch(
++                    "CREATE TRIGGER reject_version_18_marker
++                     BEFORE INSERT ON schema_migrations
++                     WHEN NEW.version=18
++                     BEGIN
++                         SELECT RAISE(ABORT, 'forced migration marker failure');
++                     END;",
++                )
++                .expect("install migration failure trigger");
++        }
++
++        assert!(repository.initialize().is_err());
++        assert_eq!(
++            repository
++                .migration_version()
++                .expect("version after failure"),
++            17
++        );
++        let connection = repository.open().expect("database after failed migration");
++        for (table, column) in [
++            ("edit_export_plans", "source_path"),
++            ("file_operations", "target_file_identity"),
++            ("file_operations", "execution_owner_pid"),
++            ("file_operations", "execution_owner_started_at"),
++            ("file_operations", "rollback_owner_pid"),
++            ("file_operations", "rollback_owner_started_at"),
++        ] {
++            let count: i64 = connection
++                .query_row(
++                    "SELECT COUNT(*) FROM pragma_table_info(?1) WHERE name=?2",
++                    params![table, column],
++                    |row| row.get(0),
++                )
++                .expect("column rollback lookup");
++            assert_eq!(count, 0, "partial column remained: {table}.{column}");
++        }
++        let old_plan_count: i64 = connection
++            .query_row("SELECT COUNT(*) FROM edit_export_plans", [], |row| {
++                row.get(0)
++            })
++            .expect("old plans survive failed migration");
++        assert_eq!(old_plan_count, 2);
++        connection
++            .execute_batch("DROP TRIGGER reject_version_18_marker")
++            .expect("remove migration failure trigger");
++        drop(connection);
++
++        repository.initialize().expect("migration retry succeeds");
++        assert_eq!(repository.migration_version().expect("retry version"), 18);
++        let connection = repository.open().expect("database after migration retry");
++        let plan_count: i64 = connection
++            .query_row("SELECT COUNT(*) FROM edit_export_plans", [], |row| {
++                row.get(0)
++            })
++            .expect("all plans preserved on retry");
++        assert_eq!(plan_count, 2);
++    }
++
+diff --git a/src-tauri/src/ipc.rs b/src-tauri/src/ipc.rs
+index e8dc90f..58cada2 100644
+--- a/src-tauri/src/ipc.rs
++++ b/src-tauri/src/ipc.rs
+@@ -4,0 +5 @@ use std::sync::atomic::{AtomicBool, Ordering};
++use std::time::{Duration, Instant};
+@@ -9,0 +11 @@ use parking_lot::{Mutex, RwLock};
++use serde::{Deserialize, Serialize};
+@@ -10,0 +13 @@ use tauri::{Emitter, State};
++use uuid::Uuid;
+@@ -41 +44,2 @@ use crate::workflow::{
+-    EditRollbackPlan, FaceFeatureStatus, LocalSearchResponse, SimilarAsset,
++    EditExportHistoryPage, EditRecoveryPlan, EditRollbackPlan, FaceFeatureStatus,
++    LocalSearchResponse, SimilarAsset,
+@@ -44,0 +49,138 @@ use crate::workflow::{
++const PREVIEW_AUTHORIZATION_TTL: Duration = Duration::from_secs(5 * 60);
++const PREVIEW_AUTHORIZATION_CAPACITY: usize = 64;
++const DEFAULT_EDIT_EXPORT_HISTORY_PAGE_SIZE: u32 = 200;
++const MAX_EDIT_EXPORT_HISTORY_PAGE_SIZE: u32 = 500;
++
++#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
++#[serde(rename_all = "camelCase")]
++pub struct EditRollbackPreviewResponse {
++    #[serde(flatten)]
++    pub snapshot: EditRollbackPlan,
++    pub confirmation_token: String,
++}
++
++#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
++#[serde(rename_all = "camelCase")]
++pub struct EditRecoveryPreviewResponse {
++    #[serde(flatten)]
++    pub snapshot: EditRecoveryPlan,
++    pub confirmation_token: String,
++}
++
++#[derive(Debug, Clone, Copy, PartialEq, Eq)]
++enum PreviewAuthorizationOperation {
++    Rollback,
++    Recovery,
++}
++
++#[derive(Debug)]
++enum PreviewAuthorizationSnapshot {
++    Rollback(EditRollbackPlan),
++    Recovery(EditRecoveryPlan),
++}
++
++impl PreviewAuthorizationSnapshot {
++    fn plan_id(&self) -> &str {
++        match self {
++            Self::Rollback(snapshot) => &snapshot.plan_id,
++            Self::Recovery(snapshot) => &snapshot.plan_id,
++        }
++    }
++
++    fn operation(&self) -> PreviewAuthorizationOperation {
++        match self {
++            Self::Rollback(_) => PreviewAuthorizationOperation::Rollback,
++            Self::Recovery(_) => PreviewAuthorizationOperation::Recovery,
++        }
++    }
++}
++
++#[derive(Debug)]
++struct PreviewAuthorization {
++    token: String,
++    database_identity: PathBuf,
++    operation: PreviewAuthorizationOperation,
++    plan_id: String,
++    snapshot: PreviewAuthorizationSnapshot,
++    created_at: Instant,
++}
++
++#[derive(Debug, Default)]
++struct PreviewAuthorizationStore {
++    authorizations: std::collections::VecDeque<PreviewAuthorization>,
++}
++
++impl PreviewAuthorizationStore {
++    fn issue(
++        &mut self,
++        database_identity: PathBuf,
++        snapshot: PreviewAuthorizationSnapshot,
++        now: Instant,
++    ) -> String {
++        let operation = snapshot.operation();
++        let plan_id = snapshot.plan_id().to_owned();
++        self.authorizations.retain(|authorization| {
++            now.saturating_duration_since(authorization.created_at) < PREVIEW_AUTHORIZATION_TTL
++                && !(authorization.database_identity == database_identity
++                    && authorization.operation == operation
++                    && authorization.plan_id == plan_id)
++        });
++
++        while self.authorizations.len() >= PREVIEW_AUTHORIZATION_CAPACITY {
++            self.authorizations.pop_front();
++        }
++
++        let token = Uuid::new_v4().to_string();
++        self.authorizations.push_back(PreviewAuthorization {
++            token: token.clone(),
++            database_identity,
++            operation,
++            plan_id,
++            snapshot,
++            created_at: now,
++        });
++        token
++    }
++
++    fn take(
++        &mut self,
++        token: &str,
++        requested_database_identity: &Path,
++        requested_operation: PreviewAuthorizationOperation,
++        requested_plan_id: &str,
++        now: Instant,
++    ) -> Result<PreviewAuthorizationSnapshot, String> {
++        let Some(index) = self
++            .authorizations
++            .iter()
++            .position(|authorization| authorization.token == token)
++        else {
++            return Err(
++                "confirmation token is unknown, expired, or has already been used".into(),
++            );
++        };
++        let authorization = self
++            .authorizations
++            .remove(index)
++            .expect("authorization index was found");
++
++        if now.saturating_duration_since(authorization.created_at) >= PREVIEW_AUTHORIZATION_TTL {
++            return Err("confirmation token has expired; preview again".into());
++        }
++        if authorization.database_identity != requested_database_identity {
++            return Err("confirmation token belongs to a different database".into());
++        }
++        if authorization.operation != requested_operation
++            || authorization.snapshot.operation() != requested_operation
++        {
++            return Err("confirmation token is for a different operation".into());
++        }
++        if authorization.plan_id != requested_plan_id
++            || authorization.snapshot.plan_id() != requested_plan_id
++        {
++            return Err("confirmation token is for a different plan".into());
++        }
++        Ok(authorization.snapshot)
++    }
++}
++
+@@ -47,0 +190,2 @@ pub struct AppState {
++    preview_authorizations: Arc<Mutex<PreviewAuthorizationStore>>,
++    database_identity: Option<PathBuf>,
+@@ -67,0 +212 @@ impl AppState {
++        let database_identity = repository.database_path().canonicalize().ok();
+@@ -73,0 +219,2 @@ impl AppState {
++            preview_authorizations: Arc::new(Mutex::new(PreviewAuthorizationStore::default())),
++            database_identity,
+@@ -657,0 +805,2 @@ pub fn prepare_bundled_models(app: tauri::AppHandle, state: &AppState) {
++    let preview_authorizations = state.preview_authorizations.clone();
++    let database_identity = state.database_identity.clone();
+@@ -719,0 +869,2 @@ pub fn prepare_bundled_models(app: tauri::AppHandle, state: &AppState) {
++                    preview_authorizations,
++                    database_identity,
+diff --git a/src-tauri/migrations/0018_edit_export_audit_recovery.sql b/src-tauri/migrations/0018_edit_export_audit_recovery.sql
+new file mode 100644
+index 0000000..83bfc77
+--- /dev/null
++++ b/src-tauri/migrations/0018_edit_export_audit_recovery.sql
+@@ -0,0 +1,48 @@
++-- Preserve export audit history when its indexed asset is removed, and add
++-- identity fields used by future export recovery. Rust fills the frozen root
++-- snapshot in the same migration transaction.
++
++CREATE TABLE edit_export_plans_v18 (
++    id TEXT PRIMARY KEY,
++    asset_id INTEGER REFERENCES assets(id) ON DELETE SET NULL,
++    source_fingerprint TEXT NOT NULL,
++    target_path TEXT NOT NULL,
++    recipe_json TEXT NOT NULL,
++    status TEXT NOT NULL,
++    created_at TEXT NOT NULL,
++    executed_at TEXT,
++    error_message TEXT,
++    source_path TEXT NOT NULL DEFAULT '',
++    source_file_identity TEXT,
++    protected_roots_json TEXT NOT NULL DEFAULT '[]'
++);
++
++INSERT INTO edit_export_plans_v18 (
++    id, asset_id, source_fingerprint, target_path, recipe_json, status,
++    created_at, executed_at, error_message, source_path,
++    source_file_identity, protected_roots_json
++)
++SELECT
++    plans.id,
++    plans.asset_id,
++    plans.source_fingerprint,
++    plans.target_path,
++    plans.recipe_json,
++    plans.status,
++    plans.created_at,
++    plans.executed_at,
++    plans.error_message,
++    COALESCE(assets.absolute_path, ''),
++    NULL,
++    '[]'
++FROM edit_export_plans AS plans
++LEFT JOIN assets ON assets.id = plans.asset_id;
++
++DROP TABLE edit_export_plans;
++ALTER TABLE edit_export_plans_v18 RENAME TO edit_export_plans;
++
++ALTER TABLE file_operations ADD COLUMN target_file_identity TEXT;
++ALTER TABLE file_operations ADD COLUMN execution_owner_pid INTEGER;
++ALTER TABLE file_operations ADD COLUMN execution_owner_started_at TEXT;
++ALTER TABLE file_operations ADD COLUMN rollback_owner_pid INTEGER;
++ALTER TABLE file_operations ADD COLUMN rollback_owner_started_at TEXT;
+diff --git a/src-tauri/src/export_file_safety.rs b/src-tauri/src/export_file_safety.rs
+new file mode 100644
+index 0000000..1df0d12
+--- /dev/null
++++ b/src-tauri/src/export_file_safety.rs
+@@ -0,0 +1,798 @@
++//! Handle-bound checks for generated export files.
++//!
++//! Windows operations keep a file handle open while hashing, checking its
++//! physical identity and resolved path, and (for deletion) marking that same
++//! handle's object for deletion. No image decoder is used here.
++
++#[cfg(any(windows, test))]
++use std::fs;
++use std::fs::File;
++#[cfg(windows)]
++use std::fs::OpenOptions;
++#[cfg(windows)]
++use std::io::{Read, Seek, SeekFrom, Write};
++use std::path::{Path, PathBuf};
++
++use crate::error::{AppError, AppResult};
++#[cfg(any(windows, test))]
++use crate::source_identity::identity_key;
++#[cfg(windows)]
++use crate::source_identity::{is_same_or_descendant, normalize_path_string};
++
++#[cfg(windows)]
++use std::os::windows::io::AsRawHandle;
++
++#[cfg(windows)]
++use std::os::windows::fs::OpenOptionsExt;
++
++#[cfg(unix)]
++use std::os::unix::fs::MetadataExt;
++
++#[cfg(windows)]
++use windows::Win32::Foundation::{FILETIME, GENERIC_READ, GENERIC_WRITE, GetLastError, HANDLE};
++#[cfg(windows)]
++use windows::Win32::Storage::FileSystem::{
++    BY_HANDLE_FILE_INFORMATION, DELETE, FILE_DISPOSITION_INFO, FILE_SHARE_DELETE,
++    FILE_SHARE_READ, FILE_SHARE_WRITE, FileDispositionInfo, GetFileInformationByHandle,
++    GetFinalPathNameByHandleW, SetFileInformationByHandle, VOLUME_NAME_DOS,
++};
++#[cfg(windows)]
++use windows::Win32::System::Threading::{
++    GetCurrentProcess, GetExitCodeProcess, GetProcessTimes, OpenProcess,
++    PROCESS_QUERY_LIMITED_INFORMATION,
++};
++
++#[cfg(windows)]
++const HASH_BUFFER_SIZE: usize = 64 * 1024;
++
++/// The bytes, physical file, and resolved path observed through one handle.
++#[derive(Debug, Clone, PartialEq, Eq)]
++pub struct TargetSnapshot {
++    pub hash: String,
++    pub file_identity: String,
++    pub final_path: PathBuf,
++}
++
++/// A generated file held open with restrictive sharing until finalized or
++/// safely aborted.
++#[derive(Debug)]
++pub struct GeneratedTargetWriter {
++    file: File,
++    protected_roots: Vec<String>,
++    created_identity: String,
++    created_path: PathBuf,
++}
++
++/// A generated target held open while it is inspected and optionally deleted.
++#[derive(Debug)]
++pub struct GeneratedTargetLease {
++    file: File,
++    protected_roots: Vec<String>,
++}
++
++/// Read only filesystem identity metadata for an existing file.
++///
++/// This function never decodes image data or reads file contents.
++pub fn inspect_file_identity(path: &Path) -> AppResult<String> {
++    #[cfg(windows)]
++    {
++        let mut options = OpenOptions::new();
++        options
++            .read(true)
++            .share_mode(FILE_SHARE_READ.0 | FILE_SHARE_WRITE.0 | FILE_SHARE_DELETE.0);
++        let file = options.open(path)?;
++        return file_identity(&file);
++    }
++
++    #[cfg(unix)]
++    {
++        let file = File::open(path)?;
++        let metadata = file.metadata()?;
++        return Ok(format!("unix:dev:{:x}:ino:{:x}", metadata.dev(), metadata.ino()));
++    }
++
++    #[cfg(not(any(windows, unix)))]
++    {
++        let _ = path;
++        Err(unsupported("file identity is unavailable on this platform"))
++    }
++}
++
++/// Open an existing generated target while denying other handles write and
++/// delete access. All snapshot checks and deletion use this same handle.
++pub fn open_generated_target(
++    path: &Path,
++    protected_roots: &[String],
++) -> AppResult<GeneratedTargetLease> {
++    #[cfg(windows)]
++    {
++        open_generated_target_with_share_mode(path, protected_roots, FILE_SHARE_READ.0)
++    }
++
++    #[cfg(not(windows))]
++    {
++        let _ = (path, protected_roots);
++        Err(unsupported(
++            "handle-bound generated-target leases require Windows file disposition support",
++        ))
++    }
++}
++
++impl GeneratedTargetLease {
++    /// Snapshot the hash, physical identity, and final path of the held object.
++    pub fn snapshot(&mut self) -> AppResult<TargetSnapshot> {
++        #[cfg(windows)]
++        {
++            snapshot_handle(&mut self.file, &self.protected_roots)
++        }
++
++        #[cfg(not(windows))]
++        {
++            Err(unsupported(
++                "handle-bound generated-target snapshots require Windows",
++            ))
++        }
++    }
++
++    /// Delete the object held by this lease only if all expected values still
++    /// match. Windows marks the file represented by this exact handle for
++    /// deletion; the path is never reopened or re-resolved for deletion.
++    pub fn delete_checked(
++        mut self,
++        expected_hash: &str,
++        expected_identity: &str,
++    ) -> AppResult<()> {
++        #[cfg(windows)]
++        {
++            let snapshot = snapshot_handle(&mut self.file, &self.protected_roots)?;
++            if snapshot.hash != expected_hash {
++                return Err(AppError::InvalidArgument(
++                    "generated target hash changed before handle-bound deletion".into(),
++                ));
++            }
++            if snapshot.file_identity != expected_identity {
++                return Err(AppError::InvalidArgument(
++                    "generated target file identity changed before handle-bound deletion".into(),
++                ));
++            }
++            mark_handle_for_deletion(&self.file)?;
++            return Ok(());
++        }
++
++        #[cfg(not(windows))]
++        {
++            let _ = (expected_hash, expected_identity);
++            Err(unsupported(
++                "safe deletion by the verified file handle is unavailable on this platform",
++            ))
++        }
++    }
++}
++
++/// Create a new generated target without ever replacing an existing entry.
++/// The returned writer owns the file handle used for identity checks,
++/// finalization, and any abort cleanup.
++pub fn create_generated_target(
++    path: &Path,
++    protected_roots: &[String],
++) -> AppResult<GeneratedTargetWriter> {
++    #[cfg(windows)]
++    {
++        validate_new_target_path(path, protected_roots)?;
++
++        let mut options = OpenOptions::new();
++        options
++            .read(true)
++            .write(true)
++            .create_new(true)
++            .access_mode(GENERIC_READ.0 | GENERIC_WRITE.0 | DELETE.0)
++            .share_mode(FILE_SHARE_READ.0);
++        let file = options.open(path)?;
++
++        let validation: AppResult<(PathBuf, String)> = (|| {
++            let final_path = final_path_by_handle(&file)?;
++            ensure_outside_protected_roots(&final_path, protected_roots)?;
++            let created_identity = file_identity(&file)?;
++            Ok((final_path, created_identity))
++        })();
++
++        match validation {
++            Ok((created_path, created_identity)) => Ok(GeneratedTargetWriter {
++                file,
++                protected_roots: protected_roots.to_vec(),
++                created_identity,
++                created_path,
++            }),
++            Err(error) => Err(cleanup_failed_creation(file, protected_roots, error)),
++        }
++    }
++
++    #[cfg(not(windows))]
++    {
++        let _ = (path, protected_roots);
++        Err(unsupported(
++            "safe generated-target creation requires handle-bound Windows cleanup",
++        ))
++    }
++}
++
++impl GeneratedTargetWriter {
++    /// The image encoder writes only to this newly created, application-owned
++    /// destination. This API does not open or decode source image files.
++    pub fn file_mut(&mut self) -> &mut File {
++        &mut self.file
++    }
++
++    /// Return the identity of the file created by this writer. Call before
++    /// recording that identity in the export operation log.
++    pub fn file_identity(&self) -> AppResult<String> {
++        let identity = file_identity(&self.file)?;
++        if identity != self.created_identity {
++            return Err(AppError::InvalidArgument(
++                "generated target identity no longer matches its creation handle".into(),
++            ));
++        }
++        Ok(identity)
++    }
++
++    /// Flush and sync the generated file, then return a final snapshot taken
++    /// through the still-open creation handle.
++    pub fn finish(mut self) -> AppResult<TargetSnapshot> {
++        #[cfg(windows)]
++        {
++            self.file.flush()?;
++            self.file.sync_all()?;
++            let snapshot = snapshot_handle(&mut self.file, &self.protected_roots)?;
++            if snapshot.file_identity != self.created_identity {
++                return Err(AppError::InvalidArgument(
++                    "generated target identity changed before finalization".into(),
++                ));
++            }
++            Ok(snapshot)
++        }
++
++        #[cfg(not(windows))]
++        {
++            Err(unsupported(
++                "safe generated-target finalization is unavailable on this platform",
++            ))
++        }
++    }
++
++    /// Safely remove only the file object created by this writer. If the
++    /// platform or filesystem cannot do that through the held handle, the
++    /// operation fails and leaves the file in place.
++    pub fn abort(self) -> AppResult<()> {
++        #[cfg(windows)]
++        {
++            let current_path = final_path_by_handle(&self.file)?;
++            ensure_outside_protected_roots(&current_path, &self.protected_roots)?;
++            if file_identity(&self.file)? != self.created_identity {
++                return Err(AppError::InvalidArgument(
++                    "generated target identity changed before abort".into(),
++                ));
++            }
++            match mark_handle_for_deletion(&self.file) {
++                Ok(()) => Ok(()),
++                Err(error) => Err(AppError::InvalidArgument(format!(
++                    "could not safely remove generated target {}; the file may remain: {error}",
++                    self.created_path.display()
++                ))),
++            }
++        }
++
++        #[cfg(not(windows))]
++        {
++            Err(unsupported(
++                "safe abort by the creation handle is unavailable on this platform",
++            ))
++        }
++    }
++}
++
++/// Identify the current process instance. On Windows the value is the process
++/// creation FILETIME, which distinguishes PID reuse.
++pub fn current_process_identity() -> AppResult<String> {
++    #[cfg(windows)]
++    {
++        let mut creation = FILETIME::default();
++        let mut exit = FILETIME::default();
++        let mut kernel = FILETIME::default();
++        let mut user = FILETIME::default();
++        unsafe {
++            GetProcessTimes(
++                GetCurrentProcess(),
++                &mut creation,
++                &mut exit,
++                &mut kernel,
++                &mut user,
++            )
++            .map_err(windows_error)?;
++        }
++        return Ok(process_creation_identity(&creation));
++    }
++
++    #[cfg(not(windows))]
++    {
++        static PROCESS_STAMP: std::sync::OnceLock<String> = std::sync::OnceLock::new();
++        Ok(PROCESS_STAMP
++            .get_or_init(|| format!("local:{}", uuid::Uuid::new_v4()))
++            .clone())
++    }
++}
++
++/// Check a process instance, not merely whether its numeric PID currently
++/// exists. Unknown access or platform state is returned as an error.
++pub fn is_process_instance_alive(pid: u32, creation_identity: &str) -> AppResult<bool> {
++    #[cfg(windows)]
++    {
++        let process = match unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) } {
++            Ok(process) => process,
++            Err(error) if is_process_not_found_error(&error) => return Ok(false),
++            Err(error) => return Err(windows_error(error)),
++        };
++
++        let mut exit_code = 0_u32;
++        let mut creation = FILETIME::default();
++        let mut exit = FILETIME::default();
++        let mut kernel = FILETIME::default();
++        let mut user = FILETIME::default();
++        let process_result = unsafe {
++            GetExitCodeProcess(process, &mut exit_code).and_then(|()| {
++                GetProcessTimes(
++                    process,
++                    &mut creation,
++                    &mut exit,
++                    &mut kernel,
++                    &mut user,
++                )
++            })
++        };
++        unsafe {
++            let _ = windows::Win32::Foundation::CloseHandle(process);
++        }
++        process_result.map_err(windows_error)?;
++
++        if exit_code != windows::Win32::Foundation::STILL_ACTIVE.0 as u32 {
++            return Ok(false);
++        }
++        return Ok(process_creation_identity(&creation) == creation_identity);
++    }
++
++    #[cfg(not(windows))]
++    {
++        if pid != std::process::id() {
++            return Err(unsupported(
++                "this platform cannot verify another process instance",
++            ));
++        }
++        Ok(current_process_identity()? == creation_identity)
++    }
++}
++
++#[cfg(windows)]
++fn open_generated_target_with_share_mode(
++    path: &Path,
++    protected_roots: &[String],
++    share_mode: u32,
++) -> AppResult<GeneratedTargetLease> {
++    let mut options = OpenOptions::new();
++    options
++        .read(true)
++        .access_mode(GENERIC_READ.0 | DELETE.0)
++        .share_mode(share_mode);
++    let file = options.open(path)?;
++    let final_path = final_path_by_handle(&file)?;
++    ensure_outside_protected_roots(&final_path, protected_roots)?;
++    Ok(GeneratedTargetLease {
++        file,
++        protected_roots: protected_roots.to_vec(),
++    })
++}
++
++#[cfg(windows)]
++fn snapshot_handle(file: &mut File, protected_roots: &[String]) -> AppResult<TargetSnapshot> {
++    let final_path = final_path_by_handle(file)?;
++    ensure_outside_protected_roots(&final_path, protected_roots)?;
++    let file_identity = file_identity(file)?;
++    let hash = hash_file_handle(file)?;
++    Ok(TargetSnapshot {
++        hash,
++        file_identity,
++        final_path,
++    })
++}
++
++#[cfg(windows)]
++fn hash_file_handle(file: &mut File) -> AppResult<String> {
++    file.seek(SeekFrom::Start(0))?;
++    let mut hasher = blake3::Hasher::new();
++    let mut buffer = [0_u8; HASH_BUFFER_SIZE];
++    loop {
++        let bytes = file.read(&mut buffer)?;
++        if bytes == 0 {
++            break;
++        }
++        hasher.update(&buffer[..bytes]);
++    }
++    Ok(hasher.finalize().to_hex().to_string())
++}
++
++#[cfg(windows)]
++fn file_identity(file: &File) -> AppResult<String> {
++    let handle = HANDLE(file.as_raw_handle() as _);
++    let mut info = BY_HANDLE_FILE_INFORMATION::default();
++    unsafe {
++        GetFileInformationByHandle(handle, &mut info).map_err(windows_error)?;
++    }
++
++    let file_index = (u64::from(info.nFileIndexHigh) << 32) | u64::from(info.nFileIndexLow);
++    let creation_time = filetime_ticks(&info.ftCreationTime);
++    if info.dwVolumeSerialNumber == 0 || file_index == 0 || creation_time == 0 {
++        return Err(unsupported(
++            "the filesystem did not provide a complete physical file identity",
++        ));
++    }
++    Ok(format!(
++        "win:volume:{:08x}:file:{file_index:016x}:created:{creation_time:016x}",
++        info.dwVolumeSerialNumber
++    ))
++}
++
++#[cfg(not(windows))]
++fn file_identity(_file: &File) -> AppResult<String> {
++    Err(unsupported(
++        "handle-based file identity is unavailable on this platform",
++    ))
++}
++
++#[cfg(windows)]
++fn final_path_by_handle(file: &File) -> AppResult<PathBuf> {
++    let handle = HANDLE(file.as_raw_handle() as _);
++    let mut buffer = vec![0_u16; 512];
++    loop {
++        let length = unsafe { GetFinalPathNameByHandleW(handle, &mut buffer, VOLUME_NAME_DOS) };
++        if length == 0 {
++            return Err(last_windows_io_error());
++        }
++        let length = length as usize;
++        if length < buffer.len() {
++            use std::os::windows::ffi::OsStringExt;
++            return Ok(PathBuf::from(std::ffi::OsString::from_wide(
++                &buffer[..length],
++            )));
++        }
++        if length >= 32_768 {
++            return Err(unsupported(
++                "the resolved Windows path exceeds the supported length",
++            ));
++        }
++        buffer.resize(length + 1, 0);
++    }
++}
++
++#[cfg(windows)]
++fn mark_handle_for_deletion(file: &File) -> AppResult<()> {
++    let handle = HANDLE(file.as_raw_handle() as _);
++    let disposition = FILE_DISPOSITION_INFO { DeleteFile: true };
++    unsafe {
++        SetFileInformationByHandle(
++            handle,
++            FileDispositionInfo,
++            (&disposition as *const FILE_DISPOSITION_INFO).cast(),
++            std::mem::size_of::<FILE_DISPOSITION_INFO>() as u32,
++        )
++        .map_err(windows_error)?;
++    }
++    Ok(())
++}
++
++#[cfg(windows)]
++fn filetime_ticks(filetime: &FILETIME) -> u64 {
++    (u64::from(filetime.dwHighDateTime) << 32) | u64::from(filetime.dwLowDateTime)
++}
++
++#[cfg(windows)]
++fn process_creation_identity(creation: &FILETIME) -> String {
++    format!("{:016x}", filetime_ticks(creation))
++}
++
++#[cfg(windows)]
++fn windows_error(error: windows::core::Error) -> AppError {
++    AppError::Io(std::io::Error::other(error))
++}
++
++#[cfg(windows)]
++fn last_windows_io_error() -> AppError {
++    let code = unsafe { GetLastError() };
++    AppError::Io(std::io::Error::from_raw_os_error(code.0 as i32))
++}
++
++#[cfg(windows)]
++fn is_process_not_found_error(error: &windows::core::Error) -> bool {
++    let code = error.code().0 as u32;
++    code == hresult_from_win32(windows::Win32::Foundation::ERROR_INVALID_PARAMETER.0)
++        || code == hresult_from_win32(windows::Win32::Foundation::ERROR_NOT_FOUND.0)
++}
++
++#[cfg(windows)]
++fn hresult_from_win32(error: u32) -> u32 {
++    if error == 0 {
++        0
++    } else {
++        (error & 0x0000_ffff) | 0x8007_0000
++    }
++}
++
++#[cfg(windows)]
++fn validate_new_target_path(path: &Path, protected_roots: &[String]) -> AppResult<()> {
++    let file_name = path.file_name().ok_or_else(|| {
++        AppError::InvalidArgument("generated target path must name a file".into())
++    })?;
++    let parent = path
++        .parent()
++        .filter(|parent| !parent.as_os_str().is_empty())
++        .unwrap_or_else(|| Path::new("."));
++    let final_parent = fs::canonicalize(parent)?;
++    let candidate = final_parent.join(file_name);
++    ensure_outside_protected_roots(&candidate, protected_roots)
++}
++
++#[cfg(windows)]
++fn ensure_outside_protected_roots(path: &Path, protected_roots: &[String]) -> AppResult<()> {
++    let target_identity = identity_key(path);
++    if protected_roots.iter().any(|root| {
++        let root_identity = normalize_path_string(root);
++        is_same_or_descendant(&root_identity, &target_identity)
++    }) {
++        return Err(AppError::UnsafePath(path.to_path_buf()));
++    }
++    Ok(())
++}
++
++#[cfg(windows)]
++fn cleanup_failed_creation(
++    file: File,
++    protected_roots: &[String],
++    original_error: AppError,
++) -> AppError {
++    let cleanup = final_path_by_handle(&file)
++        .and_then(|path| ensure_outside_protected_roots(&path, protected_roots))
++        .and_then(|()| mark_handle_for_deletion(&file));
++    drop(file);
++    match cleanup {
++        Ok(()) => original_error,
++        Err(cleanup_error) => AppError::InvalidArgument(format!(
++            "generated target creation failed ({original_error}); its file could not be safely removed and may remain ({cleanup_error})"
++        )),
++    }
++}
++
++fn unsupported(message: &str) -> AppError {
++    AppError::Io(std::io::Error::new(
++        std::io::ErrorKind::Unsupported,
++        message.to_owned(),
++    ))
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    use tempfile::TempDir;
++
++    fn roots(paths: &[&Path]) -> Vec<String> {
++        paths
++            .iter()
++            .map(|path| identity_key(path))
++            .collect()
++    }
++
++    #[test]
++    fn file_identity_reads_metadata_without_decoding_file_contents() {
++        let temporary = TempDir::new().expect("temporary directory");
++        let path = temporary.path().join("高分辨率-源图像.jpg");
++        fs::write(&path, vec![0x5a; 4 * 1024 * 1024]).expect("write test-owned bytes");
++
++        let identity = inspect_file_identity(&path).expect("metadata identity");
++        assert!(!identity.is_empty());
++    }
++
++    #[test]
++    fn current_process_identity_is_stable_and_matches_current_instance() {
++        let first = current_process_identity().expect("current process identity");
++        let second = current_process_identity().expect("stable process identity");
++        assert_eq!(first, second);
++        assert!(
++            is_process_instance_alive(std::process::id(), &first)
++                .expect("current process should be verifiable")
++        );
++    }
++
++    #[test]
++    fn current_pid_with_a_different_creation_identity_is_not_the_same_instance() {
++        let identity = current_process_identity().expect("current process identity");
++        let wrong = format!("{identity}-different");
++        assert!(
++            !is_process_instance_alive(std::process::id(), &wrong)
++                .expect("a creation-time mismatch is a negative match")
++        );
++    }
++
++    #[cfg(unix)]
++    #[test]
++    fn another_process_cannot_be_proven_on_non_windows_platforms() {
++        let error = is_process_instance_alive(u32::MAX, "unknown").expect_err("unsupported");
++        assert!(is_unsupported(&error));
++    }
++
++    #[cfg(windows)]
++    #[test]
++    fn same_bytes_in_distinct_files_have_distinct_handle_identities() {
++        let temporary = TempDir::new().expect("temporary directory");
++        let first = temporary.path().join("一.jpg");
++        let second = temporary.path().join("два.jpg");
++        fs::write(&first, b"same generated bytes").expect("first fixture");
++        fs::write(&second, b"same generated bytes").expect("second fixture");
++
++        assert_eq!(hash_file_on_path(&first), hash_file_on_path(&second));
++        assert_ne!(
++            inspect_file_identity(&first).expect("first identity"),
++            inspect_file_identity(&second).expect("second identity")
++        );
++    }
++
++    #[cfg(windows)]
++    #[test]
++    fn generated_targets_reject_protected_roots_and_support_unicode_paths() {
++        let temporary = TempDir::new().expect("temporary directory");
++        let protected = temporary.path().join("图库原图");
++        fs::create_dir(&protected).expect("protected root");
++        let protected_target = protected.join("must-not-exist.jpg");
++        let protected_roots = roots(&[&protected]);
++        let error = create_generated_target(&protected_target, &protected_roots)
++            .expect_err("protected root must be rejected");
++        assert!(matches!(error, AppError::UnsafePath(_)));
++        assert!(!protected_target.exists());
++
++        let output = temporary.path().join("экспорт 旅行 café");
++        fs::create_dir(&output).expect("output directory");
++        let target = output.join("雪だるま-照片.jpg");
++        let mut writer = create_generated_target(&target, &protected_roots)
++            .expect("unicode target creation");
++        let identity = writer.file_identity().expect("pre-write identity");
++        writer.file_mut().write_all(b"generated output").expect("write");
++        let snapshot = writer.finish().expect("finish");
++        assert_eq!(snapshot.file_identity, identity);
++        assert_eq!(
++            identity_key(&snapshot.final_path),
++            identity_key(&fs::canonicalize(&target).expect("canonical path"))
++        );
++    }
++
++    #[cfg(windows)]
++    #[test]
++    fn lease_blocks_external_write_rename_and_replacement_without_data_loss() {
++        let temporary = TempDir::new().expect("temporary directory");
++        let output = temporary.path().join("output");
++        fs::create_dir(&output).expect("output directory");
++        let target = output.join("generated.jpg");
++        let neighbor = output.join("neighbor.jpg");
++        let source_root = temporary.path().join("图库原图");
++        fs::create_dir(&source_root).expect("source root");
++        let source = source_root.join("original.jpg");
++        fs::write(&target, b"generated").expect("target");
++        fs::write(&neighbor, b"neighbor").expect("neighbor");
++        fs::write(&source, b"original").expect("source");
++        let mut lease = open_generated_target(&target, &[]).expect("lease");
++        let snapshot = lease.snapshot().expect("snapshot");
++
++        assert!(OpenOptions::new().write(true).open(&target).is_err());
++        let moved = output.join("moved.jpg");
++        assert!(fs::rename(&target, &moved).is_err());
++        assert!(fs::write(&target, b"replacement").is_err());
++
++        assert_eq!(fs::read(&target).expect("original remains"), b"generated");
++        assert!(!moved.exists());
++        assert_eq!(fs::read(&neighbor).expect("neighbor remains"), b"neighbor");
++
++        lease
++            .delete_checked(&snapshot.hash, &snapshot.file_identity)
++            .expect("same-handle deletion");
++        assert!(!target.exists());
++        assert_eq!(fs::read(neighbor).expect("neighbor remains"), b"neighbor");
++        assert_eq!(fs::read(source).expect("source remains"), b"original");
++    }
++
++    #[cfg(windows)]
++    #[test]
++    fn lease_deletes_its_handle_object_after_controlled_path_replacement() {
++        let temporary = TempDir::new().expect("temporary directory");
++        let output = temporary.path().join("output");
++        fs::create_dir(&output).expect("output directory");
++        let target = output.join("generated.jpg");
++        let moved_original = output.join("original-moved.jpg");
++        fs::write(&target, b"owned original").expect("target");
++
++        let lease = open_generated_target_with_share_mode(
++            &target,
++            &[],
++            FILE_SHARE_READ.0 | FILE_SHARE_WRITE.0 | FILE_SHARE_DELETE.0,
++        )
++        .expect("test lease permits a controlled external path change");
++        let mut lease = lease;
++        let snapshot = lease.snapshot().expect("original handle snapshot");
++        fs::rename(&target, &moved_original).expect("move original directory entry");
++        fs::write(&target, b"attacker replacement").expect("replacement path");
++
++        lease
++            .delete_checked(&snapshot.hash, &snapshot.file_identity)
++            .expect("delete the object still held by the lease");
++        assert_eq!(
++            fs::read(&target).expect("replacement must remain"),
++            b"attacker replacement"
++        );
++        assert!(!moved_original.exists());
++    }
++
++    #[cfg(windows)]
++    #[test]
++    fn writer_abort_deletes_only_its_created_target() {
++        let temporary = TempDir::new().expect("temporary directory");
++        let output = temporary.path().join("output");
++        fs::create_dir(&output).expect("output directory");
++        let target = output.join("incomplete.jpg");
++        let neighbor = output.join("neighbor.jpg");
++        fs::write(&neighbor, b"neighbor").expect("neighbor");
++
++        let mut writer = create_generated_target(&target, &[]).expect("writer");
++        writer.file_mut().write_all(b"incomplete").expect("write");
++        writer.abort().expect("handle-bound abort");
++        assert!(!target.exists());
++        assert_eq!(fs::read(neighbor).expect("neighbor remains"), b"neighbor");
++    }
++
++    #[cfg(windows)]
++    #[test]
++    fn nonexistent_pid_and_creation_time_mismatch_are_false() {
++        assert!(!is_process_instance_alive(u32::MAX, "0000000000000000")
++            .expect("nonexistent PID is false"));
++        let current = current_process_identity().expect("current identity");
++        assert!(!is_process_instance_alive(std::process::id(), "0000000000000000")
++            .expect("creation mismatch is false"));
++        assert!(is_process_instance_alive(std::process::id(), &current)
++            .expect("current process is alive"));
++    }
++
++    #[cfg(windows)]
++    #[test]
++    fn access_denied_process_query_remains_unknown() {
++        let error = windows::core::Error::from_hresult(windows::core::HRESULT(
++            hresult_from_win32(windows::Win32::Foundation::ERROR_ACCESS_DENIED.0) as i32,
++        ));
++        assert!(!is_process_not_found_error(&error));
++    }
++
++    #[cfg(not(windows))]
++    #[test]
++    fn dangerous_target_operations_are_explicitly_unsupported() {
++        let temporary = TempDir::new().expect("temporary directory");
++        let path = temporary.path().join("generated.jpg");
++        fs::write(&path, b"test-owned generated target").expect("fixture");
++        let error = open_generated_target(&path, &[]).expect_err("lease unsupported");
++        assert!(is_unsupported(&error));
++        let error = create_generated_target(&path, &[]).expect_err("writer unsupported");
++        assert!(is_unsupported(&error));
++        assert_eq!(fs::read(path).expect("target retained"), b"test-owned generated target");
++    }
++
++    #[cfg(windows)]
++    fn hash_file_on_path(path: &Path) -> String {
++        let mut file = File::open(path).expect("open test file");
++        hash_file_handle(&mut file).expect("hash test file")
++    }
++
++    #[cfg(not(windows))]
++    fn is_unsupported(error: &AppError) -> bool {
++        matches!(error, AppError::Io(error) if error.kind() == std::io::ErrorKind::Unsupported)
++    }
++}
