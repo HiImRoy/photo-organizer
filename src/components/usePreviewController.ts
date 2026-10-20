@@ -7,7 +7,7 @@ import type { NavigatorFrame, PreviewNavigatorProps } from "./PreviewNavigator";
 import { requestThumbnail } from "./thumbnailSource";
 
 const PREVIEW_TIMEOUT_MS = 15_000;
-const ORIGINAL_PREFETCH_DELAY_MS = 300;
+const PREVIEW_PREFETCH_DELAY_MS = 300;
 const MAX_ORIGINAL_CACHE_ENTRIES = 3;
 const MAX_ORIGINAL_CACHE_BYTES = 96 * 1024 * 1024;
 
@@ -49,6 +49,7 @@ export interface PreviewController {
   stageRef: React.RefObject<HTMLDivElement | null>;
   thumbnailSource: string | null;
   screenSource: string | null;
+  originalSource: string | null;
   displaySource: string | null;
   loadState: "loading" | "loaded" | "error";
   originalState: "idle" | "loading" | "loaded" | "error";
@@ -68,6 +69,10 @@ export interface PreviewController {
   onPointerUp: (event: React.PointerEvent<HTMLDivElement>) => void;
   onPointerCancel: () => void;
   onDoubleClick: (event: React.MouseEvent<HTMLDivElement>) => void;
+  retryScreenPreview: () => void;
+  onScreenError: () => void;
+  onOriginalError: () => void;
+  retryOriginalPreview: () => void;
 }
 
 export function usePreviewController(
@@ -194,23 +199,13 @@ export function usePreviewController(
     }, PREVIEW_TIMEOUT_MS);
     void (async () => {
       try {
-        const original = await loadOriginalForAsset(requestAsset);
+        const screen = await fetchPreview(assetId, "screen");
         if (generation.current !== requestGeneration) return;
-        setOriginalSource(original);
-        setScreenSource(original);
-        setOriginalState("loaded");
+        setScreenSource(screen);
         setLoadState("loaded");
       } catch {
         if (generation.current !== requestGeneration) return;
-        setOriginalState("error");
-        try {
-          const fallback = await fetchPreview(assetId, "screen");
-          if (generation.current !== requestGeneration) return;
-          setScreenSource(fallback);
-          setLoadState("loaded");
-        } catch {
-          if (generation.current === requestGeneration) setLoadState("error");
-        }
+        setLoadState("error");
       } finally {
         window.clearTimeout(timeout);
       }
@@ -226,11 +221,11 @@ export function usePreviewController(
     if (targets.length === 0) return undefined;
     const timer = window.setTimeout(() => {
       targets.forEach((target) => {
-        void loadOriginalForAsset(target).catch(() => undefined);
+        void requestThumbnail(target.id, 0).catch(() => undefined);
       });
-    }, ORIGINAL_PREFETCH_DELAY_MS);
+    }, PREVIEW_PREFETCH_DELAY_MS);
     return () => window.clearTimeout(timer);
-  }, [active, assetId, loadOriginalForAsset, prefetchAssets]);
+  }, [active, assetId, prefetchAssets]);
 
   useEffect(() => {
     if (!active) return undefined;
@@ -290,6 +285,43 @@ export function usePreviewController(
       });
   }
 
+  function retryScreenPreview() {
+    if (!asset) return;
+    const requestGeneration = generation.current;
+    setLoadState("loading");
+    void fetchPreview(asset.id, "screen")
+      .then((source) => {
+        if (generation.current !== requestGeneration) return;
+        setScreenSource(source);
+        setLoadState("loaded");
+      })
+      .catch(() => {
+        if (generation.current === requestGeneration) setLoadState("error");
+      });
+  }
+
+  function onScreenError() {
+    setScreenSource(null);
+    setLoadState("error");
+  }
+
+  function onOriginalError() {
+    if (asset) {
+      const cached = originalCacheRef.current.get(asset.id);
+      if (cached?.version === previewAssetVersion(asset)) {
+        originalCacheRef.current.delete(asset.id);
+        originalCacheBytesRef.current -= cached.estimatedBytes;
+      }
+    }
+    setOriginalSource(null);
+    setOriginalState("error");
+  }
+
+  function retryOriginalPreview() {
+    setOriginalState("idle");
+    loadOriginalIfNeeded();
+  }
+
   function zoomAround(next: number | "fit", anchor = { x: 0, y: 0 }) {
     if (next === "fit") {
       setZoom("fit");
@@ -305,10 +337,15 @@ export function usePreviewController(
     };
     setZoom(next);
     setOffset(next < fitScale ? { x: 0, y: 0 } : nextOffset);
-    if (next > 1) loadOriginalIfNeeded();
+    if (next >= 1) loadOriginalIfNeeded();
   }
 
   function onWheel(event: React.WheelEvent<HTMLDivElement>) {
+    if (
+      event.target instanceof Element &&
+      event.target.closest("button, input, select, textarea, a")
+    )
+      return;
     event.preventDefault();
     const oldScale = currentScale();
     const deltaY =
@@ -322,9 +359,14 @@ export function usePreviewController(
   }
 
   function onPointerDown(event: React.PointerEvent<HTMLDivElement>) {
+    if (
+      event.target instanceof Element &&
+      event.target.closest("button, input, select, textarea, a")
+    )
+      return;
     if (currentScale() <= fitScale) return;
     event.preventDefault();
-    event.currentTarget.setPointerCapture(event.pointerId);
+    event.currentTarget.setPointerCapture?.(event.pointerId);
     setDragging(true);
     setDragStart({ x: event.clientX - offset.x, y: event.clientY - offset.y });
   }
@@ -335,8 +377,8 @@ export function usePreviewController(
   }
 
   function onPointerUp(event: React.PointerEvent<HTMLDivElement>) {
-    if (event.currentTarget.hasPointerCapture(event.pointerId))
-      event.currentTarget.releasePointerCapture(event.pointerId);
+    if (event.currentTarget.hasPointerCapture?.(event.pointerId))
+      event.currentTarget.releasePointerCapture?.(event.pointerId);
     setDragging(false);
   }
 
@@ -428,6 +470,7 @@ export function usePreviewController(
     stageRef,
     thumbnailSource,
     screenSource,
+    originalSource,
     displaySource,
     loadState,
     originalState,
@@ -447,5 +490,9 @@ export function usePreviewController(
     onPointerUp,
     onPointerCancel: () => setDragging(false),
     onDoubleClick,
+    retryScreenPreview,
+    onScreenError,
+    onOriginalError,
+    retryOriginalPreview,
   };
 }

@@ -104,7 +104,7 @@ export const AssetCard = memo(function AssetCard({
             onOpen?.(asset);
           }}
           aria-current={active ? "true" : undefined}
-          aria-label={`${asset.fileName}${active ? "，当前图片" : ""}`}
+          aria-label={asset.fileName}
           title={asset.fileName}
         >
           <div className="asset-image-wrap">

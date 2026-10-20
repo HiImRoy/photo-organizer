@@ -72,3 +72,6 @@ license-reports/
 
 # Local read-only source references used for architecture research
 reference/
+
+# Local acceptance runtime profiles
+/test-data/acceptance-*/

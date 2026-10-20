@@ -11,6 +11,8 @@ import {
   createCollection,
   deleteCollection,
   fetchAssets,
+  fetchAssetMembership,
+  fetchAssetNeighbor,
   fetchAssetDetail,
   fetchBrowseNodes,
   fetchClassificationRegistry,
@@ -65,11 +67,11 @@ import {
   type CollectionDialogSubmission,
 } from "./components/CollectionActionDialog";
 import { DetailPanel } from "./components/DetailPanel";
+import { GroupedAssetGrid } from "./components/GroupedAssetGrid";
 import { ManualMarkFilterBar } from "./components/ManualMarkFilterBar";
-import { OrganizationWorkspace } from "./components/OrganizationWorkspace";
+import { CopyExportWorkspace } from "./components/CopyExportWorkspace";
 import {
   CheckIcon,
-  ChevronIcon,
   BooksIcon,
   FilterIcon,
   GridIcon,
@@ -102,6 +104,7 @@ import {
   type AppThemeMode,
 } from "./settings";
 import {
+  assetQueryFromV1,
   createAssetQueryV1,
   describeAssetScopeV1,
   normalizeAssetQueryV1,
@@ -117,6 +120,7 @@ import {
   type AssetGroupBy,
   type AssetFilter,
   type AssetListItem,
+  type AssetQuery,
   type AssetQueryV1,
   type AssetScopeInputV1,
   type BrowseNode,
@@ -318,11 +322,29 @@ export default function App() {
   const [assetQuery, setAssetQuery] = useState<AssetQueryV1>(() =>
     createAssetQueryV1(null, PAGE_SIZE),
   );
+  const [allSourceActive, setAllSourceActive] = useState(false);
+  const allSourceActiveRef = useRef(allSourceActive);
+  allSourceActiveRef.current = allSourceActive;
   const currentLibraryId = assetQuery.libraryId;
   const { filter, sort, direction } = assetQuery;
+  const selectionQueryKey = JSON.stringify({
+    libraryId: assetQuery.libraryId,
+    filter: assetQuery.filter,
+    sort: assetQuery.sort,
+    direction: assetQuery.direction,
+  });
+  const previousSelectionQueryKeyRef = useRef(selectionQueryKey);
   const [searchPending, setSearchPending] = useState(false);
   const browseRootActive =
-    currentLibraryId !== null || filter.favoriteOnly || filter.collectionId !== null;
+    allSourceActive ||
+    currentLibraryId !== null ||
+    filter.favoriteOnly ||
+    filter.collectionId !== null;
+  const fullAssetQuery = useMemo(
+    () => assetQueryFromV1({ ...assetQuery, page: 1, pageSize: PAGE_SIZE }),
+    [assetQuery],
+  );
+  const fullAssetQueryKey = JSON.stringify(fullAssetQuery);
   const [assets, setAssets] = useState<AssetListItem[]>([]);
   const [assetTotal, setAssetTotal] = useState(0);
   const [hasMoreAssets, setHasMoreAssets] = useState(false);
@@ -334,6 +356,7 @@ export default function App() {
     ClassificationFieldDescriptor[]
   >([]);
   const [activeAssetId, setActiveAssetId] = useState<number | null>(null);
+  const [activeAssetSnapshot, setActiveAssetSnapshot] = useState<AssetListItem | null>(null);
   const [detailAsset, setDetailAsset] = useState<AssetListItem | null>(null);
   const [selectionAnchorId, setSelectionAnchorId] = useState<number | null>(null);
   const [filterPopoverOpen, setFilterPopoverOpen] = useState(false);
@@ -433,6 +456,8 @@ export default function App() {
   const aiSearchTriggerRef = useRef<HTMLButtonElement | null>(null);
   const assetsRef = useRef<AssetListItem[]>([]);
   const assetQueryRef = useRef(assetQuery);
+  const activeAssetIdRef = useRef(activeAssetId);
+  const selectionQueryKeyRef = useRef(selectionQueryKey);
   const assetLoadGenerationRef = useRef(0);
   const nextAssetPageRef = useRef(1);
   const hasMoreAssetsRef = useRef(false);
@@ -546,6 +571,8 @@ export default function App() {
   }, []);
   assetsRef.current = assets;
   assetQueryRef.current = assetQuery;
+  activeAssetIdRef.current = activeAssetId;
+  selectionQueryKeyRef.current = selectionQueryKey;
 
   const setCurrentLibraryId = useCallback((next: ValueUpdater<number | null>) => {
     setAssetQuery((current) => {
@@ -900,8 +927,10 @@ export default function App() {
     [libraries, currentLibraryId],
   );
   const activeAsset = useMemo(
-    () => assets.find((asset) => asset.id === activeAssetId) ?? null,
-    [activeAssetId, assets],
+    () =>
+      assets.find((asset) => asset.id === activeAssetId) ??
+      (activeAssetSnapshot?.id === activeAssetId ? activeAssetSnapshot : null),
+    [activeAssetId, activeAssetSnapshot, assets],
   );
   const previewNeighbors = useMemo(() => {
     if (viewMode !== "single" || activeAssetId === null) return [];
@@ -1016,7 +1045,9 @@ export default function App() {
       ? "默认收藏"
       : filter.collectionId !== null
         ? "收藏夹"
-        : (selectedLibrary?.name ?? "未选择图库"));
+        : allSourceActive
+          ? "全部照片"
+          : (selectedLibrary?.name ?? "未选择图库"));
   const effectiveGridColumns = gridColumns;
   const currentScope = useMemo<AssetScopeInputV1>(() => {
     const ids = stableAssetIds(selectedAssetIds);
@@ -1085,11 +1116,13 @@ export default function App() {
       if (!active) return;
       if (libraryResult.status === "fulfilled") {
         setLibraries(libraryResult.value);
-        setCurrentLibraryId((current) =>
-          current !== null && libraryResult.value.some((library) => library.id === current)
-            ? current
-            : (libraryResult.value[0]?.id ?? null),
-        );
+        if (!allSourceActiveRef.current) {
+          setCurrentLibraryId((current) =>
+            current !== null && libraryResult.value.some((library) => library.id === current)
+              ? current
+              : (libraryResult.value[0]?.id ?? null),
+          );
+        }
       } else {
         setError(messageFrom(libraryResult.reason));
       }
@@ -1112,6 +1145,13 @@ export default function App() {
     const timeout = window.setTimeout(() => setSearchPending(false), TEXT_SEARCH_DEBOUNCE_MS);
     return () => window.clearTimeout(timeout);
   }, [filter.search, searchPending]);
+
+  useEffect(() => {
+    if (previousSelectionQueryKeyRef.current === selectionQueryKey) return;
+    previousSelectionQueryKeyRef.current = selectionQueryKey;
+    setSelectedAssetIds([]);
+    setSelectionAnchorId(null);
+  }, [selectionQueryKey]);
 
   useEffect(() => {
     let active = true;
@@ -1140,14 +1180,42 @@ export default function App() {
       pageSize: PAGE_SIZE,
     });
     void request
-      .then((result) => {
+      .then(async (result) => {
+        if (!active || generation !== assetLoadGenerationRef.current) return;
+        const fullQuery = assetQueryFromV1({ ...assetQuery, page: 1, pageSize: PAGE_SIZE });
+        let resolvedActive: AssetListItem | null | undefined;
+        for (let attempt = 0; attempt < 3; attempt += 1) {
+          const candidateId = activeAssetIdRef.current;
+          if (candidateId === null) {
+            resolvedActive = null;
+            break;
+          }
+          let match = result.items.find((item) => item.id === candidateId) ?? null;
+          if (!match) {
+            try {
+              match = await fetchAssetMembership(fullQuery, candidateId);
+            } catch (reason) {
+              if (active && generation === assetLoadGenerationRef.current) {
+                setError(messageFrom(reason));
+              }
+            }
+          }
+          if (!active || generation !== assetLoadGenerationRef.current) return;
+          if (activeAssetIdRef.current !== candidateId) continue;
+          resolvedActive = match ?? result.items[0] ?? null;
+          break;
+        }
+        if (resolvedActive === undefined) {
+          const currentId = activeAssetIdRef.current;
+          resolvedActive =
+            result.items.find((item) => item.id === currentId) ?? result.items[0] ?? null;
+        }
         if (!active || generation !== assetLoadGenerationRef.current) return;
         setAssets(result.items);
         setAssetTotal(result.total);
-        setActiveAssetId((current) => {
-          if (current && result.items.some((item) => item.id === current)) return current;
-          return null;
-        });
+        setActiveAssetId(resolvedActive?.id ?? null);
+        setActiveAssetSnapshot(resolvedActive);
+        setDetailAsset(resolvedActive);
         nextAssetPageRef.current = result.page + 1;
         const nextHasMore = result.items.length > 0 && result.page * result.pageSize < result.total;
         hasMoreAssetsRef.current = nextHasMore;
@@ -1185,6 +1253,7 @@ export default function App() {
       .then((detail) => {
         if (active && detail) {
           setDetailAsset(detail);
+          if (activeAssetIdRef.current === detail.id) setActiveAssetSnapshot(detail);
           setAssets((current) =>
             current.map((item) => (item.id === detail.id ? { ...item, ...detail } : item)),
           );
@@ -1556,6 +1625,9 @@ export default function App() {
         const detail = await updateAssetRatingApi(assetId, rating);
         if (manualMarkRequestVersionRef.current.get(assetId) === requestVersion) {
           applyDetailUpdate(detail);
+          if (groupBy === "rating" || assetQuery.filter.ratings.length > 0) {
+            requestDataRefresh(true);
+          }
         }
       } catch (reason) {
         if (manualMarkRequestVersionRef.current.get(assetId) === requestVersion) {
@@ -1564,7 +1636,13 @@ export default function App() {
         setError(messageFrom(reason));
       }
     },
-    [applyAssetMarkUpdate, applyDetailUpdate],
+    [
+      applyAssetMarkUpdate,
+      applyDetailUpdate,
+      assetQuery.filter.ratings.length,
+      groupBy,
+      requestDataRefresh,
+    ],
   );
 
   const editAssetColorLabel = useCallback(
@@ -1577,6 +1655,7 @@ export default function App() {
         const detail = await updateAssetColorLabelApi(assetId, colorLabel);
         if (manualMarkRequestVersionRef.current.get(assetId) === requestVersion) {
           applyDetailUpdate(detail);
+          if (assetQuery.filter.colorLabels.length > 0) requestDataRefresh(true);
         }
       } catch (reason) {
         if (manualMarkRequestVersionRef.current.get(assetId) === requestVersion) {
@@ -1585,7 +1664,12 @@ export default function App() {
         setError(messageFrom(reason));
       }
     },
-    [applyAssetMarkUpdate, applyDetailUpdate],
+    [
+      applyAssetMarkUpdate,
+      applyDetailUpdate,
+      assetQuery.filter.colorLabels.length,
+      requestDataRefresh,
+    ],
   );
 
   async function editAssetRatingForSelection(assetId: number, rating: number) {
@@ -1758,6 +1842,8 @@ export default function App() {
   }
 
   function selectLibrary(id: number) {
+    allSourceActiveRef.current = false;
+    setAllSourceActive(false);
     setAssetQuery((current) =>
       updateAssetQueryBrowseRoot(
         { ...current, filter: emptyAssetFilter },
@@ -1765,6 +1851,7 @@ export default function App() {
       ),
     );
     setActiveAssetId(null);
+    setActiveAssetSnapshot(null);
     setDetailAsset(null);
     setSelectionAnchorId(null);
     setSelectedAssetIds([]);
@@ -1773,8 +1860,11 @@ export default function App() {
   }
 
   function selectFavoriteSource() {
+    allSourceActiveRef.current = false;
+    setAllSourceActive(false);
     setWorkflowTool(null);
     setActiveAssetId(null);
+    setActiveAssetSnapshot(null);
     setDetailAsset(null);
     setSelectionAnchorId(null);
     setSelectedAssetIds([]);
@@ -1782,14 +1872,30 @@ export default function App() {
   }
 
   function selectCollectionSource(collectionId: number) {
+    allSourceActiveRef.current = false;
+    setAllSourceActive(false);
     setWorkflowTool(null);
     setActiveAssetId(null);
+    setActiveAssetSnapshot(null);
     setDetailAsset(null);
     setSelectionAnchorId(null);
     setSelectedAssetIds([]);
     setAssetQuery((current) =>
       updateAssetQueryBrowseRoot(current, { kind: "collection", collectionId }),
     );
+  }
+
+  function selectAllSource() {
+    allSourceActiveRef.current = true;
+    setAllSourceActive(true);
+    setWorkflowTool(null);
+    setWorkspaceMode("library");
+    setActiveAssetId(null);
+    setActiveAssetSnapshot(null);
+    setDetailAsset(null);
+    setSelectionAnchorId(null);
+    setSelectedAssetIds([]);
+    setAssetQuery((current) => updateAssetQueryBrowseRoot(current, { kind: "all" }));
   }
 
   async function createSidebarCollection(name: string, parentCollectionId: number | null) {
@@ -1898,6 +2004,7 @@ export default function App() {
 
   const focusAsset = useCallback((asset: AssetListItem) => {
     setActiveAssetId(asset.id);
+    setActiveAssetSnapshot(asset);
     setDetailAsset(asset);
   }, []);
 
@@ -1910,6 +2017,7 @@ export default function App() {
         if (nextAsset) focusAsset(nextAsset);
         else {
           setActiveAssetId(null);
+          setActiveAssetSnapshot(null);
           setDetailAsset(null);
         }
       }
@@ -1947,7 +2055,10 @@ export default function App() {
     // follows the review result.
     setActiveAssetId(assetId);
     const asset = assetsRef.current.find((item) => item.id === assetId);
-    if (asset) setDetailAsset(asset);
+    if (asset) {
+      setActiveAssetSnapshot(asset);
+      setDetailAsset(asset);
+    }
     setSelectionAnchorId(assetId);
   }
 
@@ -1957,6 +2068,7 @@ export default function App() {
     setViewMode("grid");
     setActiveAssetId(assetId);
     const knownAsset = assetsRef.current.find((asset) => asset.id === assetId);
+    setActiveAssetSnapshot(knownAsset ?? null);
     setDetailAsset(knownAsset ?? null);
     setSelectionAnchorId(assetId);
 
@@ -2008,7 +2120,10 @@ export default function App() {
   function toggleAssetSelectionById(assetId: number, modifiers: SelectionModifiers = {}) {
     setActiveAssetId(assetId);
     const asset = assetsRef.current.find((item) => item.id === assetId);
-    if (asset) setDetailAsset(asset);
+    if (asset) {
+      setActiveAssetSnapshot(asset);
+      setDetailAsset(asset);
+    }
     if (modifiers.shiftKey) {
       const range = selectionRange(assetId);
       if (range) {
@@ -2070,6 +2185,27 @@ export default function App() {
     (delta: -1 | 1) => {
       if (!activeAsset) return;
       const index = assets.findIndex((asset) => asset.id === activeAsset.id);
+      if (index < 0) {
+        const requestedAssetId = activeAsset.id;
+        const requestedQueryKey = selectionQueryKeyRef.current;
+        void fetchAssetNeighbor(
+          assetQueryFromV1({ ...assetQueryRef.current, page: 1, pageSize: PAGE_SIZE }),
+          requestedAssetId,
+          delta > 0 ? "next" : "previous",
+        )
+          .then((neighbor) => {
+            if (
+              !neighbor ||
+              activeAssetIdRef.current !== requestedAssetId ||
+              selectionQueryKeyRef.current !== requestedQueryKey
+            ) {
+              return;
+            }
+            selectPreview(neighbor);
+          })
+          .catch((reason: unknown) => setError(messageFrom(reason)));
+        return;
+      }
       const target = assets[index + delta];
       if (target) {
         selectPreview(target);
@@ -2109,6 +2245,7 @@ export default function App() {
       if (latestQuery.libraryId !== null && removedSet.has(latestQuery.libraryId)) {
         setCurrentLibraryId(remaining[0]?.id ?? null);
         setActiveAssetId(null);
+        setActiveAssetSnapshot(null);
         setSelectedAssetIds([]);
         setSelectionAnchorId(null);
         setPage(1);
@@ -2694,7 +2831,7 @@ export default function App() {
         <AppNavigationRail
           activeView={navigationView}
           settingsActive={settingsOpen}
-          hasLibrary={selectedLibrary !== null}
+          hasBrowseScope={browseRootActive}
           onOpenLibrary={() => {
             setWorkspaceMode("library");
             setWorkflowTool(null);
@@ -2705,14 +2842,12 @@ export default function App() {
           }}
           onOpenSettings={openSettingsDialog}
         />
-        {workspaceMode === "organization" && selectedLibrary ? (
+        {workspaceMode === "organization" && browseRootActive ? (
           <main className="center-workspace organization-mode-shell">
-            <OrganizationWorkspace
-              library={selectedLibrary}
+            <CopyExportWorkspace
+              query={fullAssetQuery}
               selectedAssetIds={selectedAssetIds}
-              filteredCount={assetTotal}
-              scopeInput={currentScope}
-              scopeDescription={currentScopeDescription}
+              matchedCount={assetTotal}
               onClose={() => setWorkspaceMode("library")}
             />
           </main>
@@ -2727,6 +2862,7 @@ export default function App() {
               filter={filter}
               collections={collections}
               favoriteSourceActive={filter.favoriteOnly}
+              allSourceActive={allSourceActive}
               activeCollectionId={filter.collectionId}
               browseRootActive={browseRootActive}
               libraryPanelRatio={sidebarLibraryRatio}
@@ -2754,6 +2890,7 @@ export default function App() {
               }
               onFilterChange={updateFilter}
               onSelectFavorites={selectFavoriteSource}
+              onSelectAll={selectAllSource}
               onSelectCollection={selectCollectionSource}
               onRenameCollection={(collection) =>
                 setCollectionDialogRequest({ kind: "rename", collection })
@@ -2793,7 +2930,7 @@ export default function App() {
                   <>
                     <div className="content-toolbar">
                       <div className="content-toolbar-summary">
-                        <strong>{assetTotal.toLocaleString()} 张</strong>
+                        <strong>全部匹配 {assetTotal.toLocaleString()} 张</strong>
                         <span>
                           {activeFilterCount
                             ? browseRootLabel + " · " + activeFilterCount + " 项筛选"
@@ -2892,10 +3029,13 @@ export default function App() {
                         >
                           {assets.length ? (
                             <GridWorkspace
-                              key={groupBy}
+                              key={`${groupBy}:${fullAssetQueryKey}`}
                               assets={assets}
+                              query={fullAssetQuery}
+                              refreshKey={refreshKey}
                               gridColumns={effectiveGridColumns}
                               active={activeAsset}
+                              activeAssetId={activeAssetId}
                               selectedAssetIds={selectedAssetIds}
                               groupBy={groupBy}
                               semanticCatalog={semanticCatalog}
@@ -3168,14 +3308,14 @@ type AppNavigationView = "library" | "organization";
 function AppNavigationRail({
   activeView,
   settingsActive,
-  hasLibrary,
+  hasBrowseScope,
   onOpenLibrary,
   onOpenOrganization,
   onOpenSettings,
 }: {
   activeView: AppNavigationView;
   settingsActive: boolean;
-  hasLibrary: boolean;
+  hasBrowseScope: boolean;
   onOpenLibrary: () => void;
   onOpenOrganization: () => void;
   onOpenSettings: () => void;
@@ -3208,7 +3348,7 @@ function AppNavigationRail({
           aria-label="整理预览"
           aria-pressed={activeView === "organization"}
           title="整理预览"
-          disabled={!hasLibrary}
+          disabled={!hasBrowseScope}
           onClick={onOpenOrganization}
         >
           <BooksIcon width="20" height="20" />
@@ -3377,8 +3517,11 @@ function PanelResizeHandle({
 
 const GridWorkspace = memo(function GridWorkspace({
   assets,
+  query,
+  refreshKey,
   gridColumns,
   active,
+  activeAssetId,
   selectedAssetIds,
   groupBy,
   semanticCatalog,
@@ -3393,8 +3536,11 @@ const GridWorkspace = memo(function GridWorkspace({
   onToggleFavorite,
 }: {
   assets: AssetListItem[];
+  query: AssetQuery;
+  refreshKey: number;
   gridColumns: number;
   active: AssetListItem | null;
+  activeAssetId: number | null;
   selectedAssetIds: number[];
   groupBy: AssetGroupBy;
   semanticCatalog: SemanticLabelDescriptor[];
@@ -3408,7 +3554,6 @@ const GridWorkspace = memo(function GridWorkspace({
   favoriteAssetIds: Set<number>;
   onToggleFavorite: (assetId: number) => void;
 }) {
-  const [collapsedGroups, setCollapsedGroups] = useState<Set<string>>(new Set());
   const selectedAssetIdSet = useMemo(() => new Set(selectedAssetIds), [selectedAssetIds]);
   const thumbnailProfile = gridThumbnailProfileForColumns(gridColumns);
 
@@ -3440,115 +3585,27 @@ const GridWorkspace = memo(function GridWorkspace({
         ))}
       </section>
     );
-  const sections = new Map<string, AssetListItem[]>();
-  for (const asset of assets) {
-    const key = groupValueForAsset(asset, groupBy, semanticCatalog);
-    const section = sections.get(key) ?? [];
-    section.push(asset);
-    sections.set(key, section);
-  }
   return (
-    <div className="semantic-groups">
-      {[...sections].map(([id, items], index) => {
-        const groupKey = `${groupBy}:${id}`;
-        const collapsed = collapsedGroups.has(groupKey);
-        const groupPanelId = `semantic-group-${index}`;
-        return (
-          <section className={collapsed ? "is-collapsed" : ""} key={id}>
-            <button
-              type="button"
-              className="group-heading"
-              aria-expanded={!collapsed}
-              aria-controls={groupPanelId}
-              aria-label={`${collapsed ? "展开" : "折叠"}分组：${id}（${items.length} 张）`}
-              onClick={() =>
-                setCollapsedGroups((current) => {
-                  const next = new Set(current);
-                  if (next.has(groupKey)) next.delete(groupKey);
-                  else next.add(groupKey);
-                  return next;
-                })
-              }
-            >
-              <ChevronIcon
-                className={
-                  collapsed ? "group-heading-chevron is-collapsed" : "group-heading-chevron"
-                }
-                width="13"
-                height="13"
-              />
-              <strong>{id}</strong>
-              <span className="group-heading-count">{items.length} 张</span>
-            </button>
-            <div id={groupPanelId} className="semantic-group-items" hidden={collapsed}>
-              <div
-                className="asset-grid"
-                onClick={(event) => {
-                  if (event.target === event.currentTarget) onClearSelection();
-                }}
-              >
-                {items.map((asset) => (
-                  <AssetCard
-                    key={asset.id}
-                    asset={asset}
-                    thumbnailProfile={thumbnailProfile}
-                    active={active?.id === asset.id}
-                    selected={selectedAssetIdSet.has(asset.id)}
-                    onStartDrag={onStartAssetDrag}
-                    onSelect={onSelect}
-                    onToggleSelection={onToggleSelection}
-                    onOpen={onOpen}
-                    onUpdateRating={onUpdateRating}
-                    onUpdateColorLabel={onUpdateColorLabel}
-                    favorite={favoriteAssetIds.has(asset.id)}
-                    onToggleFavorite={onToggleFavorite}
-                  />
-                ))}
-              </div>
-            </div>
-          </section>
-        );
-      })}
-    </div>
+    <GroupedAssetGrid
+      query={query}
+      refreshKey={refreshKey}
+      groupBy={groupBy}
+      gridColumns={gridColumns}
+      activeAssetId={activeAssetId}
+      selectedAssetIds={selectedAssetIds}
+      semanticCatalog={semanticCatalog}
+      onStartAssetDrag={onStartAssetDrag}
+      onSelect={onSelect}
+      onToggleSelection={onToggleSelection}
+      onOpen={onOpen}
+      onClearSelection={onClearSelection}
+      onUpdateRating={onUpdateRating}
+      onUpdateColorLabel={onUpdateColorLabel}
+      favoriteAssetIds={favoriteAssetIds}
+      onToggleFavorite={onToggleFavorite}
+    />
   );
 });
-
-function groupValueForAsset(
-  asset: AssetListItem,
-  groupBy: Exclude<AssetGroupBy, "none">,
-  semanticCatalog: SemanticLabelDescriptor[],
-): string {
-  switch (groupBy) {
-    case "primary_category": {
-      const value =
-        asset.classification.primaryCategory.effective ??
-        asset.semanticLabels.find((label) => label.isPrimary && label.categoryGroup === "scene")
-          ?.labelId;
-      return value ? classificationValueLabel(value, "primary", semanticCatalog) : "未分类";
-    }
-    case "auxiliary_tag": {
-      const value =
-        asset.classification.auxiliaryTags.effective[0] ??
-        asset.semanticLabels.find((label) => label.categoryGroup === "subject")?.labelId;
-      return value ? classificationValueLabel(value, "tag", semanticCatalog) : "未设置";
-    }
-    case "tone": {
-      const value = asset.classification.tone.effective ?? asset.toneLabel;
-      return value ? classificationValueLabel(value, "tone", semanticCatalog) : "未设置";
-    }
-    case "saturation_level": {
-      const value = asset.classification.saturationLevel.effective ?? asset.saturationLabel;
-      return value ? classificationValueLabel(value, "saturation", semanticCatalog) : "未设置";
-    }
-    case "dominant_color": {
-      const value =
-        asset.classification.dominantColorCategories.effective?.[0] ?? asset.dominantColorCategory;
-      return value ? classificationValueLabel(value, "color", semanticCatalog) : "未设置";
-    }
-    case "rating":
-      return asset.rating > 0 ? `${asset.rating} 星` : "未评分";
-  }
-}
 
 function SinglePreview({
   assets,
@@ -3653,6 +3710,10 @@ function ZoomablePreview({
     onPointerCancel,
     onDoubleClick,
     onImageLoad,
+    retryScreenPreview,
+    onScreenError,
+    onOriginalError,
+    retryOriginalPreview,
   } = controller;
 
   return (
@@ -3705,21 +3766,46 @@ function ZoomablePreview({
                       height: event.currentTarget.naturalHeight,
                     })
             }
+            onError={
+              displaySource === controller.originalSource
+                ? onOriginalError
+                : displaySource === controller.screenSource
+                  ? onScreenError
+                  : undefined
+            }
           />
         ) : (
           <div className="preview-thumbnail-fallback">
             <Thumbnail asset={asset} />
           </div>
         )}
-        {loadState === "loading" ? <span className="preview-loading">正在加载原图…</span> : null}
+        {loadState === "loading" ? <span className="preview-loading">正在加载预览…</span> : null}
         {loadState === "error" ? (
-          <span className="preview-error">无法加载高清预览，请重试</span>
+          <>
+            <span className="preview-error" role="alert">
+              无法加载高清预览，当前显示缩略图
+            </span>
+            <div className="workflow-actions">
+              <button type="button" onClick={retryScreenPreview}>
+                重试预览
+              </button>
+            </div>
+          </>
         ) : null}
         {originalState === "loading" ? (
           <span className="preview-loading">正在加载原图…</span>
         ) : null}
         {originalState === "error" ? (
-          <span className="preview-error">原图加载失败，仍可使用屏幕预览</span>
+          <>
+            <span className="preview-error" role="alert">
+              原图加载失败，仍可使用屏幕预览
+            </span>
+            <div className="workflow-actions">
+              <button type="button" onClick={retryOriginalPreview}>
+                重试原图
+              </button>
+            </div>
+          </>
         ) : null}
       </div>
       <div className="single-caption">

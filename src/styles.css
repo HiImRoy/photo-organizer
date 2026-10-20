@@ -12876,7 +12876,7 @@ button.primary-action:active:not(:disabled) {
   color: var(--text-secondary);
   text-align: left;
   border: 0;
-  border-radius: 0;
+  border-radius: var(--control-radius);
   background: transparent;
   cursor: pointer;
   font: inherit;

@@ -24,8 +24,8 @@ pub const TOKENIZER_FILE: &str = "categories_places365.txt";
 pub const IO_FILE: &str = "IO_places365.txt";
 pub const MODEL_SHA256: &str = "3c3cd0d42693e2957fcaa0bc365ce78e169a2e1162356742adfbd11077e8f7bf";
 pub const TOKENIZER_SHA256: &str =
-    "6cc3f1f8eae85b7016dc634e2d333cdcce5fd16cfada4afd87977fff5f8b12ba";
-pub const IO_SHA256: &str = "d7e6abfeb228d789720326e630bedd231a7eaedcae8fd13d6d9dcd8eca95f59e";
+    "2affba635eb657e7ca95f4e6cc69bd9fac29ef4c32aeb83cafdfcd06ec6a1ea6";
+pub const IO_SHA256: &str = "0a65ceb7264413a15bb069a87be7ecf9ebb572a6803d48de2827a1d25fe287ba";
 pub const TINYCLIP_MODEL_NAME: &str = "TinyCLIP-ViT-8M-16-Text-3M-YFCC15M";
 pub const TINYCLIP_MODEL_VERSION: &str = "onnx-int8-2025-08-06";
 pub const TINYCLIP_MODEL_FILE: &str = "model-int8.onnx";
@@ -3132,6 +3132,21 @@ mod tests {
         verify_sha256(&runtime_path, RUNTIME_SHA256).expect("bundled runtime hash");
         verify_sha256(&shared_runtime, RUNTIME_SHARED_SHA256)
             .expect("bundled shared provider hash");
+    }
+
+    #[test]
+    fn places365_resource_text_files_match_the_documented_raw_byte_hashes() {
+        let resource_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("resources")
+            .join("models")
+            .join("places365-resnet18");
+        let categories_path = resource_dir.join(TOKENIZER_FILE);
+        let io_path = resource_dir.join(IO_FILE);
+
+        verify_sha256(&categories_path, TOKENIZER_SHA256)
+            .expect("Places365 categories should match the documented raw-byte hash");
+        verify_sha256(&io_path, IO_SHA256)
+            .expect("Places365 IO map should match the documented raw-byte hash");
     }
 
     #[cfg(windows)]

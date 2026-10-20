@@ -803,22 +803,62 @@ function SimilarityView({
   );
 }
 
-function CompareView({ assetIds }: { assetIds: number[] }) {
-  const [previews, setPreviews] = useState<Record<number, string>>({});
-  const [fit, setFit] = useState<"contain" | "cover">("contain");
+interface ComparePreviewState {
+  assetId: number;
+  attempt: number;
+  status: "ready" | "error";
+  source?: string;
+}
+
+function ComparePreviewSlot({ assetId, fit }: { assetId: number; fit: "contain" | "cover" }) {
+  const [previewState, setPreviewState] = useState<ComparePreviewState | null>(null);
+  const [attempt, setAttempt] = useState(0);
+  const currentPreview =
+    previewState?.assetId === assetId && previewState.attempt === attempt ? previewState : null;
+
   useEffect(() => {
     let cancelled = false;
-    void Promise.all(
-      assetIds.map(
-        async (assetId) => [assetId, await fetchPreview(assetId, "screen", 1600, 1200)] as const,
-      ),
-    ).then((items) => {
-      if (!cancelled) setPreviews(Object.fromEntries(items));
-    });
+    void fetchPreview(assetId, "screen", 1600, 1200)
+      .then((source) => {
+        if (cancelled) return;
+        setPreviewState({ assetId, attempt, status: "ready", source });
+      })
+      .catch(() => {
+        if (!cancelled) setPreviewState({ assetId, attempt, status: "error" });
+      });
     return () => {
       cancelled = true;
     };
-  }, [assetIds]);
+  }, [assetId, attempt]);
+
+  return (
+    <figure>
+      {currentPreview?.status === "ready" && currentPreview.source ? (
+        <img
+          src={currentPreview.source}
+          alt={`比较图片 ${assetId}`}
+          style={{ objectFit: fit }}
+          onError={() => setPreviewState({ assetId, attempt, status: "error" })}
+        />
+      ) : currentPreview?.status === "error" ? (
+        <div className="compare-preview-error" role="alert">
+          <span>这张图片的预览加载失败</span>
+          <div className="workflow-actions">
+            <button type="button" onClick={() => setAttempt((current) => current + 1)}>
+              重试预览
+            </button>
+          </div>
+        </div>
+      ) : (
+        <span role="status">加载预览…</span>
+      )}
+      <figcaption>#{assetId}</figcaption>
+    </figure>
+  );
+}
+
+function CompareView({ assetIds }: { assetIds: number[] }) {
+  const [fit, setFit] = useState<"contain" | "cover">("contain");
   return (
     <div className="workflow-section compare-section">
       <SectionIntro title="双图 / 四图比较" metric={`${assetIds.length} / 4`} />
@@ -841,18 +881,7 @@ function CompareView({ assetIds }: { assetIds: number[] }) {
       {assetIds.length >= 2 ? (
         <div className={`compare-grid compare-count-${assetIds.length}`}>
           {assetIds.map((assetId) => (
-            <figure key={assetId}>
-              {previews[assetId] ? (
-                <img
-                  src={previews[assetId]}
-                  alt={`比较图片 ${assetId}`}
-                  style={{ objectFit: fit }}
-                />
-              ) : (
-                <span>加载预览…</span>
-              )}
-              <figcaption>#{assetId}</figcaption>
-            </figure>
+            <ComparePreviewSlot key={assetId} assetId={assetId} fit={fit} />
           ))}
         </div>
       ) : (
@@ -870,6 +899,14 @@ interface EditorPlanState {
   assetId: number;
   recipe: EditRecipe;
   generation: number;
+}
+
+interface EditorPreviewState {
+  assetId: number;
+  recipe: EditRecipe;
+  status: "loading" | "ready" | "error";
+  source?: string;
+  error?: string;
 }
 
 function cloneEditRecipe(recipe: EditRecipe): EditRecipe {
@@ -923,7 +960,8 @@ function EditorView({
   onError: (message: string | null) => void;
 }) {
   const [recipe, setRecipe] = useState<EditRecipe>(emptyEditRecipe);
-  const [preview, setPreview] = useState<string | null>(null);
+  const [editPreview, setEditPreview] = useState<EditorPreviewState | null>(null);
+  const [previewAttempt, setPreviewAttempt] = useState(0);
   const [planState, setPlanState] = useState<EditorPlanState | null>(null);
   const [completedExport, setCompletedExport] = useState<EditExportResult | null>(null);
   const [rollbackPlan, setRollbackPlan] = useState<EditRollbackPlan | null>(null);
@@ -952,20 +990,35 @@ function EditorView({
   useEffect(() => {
     if (!asset) return;
     const version = ++requestVersion.current;
+    const requestedRecipe = cloneEditRecipe(recipe);
     const timer = window.setTimeout(() => {
-      void renderEditPreview(asset.id, recipe)
+      void renderEditPreview(asset.id, requestedRecipe)
         .then((url) => {
-          if (requestVersion.current === version) setPreview(url);
+          if (requestVersion.current === version) {
+            setEditPreview({
+              assetId: asset.id,
+              recipe: requestedRecipe,
+              status: "ready",
+              source: url,
+            });
+          }
         })
         .catch((reason) => {
-          if (requestVersion.current === version) onError(messageFrom(reason));
+          if (requestVersion.current === version) {
+            setEditPreview({
+              assetId: asset.id,
+              recipe: requestedRecipe,
+              status: "error",
+              error: messageFrom(reason),
+            });
+          }
         });
     }, 180);
     return () => {
       window.clearTimeout(timer);
       if (requestVersion.current === version) requestVersion.current += 1;
     };
-  }, [asset, onError, recipe]);
+  }, [asset, previewAttempt, recipe]);
 
   const advancePlanRequestGeneration = () => {
     const generation = planRequestGeneration.current + 1;
@@ -1184,6 +1237,11 @@ function EditorView({
     return { x: 0, y: (1 - height) / 2, width: 1, height };
   }, [asset]);
 
+  const currentPreview =
+    asset && editPreview?.assetId === asset.id && editRecipesEqual(editPreview.recipe, recipe)
+      ? editPreview
+      : null;
+
   if (!asset) {
     return (
       <EmptyWorkflow
@@ -1196,10 +1254,36 @@ function EditorView({
   return (
     <div className="workflow-section editor-layout">
       <div className="editor-canvas">
-        {preview ? (
-          <img src={preview} alt={`${asset.fileName} 编辑预览`} />
+        {currentPreview?.status === "ready" && currentPreview.source ? (
+          <img
+            src={currentPreview.source}
+            alt={`${asset.fileName} 编辑预览`}
+            onError={() =>
+              setEditPreview({
+                assetId: asset.id,
+                recipe: cloneEditRecipe(recipe),
+                status: "error",
+                error: "编辑预览图像无法显示，请重试。",
+              })
+            }
+          />
+        ) : currentPreview?.status === "error" ? (
+          <div className="workflow-banner is-error" role="alert">
+            <span>{currentPreview.error || "预览生成失败。"}</span>
+            <div className="workflow-actions">
+              <button
+                type="button"
+                onClick={() => {
+                  setEditPreview(null);
+                  setPreviewAttempt((attempt) => attempt + 1);
+                }}
+              >
+                重试预览
+              </button>
+            </div>
+          </div>
         ) : (
-          <span>生成本地预览…</span>
+          <span role="status">生成本地预览…</span>
         )}
         <div className="editor-canvas-meta">
           <strong>{asset.fileName}</strong>
@@ -1290,7 +1374,16 @@ function EditorView({
             <strong>确认创建新文件</strong>
             <span title={plan.targetPath}>{plan.targetPath}</span>
             <small>目标已校验：不存在、位于图库根目录之外。执行前会再次校验源指纹。</small>
-            <button type="button" disabled={busy} onClick={confirmExport}>
+            <small id="edit-export-unavailable-note" role="status">
+              编辑副本导出暂不可用；可继续预览和保存编辑方案。
+            </small>
+            <button
+              type="button"
+              disabled
+              aria-describedby="edit-export-unavailable-note"
+              title="编辑副本导出暂不可用"
+              onClick={confirmExport}
+            >
               确认另存副本
             </button>
           </div>

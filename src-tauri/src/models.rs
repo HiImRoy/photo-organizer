@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::classification::EffectiveClassification;
+use crate::export_file_safety::DurableFileIdentity;
 
 pub const ASSET_QUERY_VERSION: u8 = 2;
 
@@ -182,6 +183,44 @@ pub struct SemanticLabelResult {
 pub struct AssetPage {
     pub items: Vec<AssetGridItem>,
     pub total: i64,
+    pub page: u32,
+    pub page_size: u32,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AssetGroupBy {
+    PrimaryCategory,
+    AuxiliaryTag,
+    Tone,
+    SaturationLevel,
+    DominantColor,
+    Rating,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum AssetNeighborDirection {
+    Next,
+    Previous,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct AssetGroupSummary {
+    /// Stable machine key. Missing values use `__missing__` and never use the
+    /// localized display label as an identifier.
+    pub key: String,
+    pub label: Option<String>,
+    pub unique_count: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct AssetGroupPage {
+    pub groups: Vec<AssetGroupSummary>,
+    pub group_count: i64,
+    pub global_unique_total: i64,
     pub page: u32,
     pub page_size: u32,
 }
@@ -884,4 +923,225 @@ pub struct OrganizationPlanRecord {
     pub summary: OrganizationPlanSummary,
     pub created_at: String,
     pub updated_at: String,
+}
+
+/// Query scope uses the complete v2 query and deliberately ignores its browse
+/// page. Explicit IDs are globally unique within the local catalog.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(
+    tag = "kind",
+    rename_all = "snake_case",
+    rename_all_fields = "camelCase"
+)]
+pub enum OrganizationPlanScopeV2 {
+    Query { query: Box<AssetQuery> },
+    ExplicitAssets { asset_ids: Vec<i64> },
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum CopyExportLayout {
+    #[default]
+    PreserveOriginal,
+    CaptureYearMonth,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum CopyExportConflictPolicy {
+    #[default]
+    Block,
+    Skip,
+    Sequence,
+    ShortHash,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum MissingCaptureTimePolicy {
+    #[default]
+    Block,
+    PreserveOriginalFolders,
+    UnknownFolder,
+    Skip,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CopyExportRules {
+    pub version: String,
+    #[serde(default)]
+    pub layout: CopyExportLayout,
+    #[serde(default)]
+    pub conflict_policy: CopyExportConflictPolicy,
+    #[serde(default)]
+    pub missing_capture_time_policy: MissingCaptureTimePolicy,
+}
+
+impl Default for CopyExportRules {
+    fn default() -> Self {
+        Self {
+            version: "copy-export-rules-v1".into(),
+            layout: CopyExportLayout::PreserveOriginal,
+            conflict_policy: CopyExportConflictPolicy::Block,
+            missing_capture_time_policy: MissingCaptureTimePolicy::Block,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct OrganizationTargetV2 {
+    pub parent_grant_id: String,
+    pub child_name: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct CreateOrganizationPlanV2Request {
+    pub scope: OrganizationPlanScopeV2,
+    pub target: OrganizationTargetV2,
+    #[serde(default)]
+    pub rules: CopyExportRules,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct TargetParentGrantResponse {
+    pub grant_id: String,
+    pub display_path: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum CopyPlanItemStatus {
+    Ready,
+    Blocked,
+    Skipped,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum CopyPlanStatus {
+    Ready,
+    Blocked,
+    Stale,
+    Consumed,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CopyPlanIssue {
+    pub code: String,
+    pub detail: String,
+    pub asset_id: Option<i64>,
+    pub source_path: Option<String>,
+    pub target_path: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct OrganizationPlanItemV2 {
+    pub ordinal: u32,
+    pub asset_id: i64,
+    pub library_id: i64,
+    pub source_root_path: String,
+    #[serde(default, skip_serializing)]
+    pub source_root_identity: Option<DurableFileIdentity>,
+    pub source_path: String,
+    pub source_relative_path: String,
+    #[serde(default, skip_serializing)]
+    pub source_file_identity: Option<DurableFileIdentity>,
+    pub source_fingerprint_blake3: String,
+    pub source_size: u64,
+    pub source_modified_at: i64,
+    /// Raw filesystem timestamp from the same metadata handle as `source_file_identity`.
+    /// The catalog timestamp above is Unix milliseconds and must never be used
+    /// where the file-operation service expects a platform-native timestamp.
+    #[serde(default, skip_serializing)]
+    pub source_modified_filetime: u64,
+    pub capture_time: Option<String>,
+    pub classification_revision: i64,
+    pub target_relative_path: String,
+    pub target_path: String,
+    pub status: CopyPlanItemStatus,
+    pub issues: Vec<CopyPlanIssue>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct OrganizationPlanSummaryV2 {
+    pub plan_id: String,
+    pub revision: String,
+    pub status: CopyPlanStatus,
+    pub scope: OrganizationPlanScopeV2,
+    pub target_root: String,
+    pub matched_count: u64,
+    pub eligible_count: u64,
+    pub skipped_count: u64,
+    pub blocked_count: u64,
+    pub estimated_bytes: u64,
+    pub issues: Vec<CopyPlanIssue>,
+    pub snapshot_blake3: String,
+    pub created_at: String,
+    pub rules: CopyExportRules,
+    pub tree: OrganizationTreeNode,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct OrganizationPlanV2 {
+    pub summary: OrganizationPlanSummaryV2,
+    pub items: Vec<OrganizationPlanItemV2>,
+    pub item_total: u64,
+    pub item_page: u32,
+    pub item_page_size: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct RecentOrganizationPlanV2 {
+    pub plan_id: String,
+    pub revision: String,
+    pub status: CopyPlanStatus,
+    pub target_root: String,
+    pub matched_count: u64,
+    pub eligible_count: u64,
+    pub blocked_count: u64,
+    pub created_at: String,
+}
+
+#[cfg(test)]
+mod organization_v2_contract_tests {
+    use super::{AssetQuery, OrganizationPlanScopeV2};
+
+    #[test]
+    fn organization_scope_uses_camel_case_asset_ids_and_keeps_query_v2() {
+        let ids = OrganizationPlanScopeV2::ExplicitAssets {
+            asset_ids: vec![7, 11],
+        };
+        let value = serde_json::to_value(ids).expect("scope serializes");
+        assert_eq!(value["kind"], "explicit_assets");
+        assert_eq!(value["assetIds"], serde_json::json!([7, 11]));
+        assert!(value.get("asset_ids").is_none());
+
+        let query: AssetQuery = serde_json::from_value(serde_json::json!({
+            "version": 2,
+            "root": {"kind":"favorites"},
+            "includeDescendants": true,
+            "filter": {},
+            "sort": "file_name",
+            "direction": "asc",
+            "page": 1,
+            "pageSize": 120
+        }))
+        .expect("existing query v2 must remain accepted");
+        let scope = OrganizationPlanScopeV2::Query {
+            query: Box::new(query),
+        };
+        let serialized = serde_json::to_value(scope).expect("scope serializes");
+        assert_eq!(serialized["kind"], "query");
+        assert_eq!(serialized["query"]["version"], 2);
+        assert_eq!(serialized["query"]["root"]["kind"], "favorites");
+    }
 }

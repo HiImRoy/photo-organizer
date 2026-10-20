@@ -2060,7 +2060,7 @@ mod tests {
 
         let linked_file = thumbnail_dir.join("linked-grid-640-v1.jpg");
         #[cfg(windows)]
-        std::os::windows::fs::symlink_file(&outside_file, &linked_file)
+        create_windows_symlink(&outside_file, &linked_file, false)
             .expect("create thumbnail file symlink");
         #[cfg(unix)]
         std::os::unix::fs::symlink(&outside_file, &linked_file)
@@ -2080,7 +2080,7 @@ mod tests {
 
         let linked_directory = thumbnail_dir.join("redirected");
         #[cfg(windows)]
-        std::os::windows::fs::symlink_dir(&outside_dir, &linked_directory)
+        create_windows_symlink(&outside_dir, &linked_directory, true)
             .expect("create thumbnail child directory symlink");
         #[cfg(unix)]
         std::os::unix::fs::symlink(&outside_dir, &linked_directory)
@@ -2090,7 +2090,7 @@ mod tests {
 
         let linked_root = temp.path().join("thumbnail-alias");
         #[cfg(windows)]
-        std::os::windows::fs::symlink_dir(&thumbnail_dir, &linked_root)
+        create_windows_symlink(&thumbnail_dir, &linked_root, true)
             .expect("create thumbnail directory symlink");
         #[cfg(unix)]
         std::os::unix::fs::symlink(&thumbnail_dir, &linked_root)
@@ -2099,6 +2099,48 @@ mod tests {
         std::fs::write(&owned_thumbnail, b"owned thumbnail fixture").expect("thumbnail fixture");
         candidate.analysis_path = linked_root.join("owned-grid-640-v1.jpg");
         assert!(analysis_path(&candidate, &linked_root).is_none());
+    }
+
+    #[cfg(windows)]
+    fn create_windows_symlink(
+        target: &std::path::Path,
+        link: &std::path::Path,
+        is_directory: bool,
+    ) -> std::io::Result<()> {
+        use std::os::windows::ffi::OsStrExt;
+
+        use windows::Win32::Storage::FileSystem::{
+            CreateSymbolicLinkW, SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE,
+            SYMBOLIC_LINK_FLAG_DIRECTORY, SYMBOLIC_LINK_FLAGS,
+        };
+        use windows::core::PCWSTR;
+
+        let target_wide = target
+            .as_os_str()
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect::<Vec<_>>();
+        let link_wide = link
+            .as_os_str()
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect::<Vec<_>>();
+        let mut flags = SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE.0;
+        if is_directory {
+            flags |= SYMBOLIC_LINK_FLAG_DIRECTORY.0;
+        }
+        let created = unsafe {
+            CreateSymbolicLinkW(
+                PCWSTR(link_wide.as_ptr()),
+                PCWSTR(target_wide.as_ptr()),
+                SYMBOLIC_LINK_FLAGS(flags),
+            )
+        };
+        if created {
+            Ok(())
+        } else {
+            Err(std::io::Error::last_os_error())
+        }
     }
 
     #[test]

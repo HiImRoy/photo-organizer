@@ -4,7 +4,11 @@ import { open, save } from "@tauri-apps/plugin-dialog";
 
 import type {
   AssetDetail,
+  AssetGroupField,
+  AssetGroupPage,
+  AssetGridItem,
   AssetPage,
+  AssetQuery,
   AssetQueryV1,
   BrowseNode,
   CollectionDeleteMode,
@@ -12,6 +16,12 @@ import type {
   CollectionMembershipMutation,
   CollectionSummary,
   ClassificationFieldDescriptor,
+  CopyExportJobView,
+  CopyExportPreflight,
+  CopyExportReconcileDecision,
+  CopyExportRuntimeStatus,
+  CopyExportStartResponse,
+  CreateOrganizationPlanV2Request,
   DuplicateGroup,
   EditExportPlan,
   EditExportResult,
@@ -24,7 +34,11 @@ import type {
   LocalSearchResponse,
   OrganizationIssue,
   OrganizationPlan,
+  OrganizationPlanSummaryV2,
   OrganizationPlanRequest,
+  OrganizationPlanV2,
+  RecentCopyExportJob,
+  RecentOrganizationPlanV2,
   ScanProgress,
   SemanticGroupSummary,
   SemanticLabelDescriptor,
@@ -34,11 +48,17 @@ import type {
   SimilarAsset,
   SimilarityClusterResponse,
   WorkflowAsset,
+  TargetParentGrantResponse,
 } from "./types";
 import { assetQueryFromV1 } from "./query";
 import type { VisualFixture } from "./test/visual-fixture";
 
 const desktopRuntime = isTauri();
+
+export function isDesktopRuntime(): boolean {
+  return desktopRuntime;
+}
+
 const loadVisualFixture = import.meta.env.DEV
   ? async (): Promise<LoadedVisualFixture | null> => {
       const tools = await import("./test/visual-fixture");
@@ -76,6 +96,124 @@ export async function chooseOrganizationTargetFolder(): Promise<string | null> {
     title: "选择整理预览目标根目录（不会创建目录）",
   });
   return typeof selection === "string" ? selection : null;
+}
+
+export async function grantOrganizationTargetParent(
+  path: string,
+): Promise<TargetParentGrantResponse> {
+  if (!desktopRuntime) throw new Error("选择整理目标仅在 PhotoOrganizer 桌面应用中可用。");
+  return invoke<TargetParentGrantResponse>("grant_organization_target_parent", { path });
+}
+
+export async function createOrganizationPlanV2(
+  request: CreateOrganizationPlanV2Request,
+): Promise<OrganizationPlanSummaryV2> {
+  if (!desktopRuntime) throw new Error("整理预览仅在 PhotoOrganizer 桌面应用中可用。");
+  return invoke<OrganizationPlanSummaryV2>("create_organization_plan_v2", { ...request });
+}
+
+export async function readOrganizationPlanV2(
+  planId: string,
+  itemPage = 1,
+  itemPageSize = 100,
+): Promise<OrganizationPlanV2> {
+  if (!desktopRuntime) throw new Error("读取整理预览仅在 PhotoOrganizer 桌面应用中可用。");
+  return invoke<OrganizationPlanV2>("read_organization_plan_v2", {
+    planId,
+    itemPage,
+    itemPageSize,
+  });
+}
+
+export async function listRecentOrganizationPlansV2(
+  limit = 20,
+): Promise<RecentOrganizationPlanV2[]> {
+  if (!desktopRuntime) throw new Error("读取整理历史仅在 PhotoOrganizer 桌面应用中可用。");
+  return invoke<RecentOrganizationPlanV2[]>("list_recent_organization_plans", { limit });
+}
+
+export async function preflightCopyExport(
+  resourceId: string,
+  operation: CopyExportPreflight["operation"],
+): Promise<CopyExportPreflight> {
+  if (!desktopRuntime) throw new Error("安全复制仅在 PhotoOrganizer 桌面应用中可用。");
+  return invoke<CopyExportPreflight>("copy_export_preflight", { resourceId, operation });
+}
+
+export async function startCopyExport(
+  planId: string,
+  authorizationToken: string,
+): Promise<CopyExportStartResponse> {
+  if (!desktopRuntime) throw new Error("安全复制仅在 PhotoOrganizer 桌面应用中可用。");
+  return invoke<CopyExportStartResponse>("copy_export_start", { planId, authorizationToken });
+}
+
+export async function getCopyExportJob(
+  jobId: string,
+  itemPage = 1,
+  itemPageSize = 100,
+): Promise<CopyExportJobView | null> {
+  if (!desktopRuntime) throw new Error("读取复制任务仅在 PhotoOrganizer 桌面应用中可用。");
+  return invoke<CopyExportJobView | null>("copy_export_get_job", {
+    jobId,
+    itemPage,
+    itemPageSize,
+  });
+}
+
+export async function listRecentCopyExportJobs(limit = 20): Promise<RecentCopyExportJob[]> {
+  if (!desktopRuntime) throw new Error("读取复制任务仅在 PhotoOrganizer 桌面应用中可用。");
+  return invoke<RecentCopyExportJob[]>("copy_export_list_recent_jobs", { limit });
+}
+
+export async function cancelCopyExport(jobId: string): Promise<boolean> {
+  if (!desktopRuntime) throw new Error("取消复制任务仅在 PhotoOrganizer 桌面应用中可用。");
+  return invoke<boolean>("copy_export_cancel", { jobId });
+}
+
+export async function getCopyExportRuntimeStatus(
+  jobId: string,
+): Promise<CopyExportRuntimeStatus | null> {
+  if (!desktopRuntime) throw new Error("读取复制进度仅在 PhotoOrganizer 桌面应用中可用。");
+  return invoke<CopyExportRuntimeStatus | null>("copy_export_runtime_status", { jobId });
+}
+
+export async function previewCopyExportResume(jobId: string): Promise<CopyExportPreflight> {
+  if (!desktopRuntime) throw new Error("恢复复制任务仅在 PhotoOrganizer 桌面应用中可用。");
+  return invoke<CopyExportPreflight>("copy_export_resume_preview", { jobId });
+}
+
+export async function resumeCopyExport(
+  jobId: string,
+  authorizationToken: string,
+): Promise<CopyExportStartResponse> {
+  if (!desktopRuntime) throw new Error("恢复复制任务仅在 PhotoOrganizer 桌面应用中可用。");
+  return invoke<CopyExportStartResponse>("copy_export_resume", { jobId, authorizationToken });
+}
+
+export async function reconcileCopyExportItem(
+  jobId: string,
+  ordinal: number,
+  decision: CopyExportReconcileDecision,
+): Promise<void> {
+  if (!desktopRuntime) throw new Error("核对复制任务仅在 PhotoOrganizer 桌面应用中可用。");
+  return invoke<void>("copy_export_reconcile_item", { jobId, ordinal, decision });
+}
+
+export async function previewCopyExportRollback(jobId: string): Promise<CopyExportPreflight> {
+  if (!desktopRuntime) throw new Error("撤销复制仅在 PhotoOrganizer 桌面应用中可用。");
+  return invoke<CopyExportPreflight>("copy_export_rollback_preview", { jobId });
+}
+
+export async function confirmCopyExportRollback(
+  jobId: string,
+  authorizationToken: string,
+): Promise<CopyExportStartResponse> {
+  if (!desktopRuntime) throw new Error("撤销复制仅在 PhotoOrganizer 桌面应用中可用。");
+  return invoke<CopyExportStartResponse>("copy_export_confirm_rollback", {
+    jobId,
+    authorizationToken,
+  });
 }
 
 export async function validateOrganizationRules(
@@ -180,6 +318,44 @@ export async function fetchAssets(query: AssetQueryV1): Promise<AssetPage> {
   return invoke<AssetPage>("query_assets", {
     query: assetQueryFromV1({ ...query, pageSize }),
   });
+}
+
+export async function fetchAssetMembership(
+  query: AssetQuery,
+  assetId: number,
+): Promise<AssetGridItem | null> {
+  if (!desktopRuntime) return null;
+  return invoke<AssetGridItem | null>("query_asset_membership", { query, assetId });
+}
+
+export async function fetchAssetNeighbor(
+  query: AssetQuery,
+  assetId: number,
+  direction: "next" | "previous",
+): Promise<AssetGridItem | null> {
+  if (!desktopRuntime) return null;
+  return invoke<AssetGridItem | null>("query_asset_neighbor", { query, assetId, direction });
+}
+
+export async function fetchAssetGroups(
+  query: AssetQuery,
+  groupBy: AssetGroupField,
+  page = 1,
+  pageSize = 100,
+): Promise<AssetGroupPage> {
+  if (!desktopRuntime) return { groups: [], groupCount: 0, globalUniqueTotal: 0, page, pageSize };
+  return invoke<AssetGroupPage>("query_asset_groups", { query, groupBy, page, pageSize });
+}
+
+export async function fetchAssetsInGroup(
+  query: AssetQuery,
+  groupBy: AssetGroupField,
+  groupKey: string,
+  page = 1,
+  pageSize = 120,
+): Promise<AssetPage> {
+  if (!desktopRuntime) return { items: [], total: 0, page, pageSize };
+  return invoke<AssetPage>("query_assets_in_group", { query, groupBy, groupKey, page, pageSize });
 }
 
 export async function fetchClassificationRegistry(): Promise<ClassificationFieldDescriptor[]> {

@@ -1,5 +1,5 @@
 import { type ComponentProps } from "react";
-import { act, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -138,6 +138,27 @@ describe("WorkflowWorkspace editor export interactions", () => {
     api.executeEditRollback.mockResolvedValue(makeExportResult());
   });
 
+  it("hides stale recipe previews and retries failed renders", async () => {
+    const user = userEvent.setup();
+    renderEditor();
+    expect(await screen.findByRole("img", { name: "编辑照片.jpg 编辑预览" })).toBeInTheDocument();
+
+    api.renderEditPreview.mockRejectedValueOnce(new Error("预览暂不可用"));
+    await user.click(screen.getByRole("button", { name: "旋转 90°" }));
+    expect(screen.queryByRole("img", { name: "编辑照片.jpg 编辑预览" })).not.toBeInTheDocument();
+    expect(await screen.findByRole("alert")).toHaveTextContent("预览暂不可用");
+
+    await user.click(screen.getByRole("button", { name: "重试预览" }));
+    expect(await screen.findByRole("img", { name: "编辑照片.jpg 编辑预览" })).toBeInTheDocument();
+    expect(api.renderEditPreview).toHaveBeenCalledTimes(3);
+
+    fireEvent.error(screen.getByRole("img", { name: "编辑照片.jpg 编辑预览" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("编辑预览图像无法显示");
+    await user.click(screen.getByRole("button", { name: "重试预览" }));
+    expect(await screen.findByRole("img", { name: "编辑照片.jpg 编辑预览" })).toBeInTheDocument();
+    expect(api.renderEditPreview).toHaveBeenCalledTimes(4);
+  });
+
   it("invalidates a displayed and pending plan when Reset is used", async () => {
     const user = userEvent.setup();
     renderEditor();
@@ -194,66 +215,18 @@ describe("WorkflowWorkspace editor export interactions", () => {
     expect(screen.queryByText(targetOne)).not.toBeInTheDocument();
   });
 
-  it("prevents duplicate export confirmation and rollback execution", async () => {
-    const user = userEvent.setup();
-    const exportExecution = deferred<EditExportResult>();
-    const rollbackExecution = deferred<EditExportResult>();
-    api.executeEditExport.mockReturnValue(exportExecution.promise);
-    api.executeEditRollback.mockReturnValue(rollbackExecution.promise);
-    renderEditor();
-
-    await requestPlan(user);
-    await user.dblClick(screen.getByRole("button", { name: "确认另存副本" }));
-    expect(api.executeEditExport).toHaveBeenCalledTimes(1);
-
-    await act(async () => {
-      exportExecution.resolve(makeExportResult());
-    });
-    await screen.findByText("副本已创建，可安全回滚");
-    await user.click(screen.getByRole("button", { name: "预览撤销" }));
-    await screen.findByRole("button", { name: "确认删除该生成副本" });
-    await user.dblClick(screen.getByRole("button", { name: "确认删除该生成副本" }));
-    expect(api.executeEditRollback).toHaveBeenCalledTimes(1);
-
-    await act(async () => {
-      rollbackExecution.resolve(makeExportResult());
-    });
-    await waitFor(() => expect(screen.queryByText("副本已创建，可安全回滚")).toBeNull());
-  });
-
-  it("keeps a completed export rollbackable after recipe edits until dismissed", async () => {
+  it("keeps edit preview available while disabling unsafe full-resolution export", async () => {
     const user = userEvent.setup();
     renderEditor();
 
     await requestPlan(user);
-    await user.click(screen.getByRole("button", { name: "确认另存副本" }));
-    await screen.findByText("副本已创建，可安全回滚");
-    await user.click(screen.getByRole("button", { name: "旋转 90°" }));
-
-    expect(screen.getByText(targetOne)).toBeInTheDocument();
-    await user.click(screen.getByRole("button", { name: "预览撤销" }));
-    expect(await screen.findByRole("button", { name: "确认删除该生成副本" })).toBeInTheDocument();
-    expect(api.previewEditRollback).toHaveBeenCalledWith("plan-D:\\exports\\编辑照片-one.jpg");
-
-    await user.click(screen.getByRole("button", { name: "关闭记录" }));
-    expect(screen.queryByText("副本已创建，可安全回滚")).not.toBeInTheDocument();
-    expect(api.executeEditRollback).not.toHaveBeenCalled();
-  });
-
-  it("rejects a rollback preview tied to a different completed export", async () => {
-    const user = userEvent.setup();
-    api.previewEditRollback.mockResolvedValueOnce(makeRollbackPlan("another-export"));
-    renderEditor();
-
-    await requestPlan(user);
-    await user.click(screen.getByRole("button", { name: "确认另存副本" }));
-    await screen.findByText("副本已创建，可安全回滚");
-    await user.click(screen.getByRole("button", { name: "预览撤销" }));
-
-    await waitFor(() =>
-      expect(api.previewEditRollback).toHaveBeenCalledWith("plan-D:\\exports\\编辑照片-one.jpg"),
+    expect(api.previewEditExport).toHaveBeenCalledTimes(1);
+    expect(screen.getByRole("button", { name: "确认另存副本" })).toBeDisabled();
+    expect(screen.getByText("编辑副本导出暂不可用；可继续预览和保存编辑方案。")).toHaveAttribute(
+      "role",
+      "status",
     );
-    expect(screen.queryByRole("button", { name: "确认删除该生成副本" })).not.toBeInTheDocument();
-    expect(api.executeEditRollback).not.toHaveBeenCalled();
+    await user.click(screen.getByRole("button", { name: "确认另存副本" }));
+    expect(api.executeEditExport).not.toHaveBeenCalled();
   });
 });

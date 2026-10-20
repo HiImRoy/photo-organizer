@@ -1,6 +1,10 @@
 pub mod classification;
+pub mod copy_export_plan;
+pub mod copy_export_runner;
+pub mod copy_export_service;
 pub mod db;
 pub mod error;
+pub mod export_file_safety;
 pub mod gpu;
 pub mod imaging;
 #[cfg(feature = "desktop")]
@@ -86,6 +90,10 @@ pub fn run() {
             ipc::list_libraries,
             ipc::list_assets,
             ipc::query_assets,
+            ipc::query_asset_membership,
+            ipc::query_asset_neighbor,
+            ipc::query_asset_groups,
+            ipc::query_assets_in_group,
             ipc::get_classification_registry,
             ipc::get_asset_detail,
             ipc::update_classification_override,
@@ -125,6 +133,21 @@ pub fn run() {
             ipc::list_organization_issues,
             ipc::export_organization_manifest,
             ipc::discard_organization_plan,
+            ipc::grant_organization_target_parent,
+            ipc::create_organization_plan_v2,
+            ipc::read_organization_plan_v2,
+            ipc::list_recent_organization_plans,
+            ipc::copy_export_preflight,
+            ipc::copy_export_start,
+            ipc::copy_export_get_job,
+            ipc::copy_export_list_recent_jobs,
+            ipc::copy_export_cancel,
+            ipc::copy_export_runtime_status,
+            ipc::copy_export_resume_preview,
+            ipc::copy_export_resume,
+            ipc::copy_export_reconcile_item,
+            ipc::copy_export_rollback_preview,
+            ipc::copy_export_confirm_rollback,
             ipc::list_favorite_asset_ids,
             ipc::list_favorite_assets,
             ipc::set_asset_favorite,

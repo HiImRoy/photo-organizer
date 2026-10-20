@@ -1,5 +1,5 @@
 use std::collections::{BTreeSet, HashMap};
-use std::fs::{File, OpenOptions};
+use std::fs::File;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -9,9 +9,9 @@ use base64::Engine;
 use chrono::{SecondsFormat, Utc};
 use image::codecs::jpeg::JpegEncoder;
 use image::imageops::FilterType;
-use image::{DynamicImage, GenericImageView, ImageFormat, Rgba};
+use image::{DynamicImage, GenericImageView, Rgba};
 use rusqlite::functions::FunctionFlags;
-use rusqlite::{Connection, OptionalExtension, Row, TransactionBehavior, params};
+use rusqlite::{Connection, OptionalExtension, Row, params};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -994,8 +994,13 @@ pub fn render_edit_preview(
     max_height: u32,
 ) -> AppResult<String> {
     validate_recipe(recipe)?;
-    let (source, _) = repository.asset_source(asset_id)?;
-    let mut image = apply_recipe(image::open(source)?, recipe)?;
+    // Browsing/edit preview is intentionally bounded to the application-owned
+    // grid thumbnail. The original source path is reserved for metadata,
+    // fingerprinting, controlled thumbnail generation and explicit original
+    // viewer requests; it must never become this preview's pixel buffer.
+    let thumbnail_path = repository.thumbnail_path(asset_id)?;
+    let thumbnail = crate::imaging::load_analysis_thumbnail(&thumbnail_path)?;
+    let mut image = apply_recipe(DynamicImage::ImageRgb8(thumbnail), recipe)?;
     image = image.resize(
         max_width.clamp(64, 2_560),
         max_height.clamp(64, 2_560),
@@ -1048,126 +1053,13 @@ pub fn preview_edit_export(
     Ok(plan)
 }
 
-pub fn execute_edit_export(repository: &Repository, plan_id: &str) -> AppResult<EditExportResult> {
-    let mut connection = open(repository)?;
-    let stored = connection
-        .query_row(
-            "SELECT asset_id, source_fingerprint, target_path, recipe_json, status
-             FROM edit_export_plans WHERE id=?1",
-            [plan_id],
-            |row| {
-                Ok((
-                    row.get::<_, i64>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, String>(2)?,
-                    row.get::<_, String>(3)?,
-                    row.get::<_, String>(4)?,
-                ))
-            },
-        )
-        .optional()?
-        .ok_or_else(|| AppError::NotFound(format!("edit export plan {plan_id}")))?;
-    let (asset_id, planned_fingerprint, target_path, recipe_json, status) = stored;
-    if status != "ready" {
-        return Err(AppError::InvalidArgument(format!(
-            "edit export plan is not executable: {status}"
-        )));
-    }
-    let recipe: EditRecipe = serde_json::from_str(&recipe_json)?;
-    validate_recipe(&recipe)?;
-    let target = validate_export_target(repository, Path::new(&target_path))?;
-    let (source, current_fingerprint) = repository.asset_source(asset_id)?;
-    if current_fingerprint != planned_fingerprint || fingerprint(&source)? != planned_fingerprint {
-        return Err(AppError::InvalidArgument(
-            "source changed after the export preview was created".into(),
-        ));
-    }
-
-    // The plan ID is the durable ownership key for this export's operation log.
-    let job_id = plan_id.to_owned();
-    let timestamp = now();
-    let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-    let rollback_in_progress: bool = transaction.query_row(
-        "SELECT EXISTS(
-             SELECT 1 FROM file_operations
-             WHERE operation_type='edit_copy'
-               AND path_identity_key(target_path)=?1
-               AND rollback_status='running'
-         )",
-        [identity_key(&target)],
-        |row| row.get(0),
-    )?;
-    if rollback_in_progress {
-        return Err(AppError::InvalidArgument(
-            "an edit export rollback is already in progress for this target path".into(),
-        ));
-    }
-    transaction.execute(
-        "INSERT INTO file_operation_jobs(
-            id, library_id, operation_type, status, dry_run, conflict_strategy, created_at, updated_at
-         ) SELECT ?1, library_id, 'edit_copy', 'running', 0, 'skip', ?3, ?3
-           FROM assets WHERE id=?2",
-        params![job_id, asset_id, timestamp],
-    )?;
-    transaction.execute(
-        "INSERT INTO file_operations(
-            job_id, source_path, target_path, operation_type, plan_status, execution_status,
-            conflict_strategy, source_hash
-         ) VALUES(?1, ?2, ?3, 'edit_copy', 'ready', 'running', 'skip', ?4)",
-        params![
-            job_id,
-            source.to_string_lossy(),
-            target_path,
-            planned_fingerprint
-        ],
-    )?;
-    transaction.commit()?;
-
-    let result = write_edited_copy(&source, &target, &recipe);
-    match result {
-        Ok(()) => {
-            let target_hash = fingerprint(&target)?;
-            let completed_at = now();
-            connection.execute(
-                "UPDATE file_operations
-                 SET execution_status='completed', target_hash=?2
-                 WHERE job_id=?1",
-                params![job_id, target_hash],
-            )?;
-            connection.execute(
-                "UPDATE file_operation_jobs SET status='completed', updated_at=?2 WHERE id=?1",
-                params![job_id, completed_at],
-            )?;
-            connection.execute(
-                "UPDATE edit_export_plans
-                 SET status='completed', executed_at=?2, error_message=NULL WHERE id=?1",
-                params![plan_id, completed_at],
-            )?;
-            Ok(EditExportResult {
-                plan_id: plan_id.into(),
-                target_path,
-                status: "completed".into(),
-            })
-        }
-        Err(error) => {
-            let message = error.to_string();
-            let _ = connection.execute(
-                "UPDATE file_operations SET execution_status='failed', error_message=?2
-                 WHERE job_id=?1",
-                params![job_id, message],
-            );
-            let _ = connection.execute(
-                "UPDATE file_operation_jobs SET status='failed', updated_at=?2, error_message=?3
-                 WHERE id=?1",
-                params![job_id, now(), message],
-            );
-            let _ = connection.execute(
-                "UPDATE edit_export_plans SET status='failed', error_message=?2 WHERE id=?1",
-                params![plan_id, message],
-            );
-            Err(error)
-        }
-    }
+pub fn execute_edit_export(
+    _repository: &Repository,
+    _plan_id: &str,
+) -> AppResult<EditExportResult> {
+    Err(AppError::InvalidArgument(
+        "edited full-resolution export is unavailable; the current editor is preview-only under the thumbnail-only image policy".into(),
+    ))
 }
 
 pub fn preview_edit_rollback(
@@ -1186,188 +1078,25 @@ pub fn preview_edit_rollback(
             "generated copy changed after export and cannot be rolled back safely".into(),
         ));
     }
-    Ok(EditRollbackPlan {
-        plan_id: plan_id.into(),
-        target_path,
-        target_hash,
-        status: "ready".into(),
-        issues: Vec::new(),
-    })
+    let _ = (plan_id, target_hash);
+    Err(AppError::InvalidArgument(
+        "编辑副本回滚暂不可用：旧编辑记录没有可验证的目标文件身份，无法安全预览回滚。文件已保留。"
+            .into(),
+    ))
 }
 
 pub fn execute_edit_rollback(
     repository: &Repository,
     plan_id: &str,
 ) -> AppResult<EditExportResult> {
-    let preview = preview_edit_rollback(repository, plan_id)?;
-    let target = PathBuf::from(&preview.target_path);
-    let mut connection = open(repository)?;
-    let claim = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-    let claimed = claim.execute(
-        "UPDATE file_operations
-         SET rollback_status='running'
-         WHERE job_id=?1 AND operation_type='edit_copy' AND target_path=?2
-           AND execution_status='completed' AND target_hash=?3
-           AND rollback_status IN ('not_requested', 'failed')
-           AND EXISTS (
-               SELECT 1 FROM edit_export_plans plan
-               WHERE plan.id=?1 AND plan.target_path=?2 AND plan.status='completed'
-           )
-           AND EXISTS (
-               SELECT 1 FROM file_operation_jobs job
-               WHERE job.id=file_operations.job_id AND job.status='completed'
-           )
-           AND NOT EXISTS (
-               SELECT 1 FROM file_operations newer
-               WHERE newer.operation_type='edit_copy'
-                 AND path_identity_key(newer.target_path)=
-                     path_identity_key(file_operations.target_path)
-                 AND newer.id>file_operations.id
-                 AND newer.execution_status='completed'
-           )
-           AND NOT EXISTS (
-               SELECT 1 FROM file_operations running_export
-               WHERE running_export.operation_type='edit_copy'
-                 AND path_identity_key(running_export.target_path)=
-                     path_identity_key(file_operations.target_path)
-                 AND running_export.id<>file_operations.id
-                 AND running_export.execution_status='running'
-           )
-           AND NOT EXISTS (
-               SELECT 1 FROM file_operations running_rollback
-               WHERE running_rollback.operation_type='edit_copy'
-                 AND path_identity_key(running_rollback.target_path)=
-                     path_identity_key(file_operations.target_path)
-                 AND running_rollback.job_id<>file_operations.job_id
-                 AND running_rollback.rollback_status='running'
-           )",
-        params![plan_id, preview.target_path, preview.target_hash],
-    )?;
-    if claimed != 1 {
-        return Err(AppError::InvalidArgument(
-            "edit export rollback ownership changed, a later export is active, or rollback is already in progress".into(),
-        ));
-    }
-    claim.commit()?;
-
-    if !target.is_file() {
-        mark_edit_rollback_failed(
-            repository,
-            plan_id,
-            &preview.target_path,
-            "generated copy disappeared before rollback deletion",
-        )?;
-        return Err(AppError::NotFound(preview.target_path));
-    }
-    let canonical_target = match target.canonicalize() {
-        Ok(path) => path,
-        Err(error) => {
-            mark_edit_rollback_failed(
-                repository,
-                plan_id,
-                &preview.target_path,
-                &error.to_string(),
-            )?;
-            return Err(AppError::Io(error));
-        }
-    };
-    if let Err(error) = ensure_target_outside_libraries(repository, &canonical_target) {
-        mark_edit_rollback_failed(
-            repository,
-            plan_id,
-            &preview.target_path,
-            &error.to_string(),
-        )?;
-        return Err(error);
-    }
-    let current_hash = match fingerprint(&target) {
-        Ok(hash) => hash,
-        Err(error) => {
-            mark_edit_rollback_failed(
-                repository,
-                plan_id,
-                &preview.target_path,
-                &error.to_string(),
-            )?;
-            return Err(error);
-        }
-    };
-    if current_hash != preview.target_hash {
-        mark_edit_rollback_failed(
-            repository,
-            plan_id,
-            &preview.target_path,
-            "generated copy changed after rollback preview",
-        )?;
-        return Err(AppError::InvalidArgument(
-            "generated copy changed after export and cannot be rolled back safely".into(),
-        ));
-    }
-
-    if let Err(error) = std::fs::remove_file(&target) {
-        mark_edit_rollback_failed(
-            repository,
-            plan_id,
-            &preview.target_path,
-            &error.to_string(),
-        )?;
-        return Err(AppError::Io(error));
-    }
-
-    let timestamp = now();
-    let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-    let operation_rows = transaction.execute(
-        "UPDATE file_operations
-         SET rollback_status='completed', error_message=NULL
-         WHERE job_id=?1 AND operation_type='edit_copy' AND target_path=?2
-           AND target_hash=?3 AND rollback_status='running'",
-        params![plan_id, preview.target_path, preview.target_hash],
-    )?;
-    let job_rows = transaction.execute(
-        "UPDATE file_operation_jobs
-         SET status='rolled_back', updated_at=?2
-         WHERE id=?1 AND status='completed'",
-        params![plan_id, timestamp],
-    )?;
-    let plan_rows = transaction.execute(
-        "UPDATE edit_export_plans
-         SET status='rolled_back', executed_at=?2, error_message=NULL
-         WHERE id=?1 AND status='completed'",
-        params![plan_id, timestamp],
-    )?;
-    if operation_rows != 1 || job_rows != 1 || plan_rows != 1 {
-        return Err(AppError::InvalidArgument(
-            "edit export rollback records changed unexpectedly after file removal".into(),
-        ));
-    }
-    transaction.commit()?;
-    Ok(EditExportResult {
-        plan_id: plan_id.into(),
-        target_path: preview.target_path,
-        status: "rolled_back".into(),
-    })
-}
-
-fn mark_edit_rollback_failed(
-    repository: &Repository,
-    plan_id: &str,
-    target_path: &str,
-    error_message: &str,
-) -> AppResult<()> {
-    let connection = open(repository)?;
-    let updated = connection.execute(
-        "UPDATE file_operations
-         SET rollback_status='failed', error_message=?3
-         WHERE job_id=?1 AND operation_type='edit_copy' AND target_path=?2
-           AND rollback_status='running'",
-        params![plan_id, target_path, error_message],
-    )?;
-    if updated != 1 {
-        return Err(AppError::InvalidArgument(
-            "edit export rollback claim could not be marked failed".into(),
-        ));
-    }
-    Ok(())
+    // Preserve existing ownership/path/hash diagnostics, then refuse the
+    // legacy path-based delete because old edit records have no durable file
+    // identity for same-handle deletion.
+    let _ = preview_edit_rollback(repository, plan_id)?;
+    Err(AppError::InvalidArgument(
+        "编辑副本回滚暂不可用：当前版本尚未把该路径操作迁移到同句柄身份校验删除。文件已保留。"
+            .into(),
+    ))
 }
 
 fn open(repository: &Repository) -> AppResult<Connection> {
@@ -1969,27 +1698,6 @@ fn ensure_target_outside_libraries(repository: &Repository, target: &Path) -> Ap
     Ok(())
 }
 
-fn write_edited_copy(source: &Path, target: &Path, recipe: &EditRecipe) -> AppResult<()> {
-    let image = apply_recipe(image::open(source)?, recipe)?;
-    let format = ImageFormat::from_extension(
-        target
-            .extension()
-            .and_then(|value| value.to_str())
-            .unwrap_or_default(),
-    )
-    .ok_or_else(|| AppError::InvalidArgument("unsupported export image format".into()))?;
-    let mut file = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(target)?;
-    let result = image.write_to(&mut file, format).map_err(AppError::from);
-    drop(file);
-    if result.is_err() {
-        let _ = std::fs::remove_file(target);
-    }
-    result
-}
-
 fn fingerprint(path: &Path) -> AppResult<String> {
     let mut file = File::open(path)?;
     let mut hasher = blake3::Hasher::new();
@@ -2012,6 +1720,65 @@ fn now() -> String {
 mod tests {
     use super::*;
     use tempfile::TempDir;
+
+    #[test]
+    fn edit_preview_decodes_only_registered_bounded_thumbnail() {
+        let test_data = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../test-data");
+        let temporary = TempDir::new_in(&test_data).expect("test-owned directory under test-data");
+        let repository = Repository::new(temporary.path().join("preview.sqlite3"));
+        repository.initialize().expect("repository initialization");
+        let source_root = temporary.path().join("source");
+        std::fs::create_dir(&source_root).expect("source root");
+        let missing_source = source_root.join("not-present.jpg");
+        let thumbnail = temporary.path().join("test-grid-640-v1.jpg");
+        image::RgbImage::from_pixel(640, 360, image::Rgb([30, 120, 210]))
+            .save(&thumbnail)
+            .expect("write bounded thumbnail fixture");
+        let connection = open(&repository).expect("database");
+        connection
+            .execute(
+                "INSERT INTO libraries(root_path,created_at,name,source_path,source_identity_key)
+                 VALUES(?1,?2,'Preview fixture',?1,?3)",
+                params![
+                    source_root.to_string_lossy(),
+                    now(),
+                    identity_key(&source_root)
+                ],
+            )
+            .expect("library");
+        let library_id = connection.last_insert_rowid();
+        connection
+            .execute(
+                "INSERT INTO assets(
+                    library_id,absolute_path,relative_path,file_name,extension,
+                    file_size,modified_at,fingerprint,first_seen_at,last_seen_at,
+                    asset_identity_key
+                 ) VALUES(?1,?2,'not-present.jpg','not-present.jpg','jpg',0,0,'fixture',?3,?3,'preview-only')",
+                params![library_id, missing_source.to_string_lossy(), now()],
+            )
+            .expect("asset");
+        let asset_id = connection.last_insert_rowid();
+        connection
+            .execute(
+                "INSERT INTO thumbnails(
+                    asset_id,cache_path,spec,source_modified_at,source_size,status,updated_at
+                 ) VALUES(?1,?2,?3,0,0,'ready',?4)",
+                params![
+                    asset_id,
+                    thumbnail.to_string_lossy(),
+                    crate::imaging::THUMBNAIL_SPEC,
+                    now()
+                ],
+            )
+            .expect("thumbnail row");
+        drop(connection);
+
+        assert!(!missing_source.exists());
+        let rendered =
+            render_edit_preview(&repository, asset_id, &EditRecipe::default(), 1_280, 720)
+                .expect("preview must use the registered thumbnail without opening source");
+        assert!(rendered.starts_with("data:image/jpeg;base64,"));
+    }
 
     fn fixture_repository() -> (TempDir, Repository, i64, i64) {
         let temporary = TempDir::new().expect("temporary directory");
@@ -2065,6 +1832,76 @@ mod tests {
                 .expect("asset");
         }
         (temporary, repository, library_id, 1)
+    }
+
+    fn seed_legacy_edit_export_for_test(repository: &Repository, plan_id: &str) -> PathBuf {
+        use std::io::Write;
+
+        let connection = open(repository).expect("legacy edit export database");
+        let (asset_id, target_path, status): (i64, String, String) = connection
+            .query_row(
+                "SELECT asset_id, target_path, status
+                 FROM edit_export_plans WHERE id=?1",
+                [plan_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .expect("edit export preview plan");
+        assert_eq!(status, "ready");
+        let library_id: i64 = connection
+            .query_row(
+                "SELECT library_id FROM assets WHERE id=?1",
+                [asset_id],
+                |row| row.get(0),
+            )
+            .expect("asset owner library");
+        drop(connection);
+
+        let (source_path, source_hash) = repository.asset_source(asset_id).expect("source asset");
+        let target = PathBuf::from(&target_path);
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&target)
+            .expect("write generated legacy fixture copy once");
+        file.write_all(b"legacy edited-copy fixture bytes")
+            .expect("write fixture output");
+        file.sync_all().expect("sync fixture output");
+        drop(file);
+        let target_hash = fingerprint(&target).expect("fixture output fingerprint");
+        let timestamp = now();
+        let connection = open(repository).expect("legacy edit export database");
+        connection
+            .execute(
+                "INSERT INTO file_operation_jobs(
+                    id, library_id, operation_type, status, dry_run,
+                    conflict_strategy, created_at, updated_at
+                 ) VALUES(?1, ?2, 'edit_copy', 'completed', 0, 'skip', ?3, ?3)",
+                params![plan_id, library_id, timestamp],
+            )
+            .expect("historical job row");
+        connection
+            .execute(
+                "INSERT INTO file_operations(
+                    job_id, source_path, target_path, operation_type, plan_status,
+                    execution_status, conflict_strategy, source_hash, target_hash
+                 ) VALUES(?1, ?2, ?3, 'edit_copy', 'ready', 'completed', 'skip', ?4, ?5)",
+                params![
+                    plan_id,
+                    source_path.to_string_lossy(),
+                    target_path,
+                    source_hash,
+                    target_hash
+                ],
+            )
+            .expect("historical operation row");
+        connection
+            .execute(
+                "UPDATE edit_export_plans
+                 SET status='completed', executed_at=?2 WHERE id=?1",
+                params![plan_id, timestamp],
+            )
+            .expect("mark historical plan complete");
+        target
     }
 
     #[test]
@@ -2378,46 +2215,37 @@ mod tests {
     }
 
     #[test]
-    fn edit_export_requires_preview_and_never_overwrites() {
+    fn edited_export_is_disabled_without_decoding_or_touching_originals() {
         let (temporary, repository, _library_id, asset_id) = fixture_repository();
         let target = temporary.path().join("编辑副本 中文.jpg");
         let source_before = repository.asset_source(asset_id).expect("source").0;
         let before_hash = fingerprint(&source_before).expect("before hash");
-        let recipe = EditRecipe {
-            rotate_degrees: 90,
-            exposure: 0.1,
-            ..EditRecipe::default()
-        };
+        let recipe = EditRecipe::default();
         let plan = preview_edit_export(&repository, asset_id, &target, &recipe).expect("plan");
-        let result = execute_edit_export(&repository, &plan.plan_id).expect("export");
-        assert_eq!(result.status, "completed");
-        assert!(target.is_file());
+        let error = execute_edit_export(&repository, &plan.plan_id)
+            .expect_err("full-resolution edited export must be disabled");
+        assert!(matches!(
+            error,
+            AppError::InvalidArgument(ref message) if message.contains("preview-only")
+        ));
+        assert!(!target.exists(), "disabled export must not create a target");
         assert_eq!(
             fingerprint(&source_before).expect("after hash"),
             before_hash
         );
-        assert!(preview_edit_export(&repository, asset_id, &target, &recipe).is_err());
-        let exported_bytes = std::fs::read(&target).expect("exported bytes");
-        {
-            use std::io::Write;
-            let mut changed = OpenOptions::new()
-                .append(true)
-                .open(&target)
-                .expect("open generated copy");
-            changed
-                .write_all(b"changed")
-                .expect("change generated copy");
-        }
-        assert!(preview_edit_rollback(&repository, &plan.plan_id).is_err());
-        std::fs::write(&target, exported_bytes).expect("restore generated test copy");
-        let rollback = preview_edit_rollback(&repository, &plan.plan_id).expect("rollback plan");
         assert_eq!(
-            identity_key(Path::new(&rollback.target_path)),
-            identity_key(&target)
+            preview_edit_export(&repository, asset_id, &target, &recipe)
+                .expect("preview remains non-mutating")
+                .status,
+            "ready"
         );
-        let rollback = execute_edit_rollback(&repository, &plan.plan_id).expect("rollback");
-        assert_eq!(rollback.status, "rolled_back");
-        assert!(!target.exists());
+        std::fs::write(&target, b"pre-existing target fixture").expect("existing target");
+        assert!(preview_edit_export(&repository, asset_id, &target, &recipe).is_err());
+        assert!(execute_edit_export(&repository, &plan.plan_id).is_err());
+        assert_eq!(
+            std::fs::read(&target).expect("pre-existing target is unchanged"),
+            b"pre-existing target fixture"
+        );
         assert_eq!(
             fingerprint(&source_before).expect("post-rollback source hash"),
             before_hash
@@ -2436,13 +2264,13 @@ mod tests {
 
         let first_plan =
             preview_edit_export(&repository, asset_id, &target, &recipe).expect("first plan");
-        execute_edit_export(&repository, &first_plan.plan_id).expect("first export");
+        seed_legacy_edit_export_for_test(&repository, &first_plan.plan_id);
         let first_hash = fingerprint(&target).expect("first export hash");
         std::fs::remove_file(&target).expect("simulate external removal of generated copy");
 
         let second_plan =
             preview_edit_export(&repository, asset_id, &target, &recipe).expect("second plan");
-        execute_edit_export(&repository, &second_plan.plan_id).expect("second export");
+        seed_legacy_edit_export_for_test(&repository, &second_plan.plan_id);
         let second_hash = fingerprint(&target).expect("second export hash");
         assert_eq!(
             second_hash, first_hash,
@@ -2465,12 +2293,12 @@ mod tests {
             second_hash
         );
 
-        preview_edit_rollback(&repository, &second_plan.plan_id)
-            .expect("current export rollback preview");
-        let rollback =
-            execute_edit_rollback(&repository, &second_plan.plan_id).expect("current rollback");
-        assert_eq!(rollback.status, "rolled_back");
-        assert!(!target.exists());
+        assert!(preview_edit_rollback(&repository, &second_plan.plan_id).is_err());
+        assert!(execute_edit_rollback(&repository, &second_plan.plan_id).is_err());
+        assert!(
+            target.exists(),
+            "the current generated copy must be preserved"
+        );
 
         let connection = open(&repository).expect("database");
         let first_status: String = connection
@@ -2502,9 +2330,9 @@ mod tests {
             )
             .expect("second job status");
         assert_eq!(first_status, "not_requested");
-        assert_eq!(second_status, "completed");
+        assert_eq!(second_status, "not_requested");
         assert_eq!(first_job_status, "completed");
-        assert_eq!(second_job_status, "rolled_back");
+        assert_eq!(second_job_status, "completed");
     }
 
     #[test]
@@ -2543,7 +2371,7 @@ mod tests {
 
         let plan = preview_edit_export(&repository, asset_id, &target, &EditRecipe::default())
             .expect("completed export plan");
-        execute_edit_export(&repository, &plan.plan_id).expect("completed export");
+        seed_legacy_edit_export_for_test(&repository, &plan.plan_id);
         let connection = open(&repository).expect("operation ordering database");
         let older_id: i64 = connection
             .query_row(
@@ -2568,31 +2396,24 @@ mod tests {
     }
 
     #[test]
-    fn durable_rollback_claim_survives_finalization_failure_and_blocks_export() {
+    fn legacy_edit_rollback_is_refused_and_preserves_generated_copy() {
         let (temporary, repository, _library_id, asset_id) = fixture_repository();
         let target = temporary.path().join("durable-rollback-claim.jpg");
         let first_plan =
             preview_edit_export(&repository, asset_id, &target, &EditRecipe::default())
                 .expect("first plan");
-        execute_edit_export(&repository, &first_plan.plan_id).expect("first export");
+        seed_legacy_edit_export_for_test(&repository, &first_plan.plan_id);
 
-        let connection = open(&repository).expect("trigger database");
-        connection
-            .execute_batch(
-                "CREATE TRIGGER reject_rollback_finalization
-                 BEFORE UPDATE OF rollback_status ON file_operations
-                 WHEN NEW.rollback_status='completed'
-                 BEGIN
-                     SELECT RAISE(FAIL, 'injected rollback finalization failure');
-                 END;",
-            )
-            .expect("finalization failure trigger");
-        drop(connection);
-
+        let target_hash = fingerprint(&target).expect("generated output hash");
+        assert!(preview_edit_rollback(&repository, &first_plan.plan_id).is_err());
         assert!(execute_edit_rollback(&repository, &first_plan.plan_id).is_err());
         assert!(
-            !target.exists(),
-            "the injected database failure happens after the generated copy is removed"
+            target.exists(),
+            "unsupported rollback must preserve the output"
+        );
+        assert_eq!(
+            fingerprint(&target).expect("preserved output hash"),
+            target_hash
         );
         let connection = open(&repository).expect("durable claim database");
         let rollback_status: String = connection
@@ -2602,21 +2423,13 @@ mod tests {
                 |row| row.get(0),
             )
             .expect("durable rollback state");
-        assert_eq!(rollback_status, "running");
+        assert_eq!(rollback_status, "not_requested");
         drop(connection);
 
-        let next_plan = preview_edit_export(&repository, asset_id, &target, &EditRecipe::default())
-            .expect("next export plan");
-        assert!(execute_edit_export(&repository, &next_plan.plan_id).is_err());
-        let connection = open(&repository).expect("blocked export database");
-        let next_job_exists: bool = connection
-            .query_row(
-                "SELECT EXISTS(SELECT 1 FROM file_operation_jobs WHERE id=?1)",
-                [&next_plan.plan_id],
-                |row| row.get(0),
-            )
-            .expect("next job existence");
-        assert!(!next_job_exists, "blocked export must not register a job");
+        assert!(
+            preview_edit_export(&repository, asset_id, &target, &EditRecipe::default()).is_err()
+        );
+        assert!(target.exists());
     }
 
     #[test]
@@ -2630,7 +2443,7 @@ mod tests {
             &EditRecipe::default(),
         )
         .expect("export plan");
-        execute_edit_export(&repository, &plan.plan_id).expect("export");
+        seed_legacy_edit_export_for_test(&repository, &plan.plan_id);
 
         let source = repository.asset_source(asset_id).expect("source").0;
         let source_hash = fingerprint(&source).expect("source hash before tampering");
@@ -2671,9 +2484,13 @@ mod tests {
         let recipe = EditRecipe::default();
         let first_plan =
             preview_edit_export(&repository, asset_id, &first_target, &recipe).expect("first plan");
-        execute_edit_export(&repository, &first_plan.plan_id).expect("first export");
+        seed_legacy_edit_export_for_test(&repository, &first_plan.plan_id);
         let first_hash = fingerprint(&first_target).expect("first export hash");
         std::fs::remove_file(&first_target).expect("remove first generated copy");
+        assert!(
+            !first_target.exists(),
+            "test setup removes the first output before creating its case alias"
+        );
 
         let case_alias = temporary.path().join("case-alias.jpg");
         let alias_text = case_alias.to_string_lossy();
@@ -2712,7 +2529,7 @@ mod tests {
             .expect("resolve simulated claim");
         drop(connection);
 
-        execute_edit_export(&repository, &second_plan.plan_id).expect("second export");
+        seed_legacy_edit_export_for_test(&repository, &second_plan.plan_id);
         assert_eq!(
             fingerprint(&second_target).expect("second export hash"),
             first_hash
@@ -2771,10 +2588,12 @@ mod tests {
 
         assert!(preview_edit_rollback(&repository, &first_plan.plan_id).is_err());
         assert!(execute_edit_rollback(&repository, &first_plan.plan_id).is_err());
-        preview_edit_rollback(&repository, &second_plan.plan_id)
-            .expect("current alias export preview");
-        execute_edit_rollback(&repository, &second_plan.plan_id).expect("current alias rollback");
-        assert!(!first_target.exists());
+        assert!(preview_edit_rollback(&repository, &second_plan.plan_id).is_err());
+        assert!(execute_edit_rollback(&repository, &second_plan.plan_id).is_err());
+        assert!(
+            second_target.exists(),
+            "legacy rollback must retain the output"
+        );
     }
 
     #[test]

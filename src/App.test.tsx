@@ -15,8 +15,18 @@ import type {
 
 const api = vi.hoisted(() => ({
   chooseLibraryFolder: vi.fn(),
+  isDesktopRuntime: vi.fn(() => false),
   fetchLibraries: vi.fn(),
   fetchAssets: vi.fn(),
+  fetchAssetMembership: vi.fn(),
+  fetchAssetNeighbor: vi.fn(),
+  fetchAssetGroups: vi.fn(),
+  fetchAssetsInGroup: vi.fn(),
+  chooseOrganizationTargetFolder: vi.fn(),
+  grantOrganizationTargetParent: vi.fn(),
+  createOrganizationPlanV2: vi.fn(),
+  readOrganizationPlanV2: vi.fn(),
+  listRecentOrganizationPlansV2: vi.fn(),
   fetchAssetDetail: vi.fn(),
   fetchFavoriteAssetIds: vi.fn(),
   fetchFavoriteAssets: vi.fn(),
@@ -251,6 +261,21 @@ beforeEach(() => {
   api.chooseLibraryFolder.mockResolvedValue(null);
   api.fetchLibraries.mockResolvedValue([]);
   api.fetchAssets.mockResolvedValue({ items: [], total: 0, page: 1, pageSize: 200 });
+  api.fetchAssetMembership.mockResolvedValue(null);
+  api.fetchAssetNeighbor.mockResolvedValue(null);
+  api.fetchAssetGroups.mockResolvedValue({
+    groups: [],
+    groupCount: 0,
+    globalUniqueTotal: 0,
+    page: 1,
+    pageSize: 100,
+  });
+  api.fetchAssetsInGroup.mockResolvedValue({ items: [], total: 0, page: 1, pageSize: 120 });
+  api.chooseOrganizationTargetFolder.mockResolvedValue(null);
+  api.grantOrganizationTargetParent.mockResolvedValue(null);
+  api.createOrganizationPlanV2.mockResolvedValue(null);
+  api.readOrganizationPlanV2.mockResolvedValue(null);
+  api.listRecentOrganizationPlansV2.mockResolvedValue([]);
   api.fetchAssetDetail.mockResolvedValue(null);
   api.fetchFavoriteAssetIds.mockResolvedValue([]);
   api.fetchFavoriteAssets.mockResolvedValue([]);
@@ -548,6 +573,24 @@ describe("PhotoOrganizer application shell", () => {
       page: 1,
       pageSize: 200,
     });
+    api.fetchAssetGroups.mockResolvedValue({
+      groups: [
+        { key: "photo_portrait", uniqueCount: 1 },
+        { key: "photo_landscape", uniqueCount: 1 },
+      ],
+      groupCount: 2,
+      globalUniqueTotal: 2,
+      page: 1,
+      pageSize: 100,
+    });
+    api.fetchAssetsInGroup.mockImplementation((_query, _groupBy, groupKey) =>
+      Promise.resolve({
+        items: groupKey === "photo_portrait" ? [portraitAsset] : [landscapeAsset],
+        total: 1,
+        page: 1,
+        pageSize: 120,
+      }),
+    );
     render(<App />);
 
     await screen.findByRole("button", { name: "晚霞.png" });
@@ -555,10 +598,18 @@ describe("PhotoOrganizer application shell", () => {
     const fetchCount = api.fetchAssets.mock.calls.length;
     await user.selectOptions(groupSelect, "primary_category");
 
-    expect(screen.getByText("人像", { selector: ".group-heading strong" })).toBeInTheDocument();
+    expect(
+      await screen.findByText("人像", { selector: ".group-heading strong" }),
+    ).toBeInTheDocument();
     expect(screen.getByText("风光", { selector: ".group-heading strong" })).toBeInTheDocument();
-    const portraitGroupToggle = screen.getByRole("button", { name: /折叠分组：人像/ });
+    const portraitGroupToggle = screen.getByRole("button", { name: /展开分组：人像/ });
+    expect(portraitGroupToggle).toHaveAttribute("aria-expanded", "false");
+    expect(api.fetchAssetsInGroup).not.toHaveBeenCalled();
+    await user.click(portraitGroupToggle);
     const portraitGroup = portraitGroupToggle.closest("section");
+    expect(
+      await within(portraitGroup as HTMLElement).findByRole("button", { name: "晚霞.png" }),
+    ).toBeInTheDocument();
     expect(portraitGroup?.querySelector(".semantic-group-items")).not.toHaveAttribute("hidden");
     await user.click(portraitGroupToggle);
     expect(portraitGroupToggle).toHaveAttribute("aria-expanded", "false");
@@ -567,6 +618,19 @@ describe("PhotoOrganizer application shell", () => {
     await user.click(portraitGroupToggle);
     expect(portraitGroupToggle).toHaveAttribute("aria-expanded", "true");
     expect(api.fetchAssets.mock.calls.length).toBe(fetchCount);
+    expect(api.fetchAssetGroups).toHaveBeenCalledWith(
+      expect.objectContaining({ root: { kind: "source", libraryId: 7 } }),
+      "primary_category",
+      1,
+      100,
+    );
+    expect(api.fetchAssetsInGroup).toHaveBeenCalledWith(
+      expect.objectContaining({ root: { kind: "source", libraryId: 7 } }),
+      "primary_category",
+      "photo_portrait",
+      1,
+      120,
+    );
   });
 
   it("opens the folder chooser and starts a scan", async () => {
@@ -1616,6 +1680,75 @@ describe("PhotoOrganizer application shell", () => {
     expect(screen.getByRole("region", { name: "图片网格" })).toBeInTheDocument();
   });
 
+  it("keeps compare previews independent and retries only the failed image", async () => {
+    const user = userEvent.setup();
+    let firstAttemptFailed = false;
+    api.fetchLibraries.mockResolvedValue([library]);
+    api.fetchAssets.mockResolvedValue({
+      items: [asset, secondAsset],
+      total: 2,
+      page: 1,
+      pageSize: 200,
+    });
+    api.fetchPreview.mockImplementation((assetId: number) => {
+      if (assetId === 12 && !firstAttemptFailed) {
+        firstAttemptFailed = true;
+        return Promise.reject(new Error("fixture preview failure"));
+      }
+      return Promise.resolve("data:image/jpeg;base64,ZmFrZQ==");
+    });
+    render(<App />);
+
+    await screen.findByRole("button", { name: "选择 晚霞.png" });
+    await user.click(screen.getByRole("button", { name: "选择 晚霞.png" }));
+    fireEvent.click(screen.getByRole("button", { name: "选择 海边.png" }), { ctrlKey: true });
+    await user.click(screen.getByRole("button", { name: "比较" }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent("这张图片的预览加载失败");
+    expect(screen.getByAltText("比较图片 13")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "重试预览" })).toBeInTheDocument();
+    expect(api.fetchPreview).toHaveBeenCalledTimes(2);
+
+    await user.click(screen.getByRole("button", { name: "重试预览" }));
+    expect(await screen.findByAltText("比较图片 12")).toBeInTheDocument();
+    expect(api.fetchPreview).toHaveBeenCalledTimes(3);
+    expect(api.fetchPreview.mock.calls.map(([id]) => id)).toEqual([12, 13, 12]);
+
+    const secondFigure = screen.getByAltText("比较图片 13").closest("figure");
+    expect(secondFigure).not.toBeNull();
+    fireEvent.error(screen.getByAltText("比较图片 13"));
+    expect(within(secondFigure as HTMLElement).getByRole("alert")).toHaveTextContent(
+      "这张图片的预览加载失败",
+    );
+    await user.click(within(secondFigure as HTMLElement).getByRole("button", { name: "重试预览" }));
+    expect(
+      await within(secondFigure as HTMLElement).findByAltText("比较图片 13"),
+    ).toBeInTheDocument();
+    expect(api.fetchPreview.mock.calls.map(([id]) => id)).toEqual([12, 13, 12, 13]);
+  });
+
+  it("shows a recoverable error when a single-view screen preview cannot decode", async () => {
+    const user = userEvent.setup();
+    api.fetchLibraries.mockResolvedValue([library]);
+    api.fetchAssets.mockResolvedValue({ items: [asset], total: 1, page: 1, pageSize: 200 });
+    render(<App />);
+
+    await screen.findByRole("button", { name: "晚霞.png" });
+    await user.click(screen.getByRole("button", { name: "单图预览" }));
+    await waitFor(() => expect(api.fetchPreview).toHaveBeenCalledWith(12, "screen"));
+    fireEvent.error(await screen.findByAltText(asset.fileName));
+    expect(await screen.findByRole("alert")).toHaveTextContent("当前显示缩略图");
+    expect(screen.getByRole("button", { name: "重试预览" })).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "重试预览" }));
+    await waitFor(() =>
+      expect(
+        api.fetchPreview.mock.calls.filter((call) => call[0] === 12 && call[1] === "screen"),
+      ).toHaveLength(2),
+    );
+    await waitFor(() => expect(screen.queryByRole("alert")).not.toBeInTheDocument());
+  });
+
   it("preserves an explicit selection or query scope through organization preview and back", async () => {
     const user = userEvent.setup();
     api.fetchLibraries.mockResolvedValue([library]);
@@ -1626,8 +1759,8 @@ describe("PhotoOrganizer application shell", () => {
     await user.click(screen.getByRole("button", { name: "选择 晚霞.png" }));
     await user.click(screen.getByRole("button", { name: "整理预览" }));
 
-    expect(screen.getByRole("region", { name: "整理预览工作区" })).toBeInTheDocument();
-    expect(screen.getByText("显式选择 · 1 张")).toBeInTheDocument();
+    expect(screen.getByRole("region", { name: "安全复制预览工作区" })).toBeInTheDocument();
+    expect(screen.getByText("已选择 1 张")).toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "返回图库" }));
     expect(screen.getByRole("region", { name: "图片网格" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "取消选择 晚霞.png" })).toHaveAttribute(
@@ -1637,7 +1770,7 @@ describe("PhotoOrganizer application shell", () => {
 
     await user.click(screen.getByRole("button", { name: "清除选择" }));
     await user.click(screen.getByRole("button", { name: "整理预览" }));
-    expect(screen.getByText("当前查询 · 1 张")).toBeInTheDocument();
+    expect(screen.getByText("全部匹配 1 张")).toBeInTheDocument();
   });
 
   it("keeps the explicit selection when adding images to collections", async () => {
@@ -1781,7 +1914,10 @@ describe("PhotoOrganizer application shell", () => {
 
     await waitFor(() => {
       expect(screen.queryByRole("textbox", { name: "本地 AI 搜索" })).not.toBeInTheDocument();
-      expect(screen.getByRole("button", { name: "海边.png，当前图片" })).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: "海边.png" })).toHaveAttribute(
+        "aria-current",
+        "true",
+      );
     });
   });
 
@@ -1878,6 +2014,33 @@ describe("PhotoOrganizer application shell", () => {
     expect(favoriteButton).not.toHaveClass("is-active");
     expect(sourceButton).toHaveClass("is-active");
     expect(document.querySelector(".app-identity strong")).toHaveTextContent(library.name);
+  });
+
+  it("exposes all photos as a browse source backed by the all-root query", async () => {
+    const user = userEvent.setup();
+    api.fetchLibraries.mockResolvedValue([library]);
+    api.fetchAssets.mockResolvedValue({ items: [asset], total: 1, page: 1, pageSize: 200 });
+    render(<App />);
+
+    await screen.findByRole("button", { name: "晚霞.png" });
+    const allPhotosButton = screen.getByRole("button", { name: "全部照片" });
+    await user.click(allPhotosButton);
+
+    await waitFor(() =>
+      expect(api.fetchAssets).toHaveBeenLastCalledWith(
+        expect.objectContaining({
+          libraryId: null,
+          filter: expect.objectContaining({ favoriteOnly: false, collectionId: null }),
+        }),
+      ),
+    );
+    expect(allPhotosButton).toHaveClass("is-active");
+    expect(document.querySelector(".app-identity strong")).toHaveTextContent("全部照片");
+    expect(screen.getByRole("region", { name: "图片网格" })).toBeInTheDocument();
+    expect(screen.queryByText("选择图库后可筛选")).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "整理预览" }));
+    expect(screen.getByRole("region", { name: "安全复制预览工作区" })).toBeInTheDocument();
+    expect(screen.getByText("全部匹配 1 张")).toBeInTheDocument();
   });
 
   it("applies the photographic tone and capture-date ranges from the sidebar", async () => {
@@ -2924,6 +3087,7 @@ describe("PhotoOrganizer application shell", () => {
   });
 
   it("loads grid results continuously without gallery pagination", async () => {
+    const user = userEvent.setup();
     api.fetchLibraries.mockResolvedValue([library]);
     api.fetchAssets.mockImplementation((query: { page: number }) =>
       Promise.resolve(
@@ -2935,6 +3099,8 @@ describe("PhotoOrganizer application shell", () => {
     render(<App />);
 
     expect(await screen.findByRole("button", { name: "晚霞.png" })).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "选择 晚霞.png" }));
+    expect(await screen.findByText("已选择 1 张")).toBeInTheDocument();
     expect(api.fetchAssets).toHaveBeenCalledWith(
       expect.objectContaining({ page: 1, pageSize: 120 }),
     );
@@ -2948,8 +3114,27 @@ describe("PhotoOrganizer application shell", () => {
     });
     fireEvent.scroll(results);
     expect(await screen.findByRole("button", { name: "海边.png" })).toBeInTheDocument();
+    expect(screen.getByText("已选择 1 张")).toBeInTheDocument();
     expect(screen.queryByRole("navigation", { name: "图库分页" })).not.toBeInTheDocument();
     expect(api.fetchAssets).toHaveBeenCalledWith(expect.objectContaining({ page: 2 }));
+  });
+
+  it("clears explicit selection when the filter query changes", async () => {
+    const user = userEvent.setup();
+    api.fetchLibraries.mockResolvedValue([library]);
+    api.fetchAssets.mockResolvedValue({
+      items: [asset, secondAsset],
+      total: 2,
+      page: 1,
+      pageSize: 200,
+    });
+    render(<App />);
+
+    await user.click(await screen.findByRole("button", { name: "选择 晚霞.png" }));
+    expect(await screen.findByText("已选择 1 张")).toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText("搜索图片"), { target: { value: "海边" } });
+
+    await waitFor(() => expect(screen.queryByText("已选择 1 张")).not.toBeInTheDocument());
   });
 
   it("surfaces startup errors without hiding the import affordance", async () => {
@@ -2970,8 +3155,8 @@ describe("PhotoOrganizer application shell", () => {
     });
     render(<App />);
 
-    const first = await screen.findByRole("button", { name: "晚霞.png" });
-    const second = screen.getByRole("button", { name: "海边.png" });
+    let first = await screen.findByRole("button", { name: "晚霞.png" });
+    let second = screen.getByRole("button", { name: "海边.png" });
     await user.click(first);
     await waitFor(() => expect(first).toHaveAttribute("aria-current", "true"));
     await user.click(screen.getByRole("button", { name: "选择 晚霞.png" }));
@@ -2998,6 +3183,10 @@ describe("PhotoOrganizer application shell", () => {
       }),
     );
     expect(screen.getByText("当前没有筛选条件")).toBeInTheDocument();
+    first = await screen.findByRole("button", { name: "晚霞.png" });
+    second = screen.getByRole("button", { name: "海边.png" });
+    fireEvent.click(first, { ctrlKey: true });
+    expect(await screen.findByText("已选择 1 张")).toBeInTheDocument();
     fireEvent.click(second, { ctrlKey: true });
     expect(await screen.findByText("已选择 2 张")).toBeInTheDocument();
     fireEvent.click(first, { ctrlKey: true });
@@ -3050,8 +3239,9 @@ describe("PhotoOrganizer application shell", () => {
       expect.objectContaining({ page: 1, pageSize: 120 }),
     );
     expect(screen.queryByRole("navigation", { name: "图库分页" })).not.toBeInTheDocument();
-    await waitFor(() => expect(api.fetchPreview).toHaveBeenCalledWith(12, "original"));
-    await waitFor(() => expect(api.fetchPreview).toHaveBeenCalledWith(13, "original"));
+    await waitFor(() => expect(api.fetchPreview).toHaveBeenCalledWith(12, "screen"));
+    expect(api.fetchPreview).not.toHaveBeenCalledWith(12, "original");
+    expect(api.fetchPreview).not.toHaveBeenCalledWith(13, "original");
     const previewStage = screen.getByAltText(asset.fileName).closest<HTMLElement>(".zoom-stage");
     expect(previewStage).not.toBeNull();
     const getBoundingClientRect = vi.spyOn(previewStage as HTMLElement, "getBoundingClientRect");
@@ -3081,6 +3271,8 @@ describe("PhotoOrganizer application shell", () => {
       clientY: 120,
     });
     await waitFor(() => expect(screen.getByText("100%")).toBeInTheDocument());
+    await waitFor(() => expect(api.fetchPreview).toHaveBeenCalledWith(12, "original"));
+    expect(api.fetchPreview).not.toHaveBeenCalledWith(13, "original");
     expect(previewImage.style.transform).toContain("155.78947368421052px");
     fireEvent.doubleClick(await screen.findByAltText(asset.fileName));
     await waitFor(() => expect(zoomLabel?.textContent).toBe(zoomBeforeWheel));
@@ -3096,7 +3288,8 @@ describe("PhotoOrganizer application shell", () => {
     await waitFor(() => expect(zoomLabel?.textContent).toBe(zoomBeforeWheel));
     expect(
       api.fetchPreview.mock.calls.filter((call) => call[0] === 13 && call[1] === "original"),
-    ).toHaveLength(1);
+    ).toHaveLength(0);
+    expect(api.fetchPreview).toHaveBeenCalledWith(13, "screen");
     expect(screen.getByRole("button", { name: "海边.png" })).toHaveAttribute(
       "aria-current",
       "true",

@@ -185,6 +185,22 @@ export interface AssetPage {
   pageSize: number;
 }
 
+export type AssetGroupField = Exclude<AssetGroupBy, "none">;
+
+export interface AssetGroupSummary {
+  key: string;
+  label?: string | null;
+  uniqueCount: number;
+}
+
+export interface AssetGroupPage {
+  groups: AssetGroupSummary[];
+  groupCount: number;
+  globalUniqueTotal: number;
+  page: number;
+  pageSize: number;
+}
+
 /**
  * The serializable membership query for the current browse surface.
  * Presentation state such as grid/single preview is intentionally separate.
@@ -516,6 +532,234 @@ export interface OrganizationPlan {
   summary: OrganizationPlanSummary;
   items: OrganizationPlanItem[];
   tree: OrganizationTreeNode;
+}
+
+export type CopyExportLayout = "preserve_original" | "capture_year_month";
+export type CopyExportConflictPolicy = "block" | "skip" | "sequence" | "short_hash";
+export type MissingCaptureTimePolicy =
+  "block" | "preserve_original_folders" | "unknown_folder" | "skip";
+
+export interface CopyExportRules {
+  version: string;
+  layout: CopyExportLayout;
+  conflictPolicy: CopyExportConflictPolicy;
+  missingCaptureTimePolicy: MissingCaptureTimePolicy;
+}
+
+export type OrganizationPlanScopeV2 =
+  { kind: "query"; query: AssetQuery } | { kind: "explicit_assets"; assetIds: number[] };
+
+export interface OrganizationTargetV2 {
+  parentGrantId: string;
+  childName: string;
+}
+
+export interface CreateOrganizationPlanV2Request {
+  scope: OrganizationPlanScopeV2;
+  target: OrganizationTargetV2;
+  rules: CopyExportRules;
+}
+
+export interface TargetParentGrantResponse {
+  grantId: string;
+  displayPath: string;
+}
+
+export type CopyPlanItemStatus = "ready" | "blocked" | "skipped";
+export type CopyPlanStatus = "ready" | "blocked" | "stale" | "consumed";
+
+export interface CopyPlanIssue {
+  code: string;
+  detail: string;
+  assetId: number | null;
+  sourcePath: string | null;
+  targetPath: string | null;
+}
+
+export interface OrganizationPlanItemV2 {
+  ordinal: number;
+  assetId: number;
+  libraryId: number;
+  sourceRootPath: string;
+  sourcePath: string;
+  sourceRelativePath: string;
+  sourceFingerprintBlake3: string;
+  sourceSize: number;
+  sourceModifiedAt: number;
+  captureTime: string | null;
+  classificationRevision: number;
+  targetRelativePath: string;
+  targetPath: string;
+  status: CopyPlanItemStatus;
+  issues: CopyPlanIssue[];
+}
+
+export interface OrganizationPlanSummaryV2 {
+  planId: string;
+  revision: string;
+  status: CopyPlanStatus;
+  scope: OrganizationPlanScopeV2;
+  targetRoot: string;
+  matchedCount: number;
+  eligibleCount: number;
+  skippedCount: number;
+  blockedCount: number;
+  estimatedBytes: number;
+  issues: CopyPlanIssue[];
+  snapshotBlake3: string;
+  createdAt: string;
+  rules: CopyExportRules;
+  tree: OrganizationTreeNode;
+}
+
+export interface OrganizationPlanV2 {
+  summary: OrganizationPlanSummaryV2;
+  items: OrganizationPlanItemV2[];
+  itemTotal: number;
+  itemPage: number;
+  itemPageSize: number;
+}
+
+export interface RecentOrganizationPlanV2 {
+  planId: string;
+  revision: string;
+  status: CopyPlanStatus;
+  targetRoot: string;
+  matchedCount: number;
+  eligibleCount: number;
+  blockedCount: number;
+  createdAt: string;
+}
+
+export type CopyExportOperation = "copy" | "resume" | "rollback";
+export type CopyExportJobState =
+  | "queued"
+  | "running"
+  | "cancelling"
+  | "cancelled"
+  | "completed"
+  | "partial"
+  | "failed"
+  | "interrupted"
+  | "reconcile_required"
+  | "rolling_back"
+  | "rolled_back";
+export type CopyExportJobItemState =
+  | "pending"
+  | "copying"
+  | "copied"
+  | "skipped"
+  | "failed"
+  | "cancelled"
+  | "partial"
+  | "reconcile_required"
+  | "rollback_pending"
+  | "rolled_back"
+  | "rollback_blocked";
+export type CopyExportProgressPhase =
+  "preparing" | "verifying_source" | "copying" | "rolling_back" | "completed";
+
+export interface DurableFileIdentity {
+  volumeSerial: number;
+  fileIndexHigh: number;
+  fileIndexLow: number;
+  creationFiletime: string;
+}
+
+export interface CopyExportFileSnapshot {
+  identity: DurableFileIdentity | null;
+  sizeBytes: number;
+  modifiedTime: string;
+  blake3: string;
+}
+
+export interface CopyExportCommittedTargetIdentity {
+  identity: DurableFileIdentity;
+  sizeBytes: number;
+  blake3: string;
+  finalPath: string;
+}
+
+export interface CopyExportPreflight {
+  resourceId: string;
+  operation: CopyExportOperation;
+  authorizationToken: string;
+  expiresAtUnixMs: number;
+  targetRoot: string;
+  planRevision: string;
+  snapshotBlake3: string;
+  itemCount: number;
+  estimatedBytes: number;
+  blockedCount: number;
+}
+
+export interface CopyExportStartResponse {
+  jobId: string;
+  accepted: boolean;
+}
+
+export interface CopyExportProgress {
+  jobId: string;
+  phase: CopyExportProgressPhase;
+  completedItems: number;
+  totalItems: number;
+  currentOrdinal: number | null;
+  currentAssetId: number | null;
+  bytesProcessed: number;
+  totalBytes: number;
+}
+
+export interface CopyExportRuntimeStatus {
+  jobId: string;
+  operation: CopyExportOperation;
+  running: boolean;
+  progress: CopyExportProgress | null;
+  error: string | null;
+}
+
+export type CopyExportReconcileDecision =
+  "retry_when_target_absent" | "adopt_verified_complete" | "keep_quarantined";
+
+export interface CopyExportJobItemView {
+  ordinal: number;
+  assetId: number;
+  state: CopyExportJobItemState;
+  attempts: number;
+  targetRelativePath: string;
+  sourceSnapshot: CopyExportFileSnapshot;
+  partialTargetIdentity: DurableFileIdentity | null;
+  partialSnapshot: CopyExportFileSnapshot | null;
+  outputIdentity: CopyExportCommittedTargetIdentity | null;
+}
+
+export interface CopyExportJobView {
+  jobId: string;
+  planId: string;
+  targetRoot: string;
+  state: CopyExportJobState;
+  progressCompletedItems: number;
+  progressTotalItems: number;
+  progressCompletedBytes: number;
+  progressTotalBytes: number;
+  currentItemOrdinal: number | null;
+  cancelRequested: boolean;
+  createdAt: string;
+  updatedAt: string;
+  items: CopyExportJobItemView[];
+  itemTotal: number;
+  itemPage: number;
+  itemPageSize: number;
+}
+
+export interface RecentCopyExportJob {
+  jobId: string;
+  planId: string;
+  targetRoot: string;
+  state: CopyExportJobState;
+  progressCompletedItems: number;
+  progressTotalItems: number;
+  createdAt: string;
+  updatedAt: string;
 }
 
 export interface WorkflowAsset {

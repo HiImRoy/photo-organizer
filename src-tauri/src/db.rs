@@ -1,5 +1,5 @@
 use std::collections::{HashMap, HashSet};
-use std::fs::File;
+use std::fs::{File, OpenOptions};
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -7,7 +7,8 @@ use std::time::Duration;
 use chrono::{SecondsFormat, Utc};
 use rusqlite::functions::FunctionFlags;
 use rusqlite::types::Value;
-use rusqlite::{Connection, OptionalExtension, Transaction, params, params_from_iter};
+use rusqlite::{Connection, OpenFlags, OptionalExtension, Transaction, params, params_from_iter};
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::classification::{
@@ -16,12 +17,19 @@ use crate::classification::{
     ManualClassification, normalize_override_value, normalize_tag_id, resolve_classification,
 };
 use crate::error::{AppError, AppResult};
+use crate::export_file_safety::{
+    CommittedTargetIdentity, DurableFileIdentity, FileOperationService,
+    FileSnapshot as OperationFileSnapshot, ProtectedRoot,
+};
 use crate::models::{
-    ASSET_QUERY_VERSION, AssetDetail, AssetFilter, AssetGridItem, AssetListItem, AssetPage,
-    AssetQuery, AssetQueryRoot, AssetSortField, ColorPalette, ExistingAssetSnapshot, FileSnapshot,
-    FolderSummary, LibrarySummary, OrganizationIssue, OrganizationIssueSeverity, OrganizationPlan,
-    OrganizationPlanRecord, ProcessedImage, SemanticGroupSummary, SemanticLabelResult,
-    SemanticMatchMode, SemanticProgress, SortDirection,
+    ASSET_QUERY_VERSION, AssetDetail, AssetFilter, AssetGridItem, AssetGroupBy, AssetGroupPage,
+    AssetGroupSummary, AssetListItem, AssetNeighborDirection, AssetPage, AssetQuery,
+    AssetQueryRoot, AssetSortField, ColorPalette, CopyPlanItemStatus, CopyPlanStatus,
+    CreateOrganizationPlanV2Request, ExistingAssetSnapshot, FileSnapshot, FolderSummary,
+    LibrarySummary, OrganizationIssue, OrganizationIssueSeverity, OrganizationPlan,
+    OrganizationPlanItemV2, OrganizationPlanRecord, OrganizationPlanScopeV2,
+    OrganizationPlanSummaryV2, OrganizationPlanV2, ProcessedImage, RecentOrganizationPlanV2,
+    SemanticGroupSummary, SemanticLabelResult, SemanticMatchMode, SemanticProgress, SortDirection,
 };
 use crate::semantic::{
     ANALYSIS_VERSION as SEMANTIC_ANALYSIS_VERSION, ExecutionBackend, MODEL_NAME, MODEL_VERSION,
@@ -63,9 +71,34 @@ const UNIFIED_SOURCE_COLLECTION_MIGRATION: &str =
     include_str!("../migrations/0016_unified_source_collection.sql");
 const SEMANTIC_ANALYSIS_TAXONOMY_MIGRATION: &str =
     include_str!("../migrations/0017_semantic_analysis_taxonomy.sql");
+const CORE_COPY_EXPORT_MIGRATION: &str = include_str!("../migrations/0019_core_copy_export.sql");
 
 const LIBRARY_REMOVAL_BATCH_SIZE: i64 = 256;
 const SQLITE_IN_QUERY_BATCH_SIZE: usize = 128;
+type CopyExportContextHead = (
+    String,
+    String,
+    String,
+    String,
+    String,
+    Option<String>,
+    String,
+);
+type CopyExportJobPageHead = (
+    String,
+    String,
+    String,
+    String,
+    i64,
+    i64,
+    i64,
+    i64,
+    Option<i64>,
+    i64,
+    String,
+    String,
+    i64,
+);
 const EXISTING_ASSET_LOOKUP_SQL: &str =
     "SELECT a.id, a.file_size, a.modified_at, a.analysis_status,
                         t.status, t.cache_path, COALESCE(tf.algorithm_version, cf.algorithm_version)
@@ -158,6 +191,112 @@ pub struct LibraryRemovalResult {
     pub removed_thumbnail_cache_paths: Vec<PathBuf>,
 }
 
+/// Frozen database intent consumed by the single safe-copy runner. These are
+/// loaded from the immutable plan/job tables, never from live UI state.
+#[derive(Debug, Clone)]
+pub struct CopyExportJobContext {
+    pub job_id: String,
+    pub plan_id: String,
+    pub target_parent_path: PathBuf,
+    pub target_parent_identity: DurableFileIdentity,
+    pub target_child_name: String,
+    pub target_root_path: PathBuf,
+    pub target_root_identity: Option<DurableFileIdentity>,
+    pub protected_roots: Vec<ProtectedRoot>,
+    pub items: Vec<CopyExportJobItem>,
+}
+
+#[derive(Debug, Clone)]
+pub struct CopyExportJobItem {
+    pub ordinal: u32,
+    pub asset_id: i64,
+    pub source_path: PathBuf,
+    pub source_snapshot: OperationFileSnapshot,
+    pub target_relative_path: PathBuf,
+    pub state: String,
+    pub attempts: u32,
+    pub partial_target_identity: Option<DurableFileIdentity>,
+    pub partial_snapshot: Option<OperationFileSnapshot>,
+    pub output_identity: Option<CommittedTargetIdentity>,
+}
+
+#[derive(Debug, Clone)]
+pub struct CopyExportJobPage {
+    pub job_id: String,
+    pub plan_id: String,
+    pub target_root: String,
+    pub state: String,
+    pub progress_completed_items: u64,
+    pub progress_total_items: u64,
+    pub progress_completed_bytes: u64,
+    pub progress_total_bytes: u64,
+    pub current_item_ordinal: Option<u32>,
+    pub cancel_requested: bool,
+    pub created_at: String,
+    pub updated_at: String,
+    pub item_total: u64,
+    pub item_page: u32,
+    pub item_page_size: u32,
+    pub items: Vec<CopyExportJobPageItem>,
+}
+
+#[derive(Debug, Clone)]
+pub struct CopyExportJobPageItem {
+    pub ordinal: u32,
+    pub asset_id: i64,
+    pub state: String,
+    pub attempts: u32,
+    pub target_relative_path: PathBuf,
+    pub source_snapshot: OperationFileSnapshot,
+    pub partial_target_identity: Option<DurableFileIdentity>,
+    pub partial_snapshot: Option<OperationFileSnapshot>,
+    pub output_identity: Option<CommittedTargetIdentity>,
+}
+
+#[derive(Debug, Clone)]
+pub struct RecentCopyExportJobRecord {
+    pub job_id: String,
+    pub plan_id: String,
+    pub target_root: String,
+    pub state: String,
+    pub progress_completed_items: u64,
+    pub progress_total_items: u64,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct OrganizationScopeAssetSnapshot {
+    pub asset: AssetListItem,
+    pub fingerprint_blake3: String,
+    pub classification_revision: i64,
+    pub source_root_path: PathBuf,
+}
+
+#[derive(Debug, Clone, Default)]
+pub(crate) struct OrganizationScopeSnapshotV2 {
+    pub assets: Vec<OrganizationScopeAssetSnapshot>,
+    pub missing_explicit_asset_ids: Vec<i64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CopyExportPlanBinding {
+    pub target_parent_path: PathBuf,
+    pub target_parent_identity: DurableFileIdentity,
+    pub target_child_name: String,
+    pub protected_roots: Vec<ProtectedRoot>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CatalogRuntimeIdentity {
+    pub catalog_id: String,
+    pub instance_epoch: i64,
+    pub database_path: PathBuf,
+    pub database_file_identity: DurableFileIdentity,
+}
+
 pub(crate) fn is_terminal_semantic_job_status(status: &str) -> bool {
     matches!(status, "completed" | "cancelled" | "failed")
 }
@@ -169,6 +308,20 @@ struct FullAssetPage {
     page_size: u32,
 }
 
+struct CatalogBackupSnapshot {
+    id: String,
+    backup_path: String,
+    schema_version: i64,
+    purpose: String,
+    database_identity: String,
+    backup_blake3: String,
+    integrity_check: String,
+    foreign_key_check_count: i64,
+    restore_check: String,
+    created_at: String,
+    verified_at: String,
+}
+
 impl Repository {
     pub fn new(database_path: impl AsRef<Path>) -> Self {
         Self {
@@ -178,6 +331,1588 @@ impl Repository {
 
     pub fn database_path(&self) -> &Path {
         &self.database_path
+    }
+
+    pub fn catalog_runtime_identity(&self) -> AppResult<CatalogRuntimeIdentity> {
+        let connection = self.open()?;
+        let (catalog_id, instance_epoch): (String, i64) = connection.query_row(
+            "SELECT catalog_id, instance_epoch
+             FROM catalog_runtime_state WHERE singleton=1",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        // Catalog identity uses a metadata-only shared-open helper because
+        // background scanners may keep SQLite connections alive. Source-file
+        // leases intentionally retain their stricter share-deny policy.
+        drop(connection);
+        let database_file_identity = crate::export_file_safety::FileOperationService
+            .inspect_shared_file_identity(&self.database_path)?
+            .ok_or_else(|| {
+                AppError::Io(std::io::Error::new(
+                    std::io::ErrorKind::Unsupported,
+                    "catalog authorization requires a durable database file identity",
+                ))
+            })?;
+        Ok(CatalogRuntimeIdentity {
+            catalog_id,
+            instance_epoch,
+            database_path: self.database_path.clone(),
+            database_file_identity,
+        })
+    }
+
+    /// Create and record the minimum catalog recovery proof required before
+    /// an original-file copy job may begin. No target file is touched here.
+    pub fn ensure_copy_recovery_gate(&self) -> AppResult<()> {
+        let connection = self.open()?;
+        let current: i64 = connection.query_row(
+            "SELECT COALESCE(MAX(version), 0) FROM schema_migrations",
+            [],
+            |row| row.get(0),
+        )?;
+        if current < 19 {
+            return Err(AppError::InvalidArgument(
+                "safe copy is unavailable until the catalog recovery migration is installed".into(),
+            ));
+        }
+        let backup =
+            create_verified_catalog_backup(&connection, &self.database_path, current, "pre_copy")?;
+        connection.execute(
+            "INSERT INTO catalog_backup_records(
+                id, backup_path, purpose, schema_version, database_identity,
+                backup_blake3, integrity_check, foreign_key_check_count,
+                restore_check, created_at, verified_at
+             ) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+            params![
+                backup.id,
+                backup.backup_path,
+                backup.purpose,
+                backup.schema_version,
+                backup.database_identity,
+                backup.backup_blake3,
+                backup.integrity_check,
+                backup.foreign_key_check_count,
+                backup.restore_check,
+                backup.created_at,
+                backup.verified_at,
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Freeze a prepared copy job in SQLite before the runner creates any
+    /// filesystem object. The plan must already be immutable and ready.
+    pub fn prepare_copy_export_job(
+        &self,
+        plan_id: &str,
+        protected_roots: &[ProtectedRoot],
+    ) -> AppResult<CopyExportJobContext> {
+        let mut connection = self.open()?;
+        let transaction = connection.transaction()?;
+        let plan: Option<(String, String)> = transaction
+            .query_row(
+                "SELECT target_root_path, status
+                 FROM organization_plans_v2 WHERE id=?1",
+                [plan_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+        let Some((target_root, status)) = plan else {
+            return Err(AppError::NotFound(format!("organization plan {plan_id}")));
+        };
+        if status != "ready" {
+            return Err(AppError::InvalidArgument(
+                "only a ready immutable plan can start a copy job".into(),
+            ));
+        }
+        let blocked: i64 = transaction.query_row(
+            "SELECT COUNT(*) FROM organization_plan_items_v2
+             WHERE plan_id=?1 AND item_status='blocked'",
+            [plan_id],
+            |row| row.get(0),
+        )?;
+        if blocked != 0 {
+            return Err(AppError::InvalidArgument(
+                "blocked plan items must be resolved before copying".into(),
+            ));
+        }
+        let eligible: i64 = transaction.query_row(
+            "SELECT COUNT(*) FROM organization_plan_items_v2
+             WHERE plan_id=?1 AND item_status='ready'",
+            [plan_id],
+            |row| row.get(0),
+        )?;
+        if eligible == 0 {
+            return Err(AppError::InvalidArgument(
+                "the plan has no eligible files to copy".into(),
+            ));
+        }
+        let active: bool = transaction.query_row(
+            "SELECT EXISTS(SELECT 1 FROM copy_export_jobs
+             WHERE plan_id=?1 AND state IN ('queued','running','cancelling','rolling_back'))",
+            [plan_id],
+            |row| row.get(0),
+        )?;
+        if active {
+            return Err(AppError::InvalidArgument(
+                "this plan already has an active copy job".into(),
+            ));
+        }
+
+        let job_id = uuid::Uuid::new_v4().to_string();
+        let timestamp = now();
+        let protected_json = serde_json::to_string(protected_roots)?;
+        transaction.execute(
+            "INSERT INTO copy_export_jobs(
+                id, plan_id, state, target_root_path, protected_roots_json,
+                progress_total_items, progress_total_bytes, created_at, updated_at
+             ) VALUES(?1, ?2, 'queued', ?3, ?4, ?5,
+                 COALESCE((SELECT SUM(source_size) FROM organization_plan_items_v2
+                           WHERE plan_id=?2 AND item_status='ready'), 0), ?6, ?6)",
+            params![
+                job_id,
+                plan_id,
+                target_root,
+                protected_json,
+                eligible,
+                timestamp
+            ],
+        )?;
+        transaction.execute(
+            "INSERT INTO copy_export_job_items(
+                job_id, item_ordinal, asset_id, source_path,
+                source_file_identity_json, source_fingerprint_blake3, target_path,
+                state, created_at, updated_at
+             )
+             SELECT ?1, ordinal, asset_id, source_path, source_file_identity_json,
+                    source_fingerprint_blake3, target_path, 'pending', ?2, ?2
+             FROM organization_plan_items_v2
+             WHERE plan_id=?3 AND item_status='ready'
+             ORDER BY ordinal",
+            params![job_id, timestamp, plan_id],
+        )?;
+        let root_intent: String = transaction.query_row(
+            "SELECT json_object(
+                    'planId', p.id,
+                    'parentPath', p.target_parent_path,
+                    'parentIdentity', p.target_parent_identity_json,
+                    'childName', p.target_child_name,
+                    'targetRoot', p.target_root_path)
+             FROM organization_plans_v2 p WHERE p.id=?1",
+            [plan_id],
+            |row| row.get(0),
+        )?;
+        transaction.execute(
+            "INSERT INTO file_operation_log(
+                id, job_id, operation_kind, state, intent_json, created_at
+             ) VALUES(?1, ?2, 'create_output_root', 'prepared', ?3, ?4)",
+            params![
+                uuid::Uuid::new_v4().to_string(),
+                job_id,
+                root_intent,
+                timestamp
+            ],
+        )?;
+        transaction.execute(
+            "UPDATE organization_plans_v2 SET status='consumed', updated_at=?2 WHERE id=?1",
+            params![plan_id, timestamp],
+        )?;
+        transaction.commit()?;
+        self.load_copy_export_context(&job_id)
+    }
+
+    pub fn load_copy_export_context(&self, job_id: &str) -> AppResult<CopyExportJobContext> {
+        let connection = self.open()?;
+        let head: Option<CopyExportContextHead> = connection
+            .query_row(
+                "SELECT j.plan_id, p.target_parent_path, p.target_parent_identity_json,
+                        p.target_child_name, j.target_root_path,
+                        j.target_root_identity_json,
+                        CASE WHEN j.protected_roots_json='[]'
+                             THEN p.protected_roots_json ELSE j.protected_roots_json END
+                 FROM copy_export_jobs j
+                 JOIN organization_plans_v2 p ON p.id=j.plan_id
+                 WHERE j.id=?1",
+                [job_id],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                        row.get(5)?,
+                        row.get(6)?,
+                    ))
+                },
+            )
+            .optional()?;
+        let Some((
+            plan_id,
+            parent_path,
+            parent_identity_json,
+            child_name,
+            root_path,
+            root_identity_json,
+            protected_json,
+        )) = head
+        else {
+            return Err(AppError::NotFound(format!("copy export job {job_id}")));
+        };
+        let target_parent_identity: DurableFileIdentity =
+            serde_json::from_str(&parent_identity_json)?;
+        let target_root_identity = root_identity_json
+            .map(|json| serde_json::from_str(&json))
+            .transpose()?;
+        let protected_roots: Vec<ProtectedRoot> = serde_json::from_str(&protected_json)?;
+
+        let mut statement = connection.prepare(
+            "SELECT i.item_ordinal, i.asset_id, i.source_path,
+                    p.source_file_identity_json, p.source_fingerprint_blake3,
+                    p.source_size, p.source_modified_filetime, p.target_relative_path,
+                    i.state, i.attempts, i.partial_file_identity_json,
+                    i.output_file_identity_json
+             FROM copy_export_job_items i
+             JOIN organization_plan_items_v2 p
+               ON p.plan_id=(SELECT plan_id FROM copy_export_jobs WHERE id=i.job_id)
+              AND p.ordinal=i.item_ordinal
+             WHERE i.job_id=?1 ORDER BY i.item_ordinal",
+        )?;
+        let raw = statement
+            .query_map([job_id], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, String>(4)?,
+                    row.get::<_, i64>(5)?,
+                    row.get::<_, i64>(6)?,
+                    row.get::<_, String>(7)?,
+                    row.get::<_, String>(8)?,
+                    row.get::<_, i64>(9)?,
+                    row.get::<_, Option<String>>(10)?,
+                    row.get::<_, Option<String>>(11)?,
+                ))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        let mut items = Vec::with_capacity(raw.len());
+        for (
+            ordinal,
+            asset_id,
+            source_path,
+            identity_json,
+            blake3,
+            size,
+            modified,
+            target_relative,
+            state,
+            attempts,
+            partial_json,
+            output_json,
+        ) in raw
+        {
+            let identity: Option<DurableFileIdentity> = serde_json::from_str(&identity_json)?;
+            let partial_value = partial_json
+                .map(|json| serde_json::from_str::<serde_json::Value>(&json))
+                .transpose()?;
+            let partial_snapshot: Option<OperationFileSnapshot> = partial_value
+                .as_ref()
+                .filter(|value| value.get("blake3").is_some())
+                .map(|value| serde_json::from_value(value.clone()))
+                .transpose()?;
+            let partial_target_identity = if let Some(snapshot) = partial_snapshot.as_ref() {
+                snapshot.identity.clone()
+            } else {
+                partial_value
+                    .as_ref()
+                    .filter(|value| value.get("volume_serial").is_some())
+                    .map(|value| serde_json::from_value(value.clone()))
+                    .transpose()?
+            };
+            items.push(CopyExportJobItem {
+                ordinal: u32::try_from(ordinal).map_err(|_| {
+                    AppError::InvalidArgument("copy item ordinal is out of range".into())
+                })?,
+                asset_id,
+                source_path: PathBuf::from(source_path),
+                source_snapshot: OperationFileSnapshot {
+                    identity,
+                    size_bytes: u64::try_from(size).unwrap_or_default(),
+                    modified_time: u64::try_from(modified).unwrap_or_default(),
+                    blake3,
+                },
+                target_relative_path: PathBuf::from(target_relative),
+                state,
+                attempts: u32::try_from(attempts).unwrap_or_default(),
+                partial_target_identity,
+                partial_snapshot,
+                output_identity: output_json
+                    .map(|json| serde_json::from_str(&json))
+                    .transpose()?,
+            });
+        }
+        Ok(CopyExportJobContext {
+            job_id: job_id.to_string(),
+            plan_id,
+            target_parent_path: PathBuf::from(parent_path),
+            target_parent_identity,
+            target_child_name: child_name,
+            target_root_path: PathBuf::from(root_path),
+            target_root_identity,
+            protected_roots,
+            items,
+        })
+    }
+
+    pub fn copy_export_job_state(&self, job_id: &str) -> AppResult<Option<String>> {
+        let connection = self.open()?;
+        connection
+            .query_row(
+                "SELECT state FROM copy_export_jobs WHERE id=?1",
+                [job_id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(AppError::from)
+    }
+
+    /// Queue a previously interrupted/partial copy only after every ambiguous
+    /// item has been reconciled and any prepared output-root intent is known
+    /// to have completed. This method never replays an ambiguous filesystem
+    /// action from SQLite alone.
+    pub fn queue_copy_export_resume(&self, job_id: &str) -> AppResult<()> {
+        let mut connection = self.open()?;
+        let transaction = connection.transaction()?;
+        let state: Option<String> = transaction
+            .query_row(
+                "SELECT state FROM copy_export_jobs WHERE id=?1",
+                [job_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let Some(state) = state else {
+            return Err(AppError::NotFound(format!("copy export job {job_id}")));
+        };
+        if !matches!(
+            state.as_str(),
+            "partial" | "interrupted" | "cancelled" | "failed" | "reconcile_required"
+        ) {
+            return Err(AppError::InvalidArgument(
+                "copy job is not eligible for resume".into(),
+            ));
+        }
+        let unresolved_items: i64 = transaction.query_row(
+            "SELECT COUNT(*) FROM copy_export_job_items
+             WHERE job_id=?1 AND state IN
+                   ('copying','partial','reconcile_required','rollback_pending','rollback_blocked')",
+            [job_id],
+            |row| row.get(0),
+        )?;
+        let ambiguous_root: bool = transaction.query_row(
+            "SELECT EXISTS(
+                 SELECT 1 FROM file_operation_log
+                 WHERE job_id=?1 AND operation_kind='create_output_root'
+                   AND state='prepared'
+             ) AND EXISTS(
+                 SELECT 1 FROM copy_export_jobs WHERE id=?1
+                   AND target_root_identity_json IS NULL
+             )",
+            [job_id],
+            |row| row.get(0),
+        )?;
+        if unresolved_items != 0 || ambiguous_root {
+            return Err(AppError::InvalidArgument(
+                "copy job has an unresolved filesystem intent; reconcile it before resuming".into(),
+            ));
+        }
+        let timestamp = now();
+        transaction.execute(
+            "UPDATE copy_export_job_items SET state='pending', error=NULL, updated_at=?2
+             WHERE job_id=?1 AND state IN ('failed','cancelled')
+               AND partial_file_identity_json IS NULL",
+            params![job_id, timestamp],
+        )?;
+        let changed = transaction.execute(
+            "UPDATE copy_export_jobs SET state='queued', cancel_requested=0,
+                    completed_at=NULL, updated_at=?2
+             WHERE id=?1 AND state IN ('partial','interrupted','cancelled')",
+            params![job_id, timestamp],
+        )?;
+        if changed != 1 {
+            return Err(AppError::InvalidArgument(
+                "copy job changed before resume could be queued".into(),
+            ));
+        }
+        transaction.execute(
+            "INSERT INTO file_operation_log(
+                id, job_id, operation_kind, state, intent_json, created_at
+             ) VALUES(?1, ?2, 'resume_copy_job', 'prepared', ?3, ?4)",
+            params![
+                uuid::Uuid::new_v4().to_string(),
+                job_id,
+                serde_json::to_string(&serde_json::json!({"jobId":job_id}))?,
+                timestamp
+            ],
+        )?;
+        transaction.commit()?;
+        Ok(())
+    }
+
+    /// Persist a user-confirmed reconciliation decision. Verified adoption is
+    /// accepted only when the target has the exact frozen source size/hash.
+    pub fn reconcile_copy_export_item(
+        &self,
+        job_id: &str,
+        ordinal: u32,
+        decision: &str,
+        verified_output: Option<&CommittedTargetIdentity>,
+    ) -> AppResult<()> {
+        let mut connection = self.open()?;
+        let transaction = connection.transaction()?;
+        let frozen: Option<(String, i64, String, String)> = transaction
+            .query_row(
+                "SELECT i.state, p.source_size, p.source_fingerprint_blake3,
+                        p.target_path
+                 FROM copy_export_job_items i
+                 JOIN copy_export_jobs j ON j.id=i.job_id
+                 JOIN organization_plan_items_v2 p ON p.plan_id=j.plan_id
+                      AND p.ordinal=i.item_ordinal
+                 WHERE i.job_id=?1 AND i.item_ordinal=?2",
+                params![job_id, ordinal],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .optional()?;
+        let Some((item_state, source_size, source_hash, target_path)) = frozen else {
+            return Err(AppError::NotFound(format!(
+                "copy export item {job_id}:{ordinal}"
+            )));
+        };
+        let timestamp = now();
+        match decision {
+            "retry_when_target_absent" => {
+                if verified_output.is_some()
+                    || !matches!(
+                        item_state.as_str(),
+                        "copying" | "partial" | "reconcile_required" | "failed" | "cancelled"
+                    )
+                {
+                    return Err(AppError::InvalidArgument(
+                        "item cannot be retried from its current state".into(),
+                    ));
+                }
+                transaction.execute(
+                    "UPDATE copy_export_job_items SET state='pending',
+                            partial_file_identity_json=NULL, output_file_identity_json=NULL,
+                            output_fingerprint_blake3=NULL, output_size=NULL,
+                            error=NULL, updated_at=?3
+                     WHERE job_id=?1 AND item_ordinal=?2",
+                    params![job_id, ordinal, timestamp],
+                )?;
+            }
+            "adopt_verified_complete" => {
+                let output = verified_output.ok_or_else(|| {
+                    AppError::InvalidArgument("verified output identity is required".into())
+                })?;
+                if !matches!(
+                    item_state.as_str(),
+                    "copying" | "partial" | "reconcile_required" | "failed"
+                ) || i64::try_from(output.size_bytes).unwrap_or(i64::MAX) != source_size
+                    || output.blake3 != source_hash
+                    || identity_key(&output.final_path) != identity_key(Path::new(&target_path))
+                {
+                    return Err(AppError::InvalidArgument(
+                        "verified output does not match the frozen copy item".into(),
+                    ));
+                }
+                transaction.execute(
+                    "UPDATE copy_export_job_items SET state='copied',
+                            partial_file_identity_json=NULL,
+                            output_file_identity_json=?3, output_fingerprint_blake3=?4,
+                            output_size=?5, error=NULL, updated_at=?6
+                     WHERE job_id=?1 AND item_ordinal=?2",
+                    params![
+                        job_id,
+                        ordinal,
+                        serde_json::to_string(output)?,
+                        output.blake3,
+                        output.size_bytes,
+                        timestamp
+                    ],
+                )?;
+            }
+            "keep_quarantined" => {
+                if verified_output.is_some()
+                    || !matches!(
+                        item_state.as_str(),
+                        "copying" | "partial" | "reconcile_required" | "failed"
+                    )
+                {
+                    return Err(AppError::InvalidArgument(
+                        "item cannot be quarantined from its current state".into(),
+                    ));
+                }
+                transaction.execute(
+                    "UPDATE copy_export_job_items SET state='reconcile_required',
+                            error='quarantined for manual review', updated_at=?3
+                     WHERE job_id=?1 AND item_ordinal=?2",
+                    params![job_id, ordinal, timestamp],
+                )?;
+            }
+            other => {
+                return Err(AppError::InvalidArgument(format!(
+                    "unknown copy reconciliation decision: {other}"
+                )));
+            }
+        }
+        let item_result = match decision {
+            "adopt_verified_complete" => serde_json::json!({
+                "decision":decision,
+                "verifiedOutput":verified_output,
+            }),
+            _ => serde_json::json!({"decision":decision}),
+        };
+        transaction.execute(
+            "INSERT INTO file_operation_log(
+                id, job_id, item_ordinal, operation_kind, state,
+                intent_json, result_json, created_at, completed_at
+             ) VALUES(?1, ?2, ?3, 'reconcile_copy_item', 'completed', ?4, ?5, ?6, ?6)",
+            params![
+                uuid::Uuid::new_v4().to_string(),
+                job_id,
+                ordinal,
+                serde_json::to_string(&serde_json::json!({"decision":decision}))?,
+                serde_json::to_string(&item_result)?,
+                timestamp
+            ],
+        )?;
+        let unresolved: i64 = transaction.query_row(
+            "SELECT COUNT(*) FROM copy_export_job_items
+             WHERE job_id=?1 AND state IN ('copying','partial','reconcile_required',
+                                            'rollback_pending','rollback_blocked')",
+            [job_id],
+            |row| row.get(0),
+        )?;
+        transaction.execute(
+            "UPDATE copy_export_jobs SET state=?2, updated_at=?3 WHERE id=?1
+             AND state NOT IN ('completed','rolled_back')",
+            params![
+                job_id,
+                if unresolved == 0 {
+                    "partial"
+                } else {
+                    "reconcile_required"
+                },
+                timestamp
+            ],
+        )?;
+        transaction.commit()?;
+        Ok(())
+    }
+
+    /// Close a worker error without discarding target identities. Prepared
+    /// filesystem intents and partial item records remain available for
+    /// explicit reconciliation after restart.
+    pub fn mark_copy_export_job_interrupted(&self, job_id: &str, error: &str) -> AppResult<()> {
+        let mut connection = self.open()?;
+        let transaction = connection.transaction()?;
+        let exists: bool = transaction.query_row(
+            "SELECT EXISTS(SELECT 1 FROM copy_export_jobs WHERE id=?1)",
+            [job_id],
+            |row| row.get(0),
+        )?;
+        if !exists {
+            return Err(AppError::NotFound(format!("copy export job {job_id}")));
+        }
+        let ambiguous: bool = transaction.query_row(
+            "SELECT EXISTS(
+                 SELECT 1 FROM file_operation_log
+                 WHERE job_id=?1 AND state='prepared'
+                   AND operation_kind IN ('create_output_root','copy_file','rollback_file')
+             ) OR EXISTS(
+                 SELECT 1 FROM copy_export_job_items
+                 WHERE job_id=?1 AND state IN
+                       ('copying','partial','reconcile_required','rollback_pending')
+             )",
+            [job_id],
+            |row| row.get(0),
+        )?;
+        let timestamp = now();
+        transaction.execute(
+            "UPDATE copy_export_jobs SET state=?2, updated_at=?3, cancel_requested=0
+             WHERE id=?1 AND state IN ('queued','running','cancelling','rolling_back')",
+            params![
+                job_id,
+                if ambiguous {
+                    "reconcile_required"
+                } else {
+                    "interrupted"
+                },
+                timestamp
+            ],
+        )?;
+        transaction.execute(
+            "INSERT INTO file_operation_log(
+                id, job_id, operation_kind, state, intent_json, result_json,
+                created_at, completed_at
+             ) VALUES(?1, ?2, 'runner_interrupted', 'partial', ?3, ?4, ?5, ?5)",
+            params![
+                uuid::Uuid::new_v4().to_string(),
+                job_id,
+                serde_json::to_string(&serde_json::json!({"jobId":job_id}))?,
+                serde_json::to_string(&serde_json::json!({"error":error}))?,
+                timestamp
+            ],
+        )?;
+        transaction.commit()?;
+        Ok(())
+    }
+
+    /// Revalidate the live catalog membership and the cheap, handle-bound
+    /// source metadata captured by an immutable plan. Full source bytes are
+    /// verified by the runner immediately before copying.
+    pub fn validate_copy_export_plan_fresh(&self, plan_id: &str) -> AppResult<()> {
+        struct FrozenItem {
+            asset_id: i64,
+            library_id: i64,
+            source_root_path: PathBuf,
+            source_path: PathBuf,
+            source_relative_path: String,
+            source_fingerprint: String,
+            source_size: u64,
+            source_modified_at: i64,
+            source_modified_filetime: u64,
+            capture_time: Option<String>,
+            classification_revision: i64,
+            source_file_identity: Option<DurableFileIdentity>,
+        }
+
+        let (frozen_items, fresh) = {
+            let mut connection = self.open()?;
+            let transaction = connection.transaction()?;
+            let header: Option<(String, String)> = transaction
+                .query_row(
+                    "SELECT scope_json, status FROM organization_plans_v2 WHERE id=?1",
+                    [plan_id],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .optional()?;
+            let Some((scope_json, status)) = header else {
+                return Err(AppError::NotFound(format!("organization plan {plan_id}")));
+            };
+            if !matches!(status.as_str(), "ready" | "consumed") {
+                return Err(AppError::InvalidArgument(
+                    "organization plan is no longer valid for authorization".into(),
+                ));
+            }
+            let scope: OrganizationPlanScopeV2 = serde_json::from_str(&scope_json)?;
+            let mut statement = transaction.prepare(
+                "SELECT asset_id, library_id, source_root_path, source_path,
+                        source_relative_path, source_fingerprint_blake3, source_size,
+                        source_modified_at, source_modified_filetime, capture_time,
+                        classification_revision, source_file_identity_json
+                 FROM organization_plan_items_v2 WHERE plan_id=?1 ORDER BY ordinal",
+            )?;
+            let raw = statement
+                .query_map([plan_id], |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, i64>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                        row.get::<_, String>(4)?,
+                        row.get::<_, String>(5)?,
+                        row.get::<_, i64>(6)?,
+                        row.get::<_, i64>(7)?,
+                        row.get::<_, i64>(8)?,
+                        row.get::<_, Option<String>>(9)?,
+                        row.get::<_, i64>(10)?,
+                        row.get::<_, String>(11)?,
+                    ))
+                })?
+                .collect::<Result<Vec<_>, _>>()?;
+            drop(statement);
+            let frozen_items = raw
+                .into_iter()
+                .map(
+                    |(
+                        asset_id,
+                        library_id,
+                        source_root_path,
+                        source_path,
+                        source_relative_path,
+                        source_fingerprint,
+                        source_size,
+                        source_modified_at,
+                        source_modified_filetime,
+                        capture_time,
+                        classification_revision,
+                        source_file_identity_json,
+                    )| {
+                        Ok(FrozenItem {
+                            asset_id,
+                            library_id,
+                            source_root_path: PathBuf::from(source_root_path),
+                            source_path: PathBuf::from(source_path),
+                            source_relative_path,
+                            source_fingerprint,
+                            source_size: u64::try_from(source_size).map_err(|_| {
+                                AppError::InvalidArgument("negative frozen source size".into())
+                            })?,
+                            source_modified_at,
+                            source_modified_filetime: u64::try_from(source_modified_filetime)
+                                .map_err(|_| {
+                                    AppError::InvalidArgument(
+                                        "negative frozen source FILETIME".into(),
+                                    )
+                                })?,
+                            capture_time,
+                            classification_revision,
+                            source_file_identity: serde_json::from_str(&source_file_identity_json)?,
+                        })
+                    },
+                )
+                .collect::<AppResult<Vec<_>>>()?;
+            let current = Self::snapshot_organization_scope_v2_on(&transaction, &scope)?;
+            let has_missing_explicit = !current.missing_explicit_asset_ids.is_empty();
+            let current_by_id = current
+                .assets
+                .into_iter()
+                .map(|item| (item.asset.id, item))
+                .collect::<HashMap<_, _>>();
+            let mut fresh = !has_missing_explicit && current_by_id.len() == frozen_items.len();
+            if fresh {
+                for frozen in &frozen_items {
+                    let Some(live) = current_by_id.get(&frozen.asset_id) else {
+                        fresh = false;
+                        break;
+                    };
+                    let live_relative = crate::copy_export_plan::normalize_owner_relative(
+                        &live.asset.relative_path,
+                    );
+                    let frozen_relative = crate::copy_export_plan::normalize_owner_relative(
+                        &frozen.source_relative_path,
+                    );
+                    if live.asset.library_id != frozen.library_id
+                        || identity_key(Path::new(&live.asset.absolute_path))
+                            != identity_key(&frozen.source_path)
+                        || identity_key(&live.source_root_path)
+                            != identity_key(&frozen.source_root_path)
+                        || live_relative.is_none()
+                        || live_relative != frozen_relative
+                        || live.fingerprint_blake3 != frozen.source_fingerprint
+                        || live.asset.file_size.max(0) as u64 != frozen.source_size
+                        || live.asset.modified_at != frozen.source_modified_at
+                        || live.asset.capture_time != frozen.capture_time
+                        || live.classification_revision != frozen.classification_revision
+                        || live.asset.file_status != "present"
+                        || live.asset.scan_status == "failed"
+                    {
+                        fresh = false;
+                        break;
+                    }
+                }
+            }
+            transaction.commit()?;
+            (frozen_items, fresh)
+        };
+        if !fresh {
+            self.mark_copy_plan_stale(plan_id)?;
+            return Err(AppError::InvalidArgument(
+                "organization plan is stale; recreate the preview before copying".into(),
+            ));
+        }
+
+        let files = FileOperationService;
+        for item in frozen_items {
+            let metadata = match files.inspect_source_metadata(&item.source_path) {
+                Ok(metadata) => metadata,
+                Err(_) => {
+                    self.mark_copy_plan_stale(plan_id)?;
+                    return Err(AppError::InvalidArgument(
+                        "organization plan source is no longer available; recreate the preview"
+                            .into(),
+                    ));
+                }
+            };
+            if metadata.identity != item.source_file_identity
+                || metadata.size_bytes != item.source_size
+                || metadata.modified_time != item.source_modified_filetime
+            {
+                self.mark_copy_plan_stale(plan_id)?;
+                return Err(AppError::InvalidArgument(
+                    "organization plan source changed; recreate the preview before copying".into(),
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    fn mark_copy_plan_stale(&self, plan_id: &str) -> AppResult<()> {
+        let connection = self.open()?;
+        let summary_json: Option<String> = connection
+            .query_row(
+                "SELECT summary_json FROM organization_plans_v2 WHERE id=?1",
+                [plan_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let Some(summary_json) = summary_json else {
+            return Ok(());
+        };
+        let mut summary: OrganizationPlanSummaryV2 = serde_json::from_str(&summary_json)?;
+        summary.status = CopyPlanStatus::Stale;
+        connection.execute(
+            "UPDATE organization_plans_v2 SET status='stale', summary_json=?2, updated_at=?3
+             WHERE id=?1 AND status IN ('ready','consumed')",
+            params![plan_id, serde_json::to_string(&summary)?, now()],
+        )?;
+        Ok(())
+    }
+
+    pub fn copy_export_job_page(
+        &self,
+        job_id: &str,
+        item_page: u32,
+        item_page_size: u32,
+    ) -> AppResult<Option<CopyExportJobPage>> {
+        let connection = self.open()?;
+        let head: Option<CopyExportJobPageHead> = connection
+            .query_row(
+                "SELECT j.id, j.plan_id, j.target_root_path, j.state, j.progress_completed_items,
+                        j.progress_total_items, j.progress_completed_bytes,
+                        j.progress_total_bytes, j.current_item_ordinal,
+                        j.cancel_requested, j.created_at, j.updated_at,
+                        (SELECT COUNT(*) FROM copy_export_job_items i WHERE i.job_id=j.id)
+                 FROM copy_export_jobs j WHERE j.id=?1",
+                [job_id],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                        row.get(5)?,
+                        row.get(6)?,
+                        row.get(7)?,
+                        row.get(8)?,
+                        row.get(9)?,
+                        row.get(10)?,
+                        row.get(11)?,
+                        row.get(12)?,
+                    ))
+                },
+            )
+            .optional()?;
+        let Some((
+            id,
+            plan_id,
+            target_root,
+            state,
+            completed_items,
+            total_items,
+            completed_bytes,
+            total_bytes,
+            current_ordinal,
+            cancel_requested,
+            created_at,
+            updated_at,
+            item_total,
+        )) = head
+        else {
+            return Ok(None);
+        };
+        let item_page = item_page.max(1);
+        let item_page_size = item_page_size.clamp(1, 100);
+        let offset = i64::from(item_page.saturating_sub(1)) * i64::from(item_page_size);
+        let mut statement = connection.prepare(
+            "SELECT i.item_ordinal, i.asset_id, i.state, i.attempts,
+                    p.target_relative_path, p.source_file_identity_json,
+                    p.source_fingerprint_blake3, p.source_size, p.source_modified_filetime,
+                    i.partial_file_identity_json, i.output_file_identity_json
+             FROM copy_export_job_items i
+             JOIN organization_plan_items_v2 p
+               ON p.plan_id=(SELECT plan_id FROM copy_export_jobs WHERE id=i.job_id)
+              AND p.ordinal=i.item_ordinal
+             WHERE i.job_id=?1 ORDER BY i.item_ordinal LIMIT ?2 OFFSET ?3",
+        )?;
+        let rows = statement
+            .query_map(params![job_id, item_page_size, offset], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, i64>(3)?,
+                    row.get::<_, String>(4)?,
+                    row.get::<_, String>(5)?,
+                    row.get::<_, String>(6)?,
+                    row.get::<_, i64>(7)?,
+                    row.get::<_, i64>(8)?,
+                    row.get::<_, Option<String>>(9)?,
+                    row.get::<_, Option<String>>(10)?,
+                ))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        let mut items = Vec::with_capacity(rows.len());
+        for (
+            ordinal,
+            asset_id,
+            item_state,
+            attempts,
+            target_relative_path,
+            source_identity_json,
+            source_hash,
+            source_size,
+            source_modified,
+            partial_json,
+            output_json,
+        ) in rows
+        {
+            let identity: Option<DurableFileIdentity> =
+                serde_json::from_str(&source_identity_json)?;
+            let partial_snapshot: Option<OperationFileSnapshot> = partial_json
+                .as_deref()
+                .and_then(|json| serde_json::from_str::<serde_json::Value>(json).ok())
+                .filter(|value| value.get("blake3").is_some())
+                .map(serde_json::from_value)
+                .transpose()?;
+            let partial_target_identity = if let Some(snapshot) = &partial_snapshot {
+                snapshot.identity.clone()
+            } else {
+                partial_json
+                    .as_deref()
+                    .map(serde_json::from_str::<DurableFileIdentity>)
+                    .transpose()?
+            };
+            items.push(CopyExportJobPageItem {
+                ordinal: u32::try_from(ordinal).map_err(|_| {
+                    AppError::InvalidArgument("copy item ordinal is out of range".into())
+                })?,
+                asset_id,
+                state: item_state,
+                attempts: u32::try_from(attempts).unwrap_or_default(),
+                target_relative_path: PathBuf::from(target_relative_path),
+                source_snapshot: OperationFileSnapshot {
+                    identity,
+                    size_bytes: u64::try_from(source_size).unwrap_or_default(),
+                    modified_time: u64::try_from(source_modified).unwrap_or_default(),
+                    blake3: source_hash,
+                },
+                partial_target_identity,
+                partial_snapshot,
+                output_identity: output_json
+                    .map(|json| serde_json::from_str(&json))
+                    .transpose()?,
+            });
+        }
+        Ok(Some(CopyExportJobPage {
+            job_id: id,
+            plan_id,
+            target_root,
+            state,
+            progress_completed_items: u64::try_from(completed_items).unwrap_or_default(),
+            progress_total_items: u64::try_from(total_items).unwrap_or_default(),
+            progress_completed_bytes: u64::try_from(completed_bytes).unwrap_or_default(),
+            progress_total_bytes: u64::try_from(total_bytes).unwrap_or_default(),
+            current_item_ordinal: current_ordinal.and_then(|value| u32::try_from(value).ok()),
+            cancel_requested: cancel_requested != 0,
+            created_at,
+            updated_at,
+            item_total: u64::try_from(item_total).unwrap_or_default(),
+            item_page,
+            item_page_size,
+            items,
+        }))
+    }
+
+    pub fn list_recent_copy_export_jobs(
+        &self,
+        limit: u32,
+    ) -> AppResult<Vec<RecentCopyExportJobRecord>> {
+        let connection = self.open()?;
+        let mut statement = connection.prepare(
+            "SELECT id, plan_id, target_root_path, state, progress_completed_items,
+                    progress_total_items, created_at, updated_at
+             FROM copy_export_jobs ORDER BY created_at DESC, id DESC LIMIT ?1",
+        )?;
+        statement
+            .query_map([limit.clamp(1, 100)], |row| {
+                Ok(RecentCopyExportJobRecord {
+                    job_id: row.get(0)?,
+                    plan_id: row.get(1)?,
+                    target_root: row.get(2)?,
+                    state: row.get(3)?,
+                    progress_completed_items: u64::try_from(row.get::<_, i64>(4)?)
+                        .unwrap_or_default(),
+                    progress_total_items: u64::try_from(row.get::<_, i64>(5)?).unwrap_or_default(),
+                    created_at: row.get(6)?,
+                    updated_at: row.get(7)?,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(AppError::from)
+    }
+
+    pub fn record_copy_export_root_created(
+        &self,
+        job_id: &str,
+        identity: &DurableFileIdentity,
+    ) -> AppResult<()> {
+        let json = serde_json::to_string(identity)?;
+        let mut connection = self.open()?;
+        let transaction = connection.transaction()?;
+        let plan_id: String = transaction.query_row(
+            "SELECT plan_id FROM copy_export_jobs WHERE id=?1",
+            [job_id],
+            |row| row.get(0),
+        )?;
+        let changed = transaction.execute(
+            "UPDATE copy_export_jobs SET target_root_identity_json=?2,
+                    updated_at=?3 WHERE id=?1 AND target_root_identity_json IS NULL",
+            params![job_id, json, now()],
+        )?;
+        if changed != 1 {
+            return Err(AppError::InvalidArgument(
+                "copy job target root identity was already recorded".into(),
+            ));
+        }
+        transaction.execute(
+            "UPDATE organization_plans_v2 SET target_root_state='created',
+                    target_root_identity_json=?2, updated_at=?3 WHERE id=?1",
+            params![plan_id, json, now()],
+        )?;
+        transaction.execute(
+            "UPDATE file_operation_log SET state='completed', result_json=?2,
+                    completed_at=?3
+             WHERE id=(SELECT id FROM file_operation_log
+                       WHERE job_id=?1 AND operation_kind='create_output_root'
+                       ORDER BY created_at DESC, id DESC LIMIT 1)",
+            params![job_id, json, now()],
+        )?;
+        transaction.commit()?;
+        Ok(())
+    }
+
+    pub fn mark_copy_export_root_create_failed(&self, job_id: &str, error: &str) -> AppResult<()> {
+        let connection = self.open()?;
+        connection.execute(
+            "UPDATE file_operation_log SET state='failed', result_json=?2,
+                    completed_at=?3
+             WHERE id=(SELECT id FROM file_operation_log
+                       WHERE job_id=?1 AND operation_kind='create_output_root'
+                         AND state='prepared'
+                       ORDER BY created_at DESC, id DESC LIMIT 1)",
+            params![
+                job_id,
+                serde_json::to_string(&serde_json::json!({"error":error}))?,
+                now()
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn mark_copy_export_item_started(&self, job_id: &str, ordinal: u32) -> AppResult<()> {
+        let mut connection = self.open()?;
+        let transaction = connection.transaction()?;
+        let item: Option<(i64, String, String, String, String, String)> = transaction
+            .query_row(
+                "SELECT i.asset_id, i.source_path, i.source_fingerprint_blake3,
+                        i.target_path, i.state, p.target_relative_path
+                 FROM copy_export_job_items i
+                 JOIN copy_export_jobs j ON j.id=i.job_id
+                 JOIN organization_plan_items_v2 p ON p.plan_id=j.plan_id
+                    AND p.ordinal=i.item_ordinal
+                 WHERE i.job_id=?1 AND i.item_ordinal=?2",
+                params![job_id, ordinal],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                        row.get(5)?,
+                    ))
+                },
+            )
+            .optional()?;
+        let Some((asset_id, source_path, source_hash, target_path, state, target_relative)) = item
+        else {
+            return Err(AppError::NotFound(format!("copy item {job_id}/{ordinal}")));
+        };
+        if state != "pending" && state != "failed" && state != "cancelled" {
+            return Err(AppError::InvalidArgument(format!(
+                "copy item cannot start from {state}"
+            )));
+        }
+        let timestamp = now();
+        let intent = serde_json::to_string(&serde_json::json!({
+            "assetId": asset_id,
+            "sourcePath": source_path,
+            "sourceBlake3": source_hash,
+            "targetPath": target_path,
+            "targetRelativePath": target_relative,
+            "createdParentDirectories": Path::new(&target_relative)
+                .parent()
+                .map(|parent| parent.to_string_lossy().into_owned())
+                .filter(|parent| !parent.is_empty()),
+        }))?;
+        transaction.execute(
+            "INSERT INTO file_operation_log(
+                id, job_id, item_ordinal, operation_kind, state,
+                intent_json, created_at
+             ) VALUES(?1, ?2, ?3, 'copy_file', 'prepared', ?4, ?5)",
+            params![
+                uuid::Uuid::new_v4().to_string(),
+                job_id,
+                ordinal,
+                intent,
+                timestamp
+            ],
+        )?;
+        transaction.execute(
+            "UPDATE copy_export_job_items SET state='copying', attempts=attempts+1,
+                    error=NULL, updated_at=?3 WHERE job_id=?1 AND item_ordinal=?2",
+            params![job_id, ordinal, timestamp],
+        )?;
+        transaction.execute(
+            "UPDATE copy_export_jobs SET state='running', current_item_ordinal=?2,
+                    updated_at=?3 WHERE id=?1 AND state IN ('queued','running')",
+            params![job_id, ordinal, timestamp],
+        )?;
+        transaction.commit()?;
+        Ok(())
+    }
+
+    pub fn record_copy_export_item_target_created(
+        &self,
+        job_id: &str,
+        ordinal: u32,
+        identity: &DurableFileIdentity,
+    ) -> AppResult<()> {
+        let mut connection = self.open()?;
+        let transaction = connection.transaction()?;
+        let changed = transaction.execute(
+            "UPDATE copy_export_job_items SET partial_file_identity_json=?3,
+                    updated_at=?4 WHERE job_id=?1 AND item_ordinal=?2 AND state='copying'",
+            params![job_id, ordinal, serde_json::to_string(identity)?, now()],
+        )?;
+        if changed != 1 {
+            return Err(AppError::InvalidArgument(
+                "copy target identity could not be journaled".into(),
+            ));
+        }
+        transaction.commit()?;
+        Ok(())
+    }
+
+    pub fn mark_copy_export_item_copied(
+        &self,
+        job_id: &str,
+        ordinal: u32,
+        output: &CommittedTargetIdentity,
+    ) -> AppResult<()> {
+        let mut connection = self.open()?;
+        let transaction = connection.transaction()?;
+        let timestamp = now();
+        let changed = transaction.execute(
+            "UPDATE copy_export_job_items SET state='copied',
+                    output_file_identity_json=?3, output_fingerprint_blake3=?4,
+                    output_size=?5, partial_file_identity_json=NULL,
+                    updated_at=?6
+             WHERE job_id=?1 AND item_ordinal=?2 AND state='copying'",
+            params![
+                job_id,
+                ordinal,
+                serde_json::to_string(output)?,
+                output.blake3,
+                i64::try_from(output.size_bytes).unwrap_or(i64::MAX),
+                timestamp
+            ],
+        )?;
+        if changed != 1 {
+            return Err(AppError::InvalidArgument(
+                "completed copy item is no longer in copying state".into(),
+            ));
+        }
+        transaction.execute(
+            "UPDATE file_operation_log SET state='completed', result_json=?3,
+                    completed_at=?4
+             WHERE id=(SELECT id FROM file_operation_log
+                       WHERE job_id=?1 AND item_ordinal=?2 AND operation_kind='copy_file'
+                       ORDER BY created_at DESC, id DESC LIMIT 1)",
+            params![job_id, ordinal, serde_json::to_string(output)?, timestamp],
+        )?;
+        transaction.execute(
+            "UPDATE copy_export_jobs SET progress_completed_items=(
+                        SELECT COUNT(*) FROM copy_export_job_items
+                        WHERE job_id=?1 AND state='copied'),
+                    progress_completed_bytes=(
+                        SELECT COALESCE(SUM(output_size),0) FROM copy_export_job_items
+                        WHERE job_id=?1 AND state='copied'), updated_at=?2
+             WHERE id=?1",
+            params![job_id, timestamp],
+        )?;
+        transaction.commit()?;
+        Ok(())
+    }
+
+    pub fn mark_copy_export_item_failed(
+        &self,
+        job_id: &str,
+        ordinal: u32,
+        error: &str,
+        partial: Option<&OperationFileSnapshot>,
+    ) -> AppResult<()> {
+        let mut connection = self.open()?;
+        let transaction = connection.transaction()?;
+        let previous_target_identity: Option<String> = transaction
+            .query_row(
+                "SELECT partial_file_identity_json FROM copy_export_job_items
+                 WHERE job_id=?1 AND item_ordinal=?2",
+                params![job_id, ordinal],
+                |row| row.get(0),
+            )
+            .optional()?
+            .flatten();
+        let timestamp = now();
+        let state = if partial.is_some() {
+            "partial"
+        } else if previous_target_identity.is_some() {
+            "reconcile_required"
+        } else {
+            "failed"
+        };
+        transaction.execute(
+            "UPDATE copy_export_job_items SET state=?3, error=?4,
+                    partial_file_identity_json=COALESCE(?5, partial_file_identity_json),
+                    updated_at=?6
+             WHERE job_id=?1 AND item_ordinal=?2 AND state IN ('copying','pending')",
+            params![
+                job_id,
+                ordinal,
+                state,
+                error,
+                partial.map(serde_json::to_string).transpose()?,
+                timestamp
+            ],
+        )?;
+        transaction.execute(
+            "UPDATE file_operation_log SET state=?3,
+                    result_json=?4, completed_at=?5
+             WHERE id=(SELECT id FROM file_operation_log
+                       WHERE job_id=?1 AND item_ordinal=?2 AND operation_kind='copy_file'
+                       ORDER BY created_at DESC, id DESC LIMIT 1)",
+            params![
+                job_id,
+                ordinal,
+                if state == "failed" {
+                    "failed"
+                } else {
+                    "partial"
+                },
+                serde_json::to_string(&serde_json::json!({"error":error,"partial":partial}))?,
+                timestamp
+            ],
+        )?;
+        transaction.execute(
+            "UPDATE copy_export_jobs SET state=?2, updated_at=?3 WHERE id=?1",
+            params![
+                job_id,
+                if state == "reconcile_required" {
+                    "reconcile_required"
+                } else {
+                    "partial"
+                },
+                timestamp
+            ],
+        )?;
+        transaction.commit()?;
+        Ok(())
+    }
+
+    /// Record a failed item after the runner has proved that its exact
+    /// create-new target was removed through the still-held writer handle.
+    /// This is the only failure path allowed to clear a journaled target ID.
+    pub fn mark_copy_export_item_aborted_failed(
+        &self,
+        job_id: &str,
+        ordinal: u32,
+        error: &str,
+    ) -> AppResult<()> {
+        let mut connection = self.open()?;
+        let transaction = connection.transaction()?;
+        let timestamp = now();
+        let changed = transaction.execute(
+            "UPDATE copy_export_job_items SET state='failed', error=?3,
+                    partial_file_identity_json=NULL, updated_at=?4
+             WHERE job_id=?1 AND item_ordinal=?2 AND state='copying'",
+            params![job_id, ordinal, error, timestamp],
+        )?;
+        if changed != 1 {
+            return Err(AppError::InvalidArgument(
+                "aborted copy item is no longer in copying state".into(),
+            ));
+        }
+        transaction.execute(
+            "UPDATE file_operation_log SET state='failed', result_json=?3,
+                    completed_at=?4
+             WHERE id=(SELECT id FROM file_operation_log
+                       WHERE job_id=?1 AND item_ordinal=?2 AND operation_kind='copy_file'
+                       ORDER BY created_at DESC, id DESC LIMIT 1)",
+            params![
+                job_id,
+                ordinal,
+                serde_json::to_string(&serde_json::json!({"error":error,"targetAborted":true}))?,
+                timestamp
+            ],
+        )?;
+        transaction.execute(
+            "UPDATE copy_export_jobs SET state='partial', updated_at=?2 WHERE id=?1",
+            params![job_id, timestamp],
+        )?;
+        transaction.commit()?;
+        Ok(())
+    }
+
+    pub fn mark_copy_export_item_cancelled(&self, job_id: &str, ordinal: u32) -> AppResult<()> {
+        let mut connection = self.open()?;
+        let transaction = connection.transaction()?;
+        let timestamp = now();
+        transaction.execute(
+            "UPDATE copy_export_job_items SET state='cancelled',
+                    partial_file_identity_json=NULL, error='cancelled', updated_at=?3
+             WHERE job_id=?1 AND item_ordinal=?2 AND state='copying'",
+            params![job_id, ordinal, timestamp],
+        )?;
+        transaction.execute(
+            "UPDATE file_operation_log SET state='failed',
+                    result_json=?3, completed_at=?4
+             WHERE id=(SELECT id FROM file_operation_log WHERE job_id=?1 AND item_ordinal=?2
+                       AND operation_kind='copy_file' ORDER BY created_at DESC, id DESC LIMIT 1)",
+            params![job_id, ordinal, "{\"cancelled\":true}", timestamp],
+        )?;
+        transaction.commit()?;
+        Ok(())
+    }
+
+    pub fn request_cancel_copy_export(&self, job_id: &str) -> AppResult<()> {
+        let connection = self.open()?;
+        let changed = connection.execute(
+            "UPDATE copy_export_jobs SET cancel_requested=1,
+                    state=CASE WHEN state IN ('queued','running') THEN 'cancelling' ELSE state END,
+                    updated_at=?2 WHERE id=?1 AND state IN ('queued','running','cancelling')",
+            params![job_id, now()],
+        )?;
+        if changed == 0 {
+            return Err(AppError::InvalidArgument(
+                "copy job cannot be cancelled in its current state".into(),
+            ));
+        }
+        Ok(())
+    }
+
+    pub fn is_copy_export_cancel_requested(&self, job_id: &str) -> AppResult<bool> {
+        let connection = self.open()?;
+        connection
+            .query_row(
+                "SELECT cancel_requested != 0 FROM copy_export_jobs WHERE id=?1",
+                [job_id],
+                |row| row.get(0),
+            )
+            .optional()?
+            .ok_or_else(|| AppError::NotFound(format!("copy export job {job_id}")))
+    }
+
+    pub fn finish_copy_export_job(&self, job_id: &str) -> AppResult<()> {
+        let connection = self.open()?;
+        let (cancelled, total, terminal, problematic): (bool, i64, i64, i64) = connection
+            .query_row(
+                "SELECT j.cancel_requested != 0,
+                    COUNT(*),
+                    COALESCE(SUM(CASE WHEN i.state IN ('copied','skipped') THEN 1 ELSE 0 END),0),
+                    COALESCE(SUM(CASE WHEN i.state IN ('failed','partial','reconcile_required')
+                                      THEN 1 ELSE 0 END),0)
+             FROM copy_export_jobs j JOIN copy_export_job_items i ON i.job_id=j.id
+             WHERE j.id=?1",
+                [job_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )?;
+        if total == 0 {
+            return Err(AppError::InvalidArgument(
+                "copy job has no journaled items".into(),
+            ));
+        }
+        let state = if total == terminal {
+            "completed"
+        } else if problematic > 0 {
+            "partial"
+        } else if cancelled {
+            "cancelled"
+        } else {
+            "partial"
+        };
+        connection.execute(
+            "UPDATE copy_export_jobs SET state=?2, completed_at=?3, updated_at=?3
+             WHERE id=?1 AND state IN ('running','cancelling','queued','partial')",
+            params![job_id, state, now()],
+        )?;
+        Ok(())
+    }
+
+    pub fn begin_copy_export_rollback(&self, job_id: &str) -> AppResult<()> {
+        let connection = self.open()?;
+        let changed = connection.execute(
+            "UPDATE copy_export_jobs SET state='rolling_back', updated_at=?2
+             WHERE id=?1 AND state IN ('completed','partial','interrupted','reconcile_required')",
+            params![job_id, now()],
+        )?;
+        if changed != 1 {
+            return Err(AppError::InvalidArgument(
+                "copy job is not eligible for rollback".into(),
+            ));
+        }
+        Ok(())
+    }
+
+    pub fn mark_copy_export_rollback_item(
+        &self,
+        job_id: &str,
+        ordinal: u32,
+        deleted: bool,
+        error: Option<&str>,
+    ) -> AppResult<()> {
+        let mut connection = self.open()?;
+        let transaction = connection.transaction()?;
+        let timestamp = now();
+        let state = if deleted {
+            "rolled_back"
+        } else {
+            "rollback_blocked"
+        };
+        transaction.execute(
+            "UPDATE copy_export_job_items SET state=?3, error=?4, updated_at=?5
+             WHERE job_id=?1 AND item_ordinal=?2 AND state IN ('copied','rollback_pending','rollback_blocked')",
+            params![job_id, ordinal, state, error, timestamp],
+        )?;
+        transaction.execute(
+            "INSERT INTO file_operation_log(
+                id, job_id, item_ordinal, operation_kind, state,
+                intent_json, result_json, created_at, completed_at
+             ) VALUES(?1, ?2, ?3, 'rollback_file', ?4, ?5, ?6, ?7, ?7)",
+            params![
+                uuid::Uuid::new_v4().to_string(),
+                job_id,
+                ordinal,
+                if deleted { "completed" } else { "blocked" },
+                serde_json::to_string(&serde_json::json!({"ordinal":ordinal}))?,
+                serde_json::to_string(&serde_json::json!({"deleted":deleted,"error":error}))?,
+                timestamp
+            ],
+        )?;
+        transaction.commit()?;
+        Ok(())
+    }
+
+    /// Persist rollback intent before the runner attempts its same-handle
+    /// delete. A crash leaves the item in rollback_pending for reconciliation.
+    pub fn mark_copy_export_rollback_item_started(
+        &self,
+        job_id: &str,
+        ordinal: u32,
+    ) -> AppResult<()> {
+        let mut connection = self.open()?;
+        let transaction = connection.transaction()?;
+        let item: Option<(String, Option<String>, Option<String>)> = transaction
+            .query_row(
+                "SELECT target_path, output_file_identity_json, output_fingerprint_blake3
+                 FROM copy_export_job_items
+                 WHERE job_id=?1 AND item_ordinal=?2 AND state='copied'",
+                params![job_id, ordinal],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .optional()?;
+        let Some((target_path, identity_json, fingerprint)) = item else {
+            return Err(AppError::InvalidArgument(
+                "only a copied item can enter rollback".into(),
+            ));
+        };
+        let changed = transaction.execute(
+            "UPDATE copy_export_job_items SET state='rollback_pending', updated_at=?3
+             WHERE job_id=?1 AND item_ordinal=?2 AND state='copied'",
+            params![job_id, ordinal, now()],
+        )?;
+        if changed != 1 {
+            return Err(AppError::InvalidArgument(
+                "rollback item state changed before intent was recorded".into(),
+            ));
+        }
+        let intent = serde_json::to_string(&serde_json::json!({
+            "targetPath":target_path,
+            "targetIdentity":identity_json,
+            "targetBlake3":fingerprint,
+        }))?;
+        transaction.execute(
+            "INSERT INTO file_operation_log(
+                id, job_id, item_ordinal, operation_kind, state,
+                intent_json, created_at
+             ) VALUES(?1, ?2, ?3, 'rollback_file', 'prepared', ?4, ?5)",
+            params![
+                uuid::Uuid::new_v4().to_string(),
+                job_id,
+                ordinal,
+                intent,
+                now()
+            ],
+        )?;
+        transaction.commit()?;
+        Ok(())
+    }
+
+    pub fn finish_copy_export_rollback(&self, job_id: &str) -> AppResult<()> {
+        let connection = self.open()?;
+        let remaining: i64 = connection.query_row(
+            "SELECT COUNT(*) FROM copy_export_job_items
+             WHERE job_id=?1 AND state IN ('copied','rollback_pending','rollback_blocked')",
+            [job_id],
+            |row| row.get(0),
+        )?;
+        connection.execute(
+            "UPDATE copy_export_jobs SET state=?2, completed_at=?3, updated_at=?3
+             WHERE id=?1 AND state='rolling_back'",
+            params![
+                job_id,
+                if remaining == 0 {
+                    "rolled_back"
+                } else {
+                    "partial"
+                },
+                now()
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Current write-protection boundary used for every operation phase.
+    /// Missing or unverifiable roots fail closed rather than being silently
+    /// omitted from the protected set.
+    pub fn current_protected_roots(&self, app_data_path: &Path) -> AppResult<Vec<ProtectedRoot>> {
+        let mut roots = self
+            .library_source_roots()?
+            .into_iter()
+            .map(|root| root.source_path)
+            .collect::<Vec<_>>();
+        roots.push(app_data_path.to_path_buf());
+        roots.sort_by_key(|path| crate::source_identity::identity_key(path));
+        roots.dedup_by(|left, right| {
+            crate::source_identity::identity_key(left)
+                == crate::source_identity::identity_key(right)
+        });
+        roots
+            .into_iter()
+            .map(|path| ProtectedRoot::from_existing(&path).map_err(AppError::from))
+            .collect()
     }
 
     pub fn existing_asset_lookup_session(&self) -> AppResult<ExistingAssetLookupSession> {
@@ -202,6 +1937,18 @@ impl Repository {
             [],
             |row| row.get(0),
         )?;
+        // Take one consistent snapshot of the pre-upgrade catalog. Fresh
+        // catalogs have no user state to recover and deliberately skip it.
+        let migration_backup = if current > 0 && current < 19 {
+            Some(create_verified_catalog_backup(
+                &connection,
+                &self.database_path,
+                current,
+                "pre_migration",
+            )?)
+        } else {
+            None
+        };
         for (version, sql) in [
             (1_i64, INITIAL_MIGRATION),
             (2_i64, SEMANTIC_MIGRATION),
@@ -220,6 +1967,9 @@ impl Repository {
             (15_i64, IMPORT_SUBFOLDER_SCOPE_MIGRATION),
             (16_i64, UNIFIED_SOURCE_COLLECTION_MIGRATION),
             (17_i64, SEMANTIC_ANALYSIS_TAXONOMY_MIGRATION),
+            // Version 18 was reserved by an archived, unapplied editor WIP.
+            // Keep the gap and rebase that WIP before it can ever be applied.
+            (19_i64, CORE_COPY_EXPORT_MIGRATION),
         ] {
             if current < version {
                 let transaction = connection.transaction()?;
@@ -233,6 +1983,51 @@ impl Repository {
                 )?;
                 transaction.commit()?;
             }
+        }
+        let timestamp = now();
+        let has_catalog_identity: bool = connection.query_row(
+            "SELECT EXISTS(
+                    SELECT 1 FROM catalog_runtime_state WHERE singleton=1
+                 )",
+            [],
+            |row| row.get(0),
+        )?;
+        if has_catalog_identity {
+            connection.execute(
+                "UPDATE catalog_runtime_state
+                 SET instance_epoch=instance_epoch+1, updated_at=?1
+                 WHERE singleton=1",
+                [&timestamp],
+            )?;
+        } else {
+            connection.execute(
+                "INSERT INTO catalog_runtime_state(
+                    singleton, catalog_id, instance_epoch, created_at, updated_at
+                 ) VALUES(1, ?1, 1, ?2, ?2)",
+                params![uuid::Uuid::new_v4().to_string(), timestamp],
+            )?;
+        }
+        if let Some(backup) = migration_backup {
+            connection.execute(
+                "INSERT INTO catalog_backup_records(
+                    id, backup_path, purpose, schema_version, database_identity,
+                    backup_blake3, integrity_check, foreign_key_check_count,
+                    restore_check, created_at, verified_at
+                 ) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+                params![
+                    backup.id,
+                    backup.backup_path,
+                    backup.purpose,
+                    backup.schema_version,
+                    backup.database_identity,
+                    backup.backup_blake3,
+                    backup.integrity_check,
+                    backup.foreign_key_check_count,
+                    backup.restore_check,
+                    backup.created_at,
+                    backup.verified_at,
+                ],
+            )?;
         }
         self.backfill_path_identities()?;
         self.recover_interrupted_jobs()?;
@@ -444,6 +2239,43 @@ impl Repository {
              WHERE status = 'scanning'",
             [],
         )?;
+        // Recovery changes only catalog state. It never infers file ownership
+        // from paths or mutates filesystem objects. A create-root intent with
+        // no recorded identity is especially ambiguous and remains explicitly
+        // quarantined for user reconciliation.
+        connection.execute(
+            "UPDATE copy_export_job_items SET
+                 state=CASE state
+                     WHEN 'copying' THEN 'reconcile_required'
+                     WHEN 'partial' THEN 'reconcile_required'
+                     WHEN 'rollback_pending' THEN 'rollback_blocked'
+                     ELSE state END,
+                 updated_at=?1
+             WHERE state IN ('copying','partial','rollback_pending')
+               AND job_id IN (
+                 SELECT id FROM copy_export_jobs
+                 WHERE state IN ('queued','running','cancelling','rolling_back')
+               )",
+            [&timestamp],
+        )?;
+        connection.execute(
+            "UPDATE copy_export_jobs SET
+                 state=CASE
+                     WHEN target_root_identity_json IS NULL AND EXISTS(
+                         SELECT 1 FROM file_operation_log log
+                         WHERE log.job_id=copy_export_jobs.id
+                           AND log.operation_kind='create_output_root'
+                           AND log.state='prepared'
+                     ) OR EXISTS(
+                         SELECT 1 FROM copy_export_job_items item
+                         WHERE item.job_id=copy_export_jobs.id
+                           AND item.state IN ('reconcile_required','rollback_blocked')
+                     ) THEN 'reconcile_required'
+                     ELSE 'interrupted' END,
+                 cancel_requested=0, updated_at=?1
+             WHERE state IN ('queued','running','cancelling','rolling_back')",
+            [&timestamp],
+        )?;
         Ok(())
     }
 
@@ -464,6 +2296,7 @@ impl Repository {
     ) -> AppResult<(i64, i64)> {
         let mut connection = self.open()?;
         let transaction = connection.transaction()?;
+        reject_source_root_overlapping_active_output(&transaction, Path::new(root_path))?;
         let timestamp = now();
         transaction.execute(
             "INSERT OR IGNORE INTO libraries(
@@ -528,6 +2361,9 @@ impl Repository {
         let mut connection = self.open()?;
         let transaction = connection.transaction()?;
         for root in roots {
+            reject_source_root_overlapping_active_output(&transaction, &root.source_path)?;
+        }
+        for root in roots {
             let source_path = root.source_path.to_string_lossy().into_owned();
             let name = library_name(&root.source_path, &source_path);
             transaction.execute(
@@ -572,8 +2408,20 @@ impl Repository {
     }
 
     pub fn begin_existing_library_scan(&self, library_id: i64) -> AppResult<i64> {
-        let connection = self.open()?;
-        let changed = connection.execute(
+        let mut connection = self.open()?;
+        let transaction = connection.transaction()?;
+        let root: Option<String> = transaction
+            .query_row(
+                "SELECT source_path FROM libraries WHERE id=?1",
+                [library_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let Some(root) = root else {
+            return Err(AppError::NotFound(format!("library {library_id}")));
+        };
+        reject_source_root_overlapping_active_output(&transaction, Path::new(&root))?;
+        let changed = transaction.execute(
             "UPDATE libraries
              SET status='scanning', last_error=NULL, scan_generation=scan_generation + 1
              WHERE id=?1",
@@ -582,13 +2430,13 @@ impl Repository {
         if changed == 0 {
             return Err(AppError::NotFound(format!("library {library_id}")));
         }
-        connection
-            .query_row(
-                "SELECT scan_generation FROM libraries WHERE id=?1",
-                [library_id],
-                |row| row.get(0),
-            )
-            .map_err(AppError::from)
+        let generation = transaction.query_row(
+            "SELECT scan_generation FROM libraries WHERE id=?1",
+            [library_id],
+            |row| row.get(0),
+        )?;
+        transaction.commit()?;
+        Ok(generation)
     }
 
     pub fn library_include_subfolder_images(&self, library_id: i64) -> AppResult<bool> {
@@ -1393,6 +3241,24 @@ impl Repository {
             return Ok(LibraryRemovalResult::default());
         }
 
+        let has_active_copy: bool = transaction.query_row(
+            "SELECT EXISTS(
+                 SELECT 1
+                 FROM copy_export_jobs j
+                 JOIN organization_plan_items_v2 p ON p.plan_id=j.plan_id
+                 WHERE p.library_id=?1
+                   AND j.state IN ('queued','running','cancelling','rolling_back')
+             )",
+            [library_id],
+            |row| row.get(0),
+        )?;
+        if has_active_copy {
+            return Err(AppError::InvalidArgument(
+                "this source is referenced by an active copy export and cannot be removed yet"
+                    .into(),
+            ));
+        }
+
         let remaining_roots = {
             let mut statement = transaction.prepare(
                 "SELECT id, source_path, source_identity_key
@@ -1578,10 +3444,168 @@ impl Repository {
         })
     }
 
+    pub fn query_asset_groups(
+        &self,
+        query: &AssetQuery,
+        group_by: AssetGroupBy,
+        page: u32,
+        page_size: u32,
+    ) -> AppResult<AssetGroupPage> {
+        validate_asset_query(query)?;
+        let mut connection = self.open()?;
+        let transaction = connection.transaction()?;
+        let page_size = page_size.clamp(1, 500);
+        let page = page.max(1);
+        let offset = i64::from(page.saturating_sub(1)) * i64::from(page_size);
+        let (ctes, values) = asset_group_ctes(query, group_by);
+        let group_count = transaction.query_row(
+            &format!(
+                "WITH {ctes}
+                 SELECT COUNT(*) FROM (
+                     SELECT group_key FROM group_values GROUP BY group_key
+                 )"
+            ),
+            params_from_iter(values.iter()),
+            |row| row.get(0),
+        )?;
+        let global_unique_total = transaction.query_row(
+            &format!("WITH {ctes} SELECT COUNT(*) FROM matching_assets"),
+            params_from_iter(values.iter()),
+            |row| row.get(0),
+        )?;
+        let mut group_values = values;
+        group_values.push(Value::Integer(i64::from(page_size)));
+        group_values.push(Value::Integer(offset));
+        let mut statement = transaction.prepare(&format!(
+            "WITH {ctes}
+             SELECT group_key, COUNT(DISTINCT asset_id) AS unique_count
+             FROM group_values
+             GROUP BY group_key
+             ORDER BY group_key COLLATE NOCASE ASC, group_key ASC
+             LIMIT ? OFFSET ?"
+        ))?;
+        let groups = statement
+            .query_map(params_from_iter(group_values.iter()), |row| {
+                Ok(AssetGroupSummary {
+                    key: row.get(0)?,
+                    label: None,
+                    unique_count: row.get(1)?,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        drop(statement);
+        transaction.commit()?;
+        Ok(AssetGroupPage {
+            groups,
+            group_count,
+            global_unique_total,
+            page,
+            page_size,
+        })
+    }
+
+    pub fn query_assets_in_group(
+        &self,
+        query: &AssetQuery,
+        group_by: AssetGroupBy,
+        group_key: &str,
+        page: u32,
+        page_size: u32,
+    ) -> AppResult<AssetPage> {
+        let query = AssetQuery {
+            page,
+            page_size,
+            ..query.clone()
+        };
+        let full = self.query_assets_full_for_group(&query, Some((group_by, group_key)))?;
+        Ok(AssetPage {
+            items: full.items.iter().map(AssetGridItem::from).collect(),
+            total: full.total,
+            page: full.page,
+            page_size: full.page_size,
+        })
+    }
+
+    pub fn query_asset_membership(
+        &self,
+        query: &AssetQuery,
+        asset_id: i64,
+    ) -> AppResult<Option<AssetGridItem>> {
+        let query = AssetQuery {
+            page: 1,
+            page_size: 1,
+            ..query.clone()
+        };
+        let full = self.query_assets_full_for_asset(&query, asset_id)?;
+        Ok(full.items.first().map(AssetGridItem::from))
+    }
+
+    pub fn query_asset_neighbor(
+        &self,
+        query: &AssetQuery,
+        asset_id: i64,
+        direction: AssetNeighborDirection,
+    ) -> AppResult<Option<AssetGridItem>> {
+        validate_asset_query(query)?;
+        let mut connection = self.open()?;
+        let transaction = connection.transaction()?;
+        let (where_sql, mut values) = asset_filter_sql(query);
+        let row_delta = match direction {
+            AssetNeighborDirection::Next => 1,
+            AssetNeighborDirection::Previous => -1,
+        };
+        values.push(Value::Integer(row_delta));
+        values.push(Value::Integer(asset_id));
+        let sql = format!(
+            "WITH positioned_assets AS (
+                 SELECT a.id,
+                        ROW_NUMBER() OVER (
+                            ORDER BY {} {}, a.file_name COLLATE NOCASE ASC, a.id ASC
+                        ) AS query_position
+                 FROM assets a
+                 LEFT JOIN tone_features tf ON tf.asset_id=a.id
+                 LEFT JOIN color_features cf ON cf.asset_id=a.id
+                 WHERE {where_sql}
+             )
+             SELECT neighbor.id
+             FROM positioned_assets current
+             JOIN positioned_assets neighbor
+               ON neighbor.query_position=current.query_position+?
+             WHERE current.id=?",
+            query.sort.sql_expression(),
+            query.direction.sql(),
+        );
+        let neighbor_id = transaction
+            .query_row(&sql, params_from_iter(values.iter()), |row| row.get(0))
+            .optional()?;
+        let neighbor = match neighbor_id {
+            Some(neighbor_id) => {
+                let page_query = AssetQuery {
+                    page: 1,
+                    page_size: 1,
+                    ..query.clone()
+                };
+                let full = Self::query_assets_full_with_constraints_on(
+                    &transaction,
+                    &page_query,
+                    None,
+                    Some(neighbor_id),
+                )?;
+                full.items.first().map(AssetGridItem::from)
+            }
+            None => None,
+        };
+        transaction.commit()?;
+        Ok(neighbor)
+    }
+
     /// Load a complete query result for workflow services that need to inspect
     /// every matching asset. The same root, filter, count and pagination SQL
     /// powers the grid command; this helper only walks its pages inside Rust.
     pub fn list_assets_for_query(&self, query: &AssetQuery) -> AppResult<Vec<AssetListItem>> {
+        validate_asset_query(query)?;
+        let mut connection = self.open()?;
+        let transaction = connection.transaction()?;
         let mut page = 1;
         let mut items = Vec::new();
         loop {
@@ -1590,7 +3614,12 @@ impl Repository {
                 page_size: 500,
                 ..query.clone()
             };
-            let result = self.query_assets_full(&paged_query)?;
+            let result = Self::query_assets_full_with_constraints_on(
+                &transaction,
+                &paged_query,
+                None,
+                None,
+            )?;
             let reached_end = result.items.len() < result.page_size as usize;
             items.extend(result.items);
             if reached_end || items.len() as i64 >= result.total {
@@ -1598,7 +3627,340 @@ impl Repository {
             }
             page += 1;
         }
+        transaction.commit()?;
         Ok(items)
+    }
+
+    /// Freeze all members of an organization scope from one SQLite read
+    /// transaction. Browse page fields are deliberately ignored for Query;
+    /// ExplicitAssets are resolved across every Source by globally unique ID.
+    pub(crate) fn snapshot_organization_scope_v2(
+        &self,
+        scope: &OrganizationPlanScopeV2,
+    ) -> AppResult<OrganizationScopeSnapshotV2> {
+        let mut connection = self.open()?;
+        let transaction = connection.transaction()?;
+        let snapshot = Self::snapshot_organization_scope_v2_on(&transaction, scope)?;
+        transaction.commit()?;
+        Ok(snapshot)
+    }
+
+    fn snapshot_organization_scope_v2_on(
+        connection: &Connection,
+        scope: &OrganizationPlanScopeV2,
+    ) -> AppResult<OrganizationScopeSnapshotV2> {
+        let mut assets = Vec::new();
+        let mut missing_explicit_asset_ids = Vec::new();
+
+        match scope {
+            OrganizationPlanScopeV2::Query { query } => {
+                validate_asset_query(query)?;
+                let mut page = 1_u32;
+                loop {
+                    let query_page = AssetQuery {
+                        page,
+                        page_size: 500,
+                        ..query.as_ref().clone()
+                    };
+                    let result = Self::query_assets_full_with_constraints_on(
+                        connection,
+                        &query_page,
+                        None,
+                        None,
+                    )?;
+                    let done = result.items.len() < result.page_size as usize
+                        || assets.len().saturating_add(result.items.len()) as i64 >= result.total;
+                    assets.extend(result.items);
+                    if done {
+                        break;
+                    }
+                    page = page.saturating_add(1);
+                }
+            }
+            OrganizationPlanScopeV2::ExplicitAssets { asset_ids } => {
+                let mut ids = asset_ids.clone();
+                ids.sort_unstable();
+                ids.dedup();
+                let query = AssetQuery {
+                    version: ASSET_QUERY_VERSION,
+                    root: AssetQueryRoot::All,
+                    include_descendants: false,
+                    filter: AssetFilter::default(),
+                    sort: AssetSortField::FileName,
+                    direction: SortDirection::Asc,
+                    page: 1,
+                    page_size: 1,
+                };
+                for asset_id in ids {
+                    let result = Self::query_assets_full_with_constraints_on(
+                        connection,
+                        &query,
+                        None,
+                        Some(asset_id),
+                    )?;
+                    if let Some(asset) = result.items.into_iter().next() {
+                        assets.push(asset);
+                    } else {
+                        missing_explicit_asset_ids.push(asset_id);
+                    }
+                }
+            }
+        }
+
+        let mut snapshots = Vec::with_capacity(assets.len());
+        for asset in assets {
+            let (fingerprint_blake3, classification_revision, source_root_path): (
+                String,
+                i64,
+                String,
+            ) = connection.query_row(
+                "SELECT a.fingerprint, a.classification_revision, l.source_path
+                 FROM assets a
+                 JOIN libraries l ON l.id=a.library_id
+                 WHERE a.id=?1",
+                [asset.id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )?;
+            snapshots.push(OrganizationScopeAssetSnapshot {
+                asset,
+                fingerprint_blake3,
+                classification_revision,
+                source_root_path: PathBuf::from(source_root_path),
+            });
+        }
+        Ok(OrganizationScopeSnapshotV2 {
+            assets: snapshots,
+            missing_explicit_asset_ids,
+        })
+    }
+
+    /// Persist the complete immutable preview, including every frozen item,
+    /// before returning a page to the UI.
+    pub fn save_organization_plan_v2(
+        &self,
+        request: &CreateOrganizationPlanV2Request,
+        plan: &OrganizationPlanV2,
+        target_parent_path: &Path,
+        target_parent_identity: &DurableFileIdentity,
+        protected_roots: &[ProtectedRoot],
+    ) -> AppResult<()> {
+        if plan.items.len() as u64 != plan.item_total {
+            return Err(AppError::InvalidArgument(
+                "the complete plan item snapshot is required for persistence".into(),
+            ));
+        }
+        let timestamp = now();
+        let mut connection = self.open()?;
+        let transaction = connection.transaction()?;
+        transaction.execute(
+            "INSERT INTO organization_plans_v2(
+                id, snapshot_version, query_version, scope_json, rules_json,
+                target_parent_path, target_parent_identity_json, target_child_name,
+                target_root_path, target_root_state, protected_roots_json,
+                summary_json, snapshot_blake3, status, created_at, updated_at
+             ) VALUES(?1, 2, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 'expected_absent',
+                      ?9, ?10, ?11, ?12, ?13, ?13)",
+            params![
+                plan.summary.plan_id,
+                ASSET_QUERY_VERSION,
+                serde_json::to_string(&plan.summary.scope)?,
+                serde_json::to_string(&request.rules)?,
+                target_parent_path.to_string_lossy(),
+                serde_json::to_string(target_parent_identity)?,
+                request.target.child_name,
+                plan.summary.target_root,
+                serde_json::to_string(protected_roots)?,
+                serde_json::to_string(&plan.summary)?,
+                plan.summary.snapshot_blake3,
+                copy_plan_status_sql(&plan.summary.status),
+                timestamp,
+            ],
+        )?;
+        for item in &plan.items {
+            let source_file_identity_json = serde_json::to_string(&item.source_file_identity)?;
+            let source_root_identity_json = serde_json::to_string(&item.source_root_identity)?;
+            transaction.execute(
+                "INSERT INTO organization_plan_items_v2(
+                    plan_id, ordinal, asset_id, library_id, source_root_path,
+                    source_root_identity_json, source_path, source_relative_path,
+                    source_file_identity_json, source_fingerprint_blake3,
+                    source_size, source_modified_at, capture_time,
+                    source_modified_filetime,
+                    classification_revision, target_relative_path, target_path,
+                    target_path_key, conflict_decision, item_status, variables_json,
+                    issues_json, snapshot_json
+                 ) VALUES(
+                    ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13,
+                    ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23
+                 )",
+                params![
+                    plan.summary.plan_id,
+                    item.ordinal,
+                    item.asset_id,
+                    item.library_id,
+                    item.source_root_path,
+                    source_root_identity_json,
+                    item.source_path,
+                    item.source_relative_path,
+                    source_file_identity_json,
+                    item.source_fingerprint_blake3,
+                    item.source_size,
+                    item.source_modified_at,
+                    item.capture_time,
+                    item.source_modified_filetime,
+                    item.classification_revision,
+                    item.target_relative_path,
+                    item.target_path,
+                    identity_key(Path::new(&item.target_path)),
+                    item.issues
+                        .iter()
+                        .find(|issue| issue.code == "target_conflict")
+                        .map(|issue| issue.code.as_str())
+                        .unwrap_or("none"),
+                    copy_item_status_sql(&item.status),
+                    "{}",
+                    serde_json::to_string(&item.issues)?,
+                    serde_json::to_string(item)?,
+                ],
+            )?;
+        }
+        transaction.commit()?;
+        Ok(())
+    }
+
+    pub fn read_organization_plan_v2(
+        &self,
+        plan_id: &str,
+        item_page: u32,
+        item_page_size: u32,
+    ) -> AppResult<OrganizationPlanV2> {
+        let connection = self.open()?;
+        let head: Option<(String, String, i64)> = connection
+            .query_row(
+                "SELECT summary_json, status,
+                        (SELECT COUNT(*) FROM organization_plan_items_v2 i WHERE i.plan_id=p.id)
+                 FROM organization_plans_v2 p WHERE p.id=?1",
+                [plan_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .optional()?;
+        let Some((summary_json, status, item_total)) = head else {
+            return Err(AppError::NotFound(format!("organization plan {plan_id}")));
+        };
+        let mut summary: OrganizationPlanSummaryV2 = serde_json::from_str(&summary_json)?;
+        summary.status = copy_plan_status_from_sql(&status)?;
+        let item_page = item_page.max(1);
+        let item_page_size = item_page_size.clamp(1, 500);
+        let offset = i64::from(item_page.saturating_sub(1)) * i64::from(item_page_size);
+        let mut statement = connection.prepare(
+            "SELECT snapshot_json, source_file_identity_json, source_root_identity_json,
+                    source_modified_filetime
+             FROM organization_plan_items_v2 WHERE plan_id=?1
+             ORDER BY ordinal LIMIT ?2 OFFSET ?3",
+        )?;
+        let raw = statement
+            .query_map(params![plan_id, item_page_size, offset], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, i64>(3)?,
+                ))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        let mut items = Vec::with_capacity(raw.len());
+        for (
+            snapshot_json,
+            source_file_identity_json,
+            source_root_identity_json,
+            source_modified_filetime,
+        ) in raw
+        {
+            let mut item: OrganizationPlanItemV2 = serde_json::from_str(&snapshot_json)?;
+            item.source_file_identity = serde_json::from_str(&source_file_identity_json)?;
+            item.source_root_identity = serde_json::from_str(&source_root_identity_json)?;
+            item.source_modified_filetime = u64::try_from(source_modified_filetime)
+                .map_err(|_| AppError::InvalidArgument("negative source FILETIME".into()))?;
+            items.push(item);
+        }
+        Ok(OrganizationPlanV2 {
+            summary,
+            items,
+            item_total: item_total.max(0) as u64,
+            item_page,
+            item_page_size,
+        })
+    }
+
+    pub fn list_recent_organization_plans_v2(
+        &self,
+        limit: u32,
+    ) -> AppResult<Vec<RecentOrganizationPlanV2>> {
+        let connection = self.open()?;
+        let mut statement = connection.prepare(
+            "SELECT id, summary_json, status FROM organization_plans_v2
+             ORDER BY created_at DESC, id DESC LIMIT ?1",
+        )?;
+        let raw = statement
+            .query_map([limit.clamp(1, 100)], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        raw.into_iter()
+            .map(|(plan_id, summary_json, status)| {
+                let summary: OrganizationPlanSummaryV2 = serde_json::from_str(&summary_json)?;
+                Ok(RecentOrganizationPlanV2 {
+                    plan_id,
+                    revision: summary.revision,
+                    status: copy_plan_status_from_sql(&status)?,
+                    target_root: summary.target_root,
+                    matched_count: summary.matched_count,
+                    eligible_count: summary.eligible_count,
+                    blocked_count: summary.blocked_count,
+                    created_at: summary.created_at,
+                })
+            })
+            .collect()
+    }
+
+    pub fn copy_export_plan_binding(
+        &self,
+        plan_id: &str,
+    ) -> AppResult<Option<CopyExportPlanBinding>> {
+        let connection = self.open()?;
+        connection
+            .query_row(
+                "SELECT target_parent_path, target_parent_identity_json,
+                        target_child_name, protected_roots_json
+                 FROM organization_plans_v2 WHERE id=?1",
+                [plan_id],
+                |row| {
+                    let parent_path: String = row.get(0)?;
+                    let parent_identity_json: String = row.get(1)?;
+                    let child_name: String = row.get(2)?;
+                    let protected_roots_json: String = row.get(3)?;
+                    Ok((
+                        parent_path,
+                        parent_identity_json,
+                        child_name,
+                        protected_roots_json,
+                    ))
+                },
+            )
+            .optional()?
+            .map(|(parent_path, identity_json, child_name, roots_json)| {
+                Ok(CopyExportPlanBinding {
+                    target_parent_path: PathBuf::from(parent_path),
+                    target_parent_identity: serde_json::from_str(&identity_json)?,
+                    target_child_name: child_name,
+                    protected_roots: serde_json::from_str(&roots_json)?,
+                })
+            })
+            .transpose()
     }
 
     fn ensure_organization_scope_is_single_source(
@@ -1675,18 +4037,103 @@ impl Repository {
     }
 
     fn query_assets_full(&self, query: &AssetQuery) -> AppResult<FullAssetPage> {
+        self.query_assets_full_for_group(query, None)
+    }
+
+    fn query_assets_full_for_group(
+        &self,
+        query: &AssetQuery,
+        group: Option<(AssetGroupBy, &str)>,
+    ) -> AppResult<FullAssetPage> {
+        self.query_assets_full_with_constraints(query, group, None)
+    }
+
+    fn query_assets_full_for_asset(
+        &self,
+        query: &AssetQuery,
+        asset_id: i64,
+    ) -> AppResult<FullAssetPage> {
+        self.query_assets_full_with_constraints(query, None, Some(asset_id))
+    }
+
+    fn query_assets_full_with_constraints(
+        &self,
+        query: &AssetQuery,
+        group: Option<(AssetGroupBy, &str)>,
+        asset_id: Option<i64>,
+    ) -> AppResult<FullAssetPage> {
         validate_asset_query(query)?;
-        let connection = self.open()?;
+        let mut connection = self.open()?;
+        let transaction = connection.transaction()?;
+        let result =
+            Self::query_assets_full_with_constraints_on(&transaction, query, group, asset_id)?;
+        transaction.commit()?;
+        Ok(result)
+    }
+
+    fn query_assets_full_with_constraints_on(
+        connection: &Connection,
+        query: &AssetQuery,
+        group: Option<(AssetGroupBy, &str)>,
+        asset_id: Option<i64>,
+    ) -> AppResult<FullAssetPage> {
+        validate_asset_query(query)?;
         let page_size = query.page_size.clamp(1, 500);
         let page = query.page.max(1);
         let offset = i64::from(page.saturating_sub(1)) * i64::from(page_size);
         let (where_sql, values) = asset_filter_sql(query);
-        let count_sql = asset_count_sql(&where_sql, &query.filter);
-        let total = connection.query_row(&count_sql, params_from_iter(values.iter()), |row| {
-            row.get(0)
-        })?;
+        let (sql_prefix, page_where, count_sql, count_values, cte_values, constraint_values) =
+            match (group, asset_id) {
+                (Some(_), Some(_)) => {
+                    return Err(AppError::InvalidArgument(
+                        "asset query cannot combine group and asset constraints".into(),
+                    ));
+                }
+                (Some((group_by, group_key)), None) => {
+                    let (ctes, cte_values) = asset_group_ctes(query, group_by);
+                    let mut count_values = cte_values.clone();
+                    count_values.push(Value::Text(group_key.to_owned()));
+                    (
+                        format!("WITH {ctes} "),
+                        "a.id IN (SELECT asset_id FROM group_values WHERE group_key=?)".to_owned(),
+                        format!(
+                            "WITH {ctes}
+                         SELECT COUNT(DISTINCT asset_id) FROM group_values WHERE group_key=?"
+                        ),
+                        count_values,
+                        cte_values,
+                        Vec::new(),
+                    )
+                }
+                (None, Some(asset_id)) => {
+                    let page_where = format!("({where_sql}) AND a.id=?");
+                    let mut count_values = values.clone();
+                    count_values.push(Value::Integer(asset_id));
+                    let page_values = vec![Value::Integer(asset_id)];
+                    (
+                        String::new(),
+                        page_where.clone(),
+                        asset_count_sql(&page_where, &query.filter),
+                        count_values,
+                        Vec::new(),
+                        page_values,
+                    )
+                }
+                (None, None) => (
+                    String::new(),
+                    where_sql.clone(),
+                    asset_count_sql(&where_sql, &query.filter),
+                    values.clone(),
+                    Vec::new(),
+                    Vec::new(),
+                ),
+            };
+        let total =
+            connection.query_row(&count_sql, params_from_iter(count_values.iter()), |row| {
+                row.get(0)
+            })?;
         let sql = format!(
-            "SELECT a.id, a.library_id, a.absolute_path, a.relative_path, a.file_name,
+            "{sql_prefix}SELECT a.id, a.library_id, a.absolute_path, a.relative_path, a.file_name,
                     a.extension, a.file_size, a.modified_at, a.width, a.height,
                     a.orientation, a.capture_time, a.camera_make, a.camera_model,
                     a.lens_model, a.exposure_time, a.aperture, a.iso, a.focal_length,
@@ -1701,14 +4148,23 @@ impl Repository {
              LEFT JOIN thumbnails t ON t.asset_id=a.id AND t.spec=?
              LEFT JOIN tone_features tf ON tf.asset_id=a.id
              LEFT JOIN color_features cf ON cf.asset_id=a.id
-             WHERE {where_sql}
+             WHERE {page_where}
              ORDER BY {} {}, a.file_name COLLATE NOCASE ASC, a.id ASC
              LIMIT ? OFFSET ?",
             query.sort.sql_expression(),
             query.direction.sql(),
         );
         let mut query_values = vec![Value::Text(crate::imaging::THUMBNAIL_SPEC.into())];
-        query_values.extend(values);
+        if group.is_some() {
+            query_values = cte_values;
+            query_values.push(Value::Text(crate::imaging::THUMBNAIL_SPEC.into()));
+            query_values.push(Value::Text(
+                group.map(|(_, key)| key).unwrap_or_default().into(),
+            ));
+        } else {
+            query_values.extend(values);
+            query_values.extend(constraint_values);
+        }
         query_values.push(Value::Integer(i64::from(page_size)));
         query_values.push(Value::Integer(offset));
         let mut statement = connection.prepare(&sql)?;
@@ -1765,9 +4221,9 @@ impl Repository {
         })?;
         let mut items = rows.collect::<Result<Vec<_>, _>>()?;
         let asset_ids = items.iter().map(|item| item.id).collect::<Vec<_>>();
-        let mut labels_by_asset = semantic_labels_for_assets(&connection, &asset_ids)?;
-        let mut manual_by_asset = manual_classifications_for_assets(&connection, &asset_ids)?;
-        let revisions_by_asset = classification_revisions_for_assets(&connection, &asset_ids)?;
+        let mut labels_by_asset = semantic_labels_for_assets(connection, &asset_ids)?;
+        let mut manual_by_asset = manual_classifications_for_assets(connection, &asset_ids)?;
+        let revisions_by_asset = classification_revisions_for_assets(connection, &asset_ids)?;
         for item in &mut items {
             item.semantic_labels = labels_by_asset.remove(&item.id).unwrap_or_default();
             let semantic_labels = item.semantic_labels.clone();
@@ -3252,6 +5708,167 @@ fn ensure_asset_exists(connection: &Connection, asset_id: i64) -> AppResult<()> 
     }
 }
 
+fn create_verified_catalog_backup(
+    connection: &Connection,
+    database_path: &Path,
+    schema_version: i64,
+    purpose: &str,
+) -> AppResult<CatalogBackupSnapshot> {
+    let database_parent = database_path.parent().unwrap_or_else(|| Path::new("."));
+    let backup_directory = database_parent.join("catalog-backups");
+    std::fs::create_dir_all(&backup_directory)?;
+    let id = uuid::Uuid::new_v4().to_string();
+    let backup_path = backup_directory.join(format!("catalog-{id}.sqlite3"));
+    let backup_path_string = backup_path.to_string_lossy().into_owned();
+    let created_at = now();
+
+    // VACUUM INTO asks SQLite for a consistent snapshot, including committed
+    // WAL content. Copying the live database file would not provide that.
+    connection.execute("VACUUM INTO ?1", [&backup_path_string])?;
+    std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&backup_path)?
+        .sync_all()?;
+
+    let (integrity_check, foreign_key_check_count, restored_version) =
+        verify_catalog_snapshot(&backup_path, schema_version)?;
+    if restored_version != schema_version {
+        return Err(AppError::InvalidArgument(format!(
+            "catalog backup schema mismatch: expected {schema_version}, found {restored_version}"
+        )));
+    }
+
+    // Verify an independently materialized copy of the snapshot, without
+    // invoking file-operation recovery or replaying any file job. The unique
+    // CREATE_NEW drill file is retained and its path/hash are written to the
+    // manifest; deleting it by path would weaken ownership guarantees.
+    let restore_check_path = backup_directory.join(format!("restore-check-{id}.sqlite3"));
+    let mut restore_check_file = create_restore_check_file(&restore_check_path)?;
+    let mut backup_reader = File::open(&backup_path)?;
+    std::io::copy(&mut backup_reader, &mut restore_check_file)?;
+    restore_check_file.sync_all()?;
+    drop(restore_check_file);
+    let (_, restore_foreign_key_count, restore_schema_version) =
+        verify_catalog_snapshot(&restore_check_path, schema_version)?;
+    if restore_foreign_key_count != 0 || restore_schema_version != schema_version {
+        return Err(AppError::InvalidArgument(
+            "catalog backup restore drill did not match the source schema".into(),
+        ));
+    }
+
+    let backup_blake3 = blake3_file(&backup_path)?;
+    let restore_check_blake3 = blake3_file(&restore_check_path)?;
+    if restore_check_blake3 != backup_blake3 {
+        return Err(AppError::InvalidArgument(
+            "catalog backup restore drill did not preserve the snapshot bytes".into(),
+        ));
+    }
+    let database_identity = serde_json::to_string(&serde_json::json!({
+        "canonicalPathKey": identity_key(database_path),
+    }))?;
+    let verified_at = now();
+    let restore_check = "restored_and_verified".to_string();
+    let manifest = serde_json::to_vec_pretty(&serde_json::json!({
+        "version": 1,
+        "id": id,
+        "purpose": purpose,
+        "backupPath": backup_path_string,
+        "schemaVersion": schema_version,
+        "databaseIdentity": database_identity,
+        "backupBlake3": backup_blake3,
+        "integrityCheck": integrity_check,
+        "foreignKeyCheckCount": foreign_key_check_count,
+        "restoreCheck": restore_check,
+        "restoreCheckPath": restore_check_path.to_string_lossy(),
+        "restoreCheckBlake3": restore_check_blake3,
+        "createdAt": created_at,
+        "verifiedAt": verified_at,
+    }))?;
+    let manifest_path = backup_directory.join(format!("catalog-{id}.manifest.json"));
+    let mut manifest_file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&manifest_path)?;
+    std::io::Write::write_all(&mut manifest_file, &manifest)?;
+    manifest_file.sync_all()?;
+    Ok(CatalogBackupSnapshot {
+        id,
+        backup_path: backup_path_string,
+        schema_version,
+        purpose: purpose.to_string(),
+        database_identity,
+        backup_blake3,
+        integrity_check,
+        foreign_key_check_count,
+        restore_check,
+        created_at,
+        verified_at,
+    })
+}
+
+fn create_restore_check_file(path: &Path) -> AppResult<File> {
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        const FILE_SHARE_READ: u32 = 0x0000_0001;
+        const FILE_SHARE_WRITE: u32 = 0x0000_0002;
+        const FILE_SHARE_DELETE: u32 = 0x0000_0004;
+        options.share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE);
+    }
+    Ok(options.open(path)?)
+}
+
+fn blake3_file(path: &Path) -> AppResult<String> {
+    let mut file = File::open(path)?;
+    let mut hasher = blake3::Hasher::new();
+    let mut buffer = [0_u8; 64 * 1024];
+    loop {
+        let bytes_read = file.read(&mut buffer)?;
+        if bytes_read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..bytes_read]);
+    }
+    Ok(hasher.finalize().to_hex().to_string())
+}
+
+fn verify_catalog_snapshot(
+    path: &Path,
+    expected_schema_version: i64,
+) -> AppResult<(String, i64, i64)> {
+    let connection = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    let integrity_check: String =
+        connection.query_row("PRAGMA integrity_check", [], |row| row.get(0))?;
+    if integrity_check != "ok" {
+        return Err(AppError::InvalidArgument(format!(
+            "catalog snapshot integrity check failed: {integrity_check}"
+        )));
+    }
+    let foreign_key_check_count: i64 =
+        connection.query_row("SELECT COUNT(*) FROM pragma_foreign_key_check", [], |row| {
+            row.get(0)
+        })?;
+    if foreign_key_check_count != 0 {
+        return Err(AppError::InvalidArgument(format!(
+            "catalog snapshot contains {foreign_key_check_count} foreign-key violations"
+        )));
+    }
+    let schema_version: i64 = connection.query_row(
+        "SELECT COALESCE(MAX(version), 0) FROM schema_migrations",
+        [],
+        |row| row.get(0),
+    )?;
+    if schema_version != expected_schema_version {
+        return Err(AppError::InvalidArgument(format!(
+            "catalog snapshot schema mismatch: expected {expected_schema_version}, found {schema_version}"
+        )));
+    }
+    Ok((integrity_check, foreign_key_check_count, schema_version))
+}
+
 fn bump_classification_revision(connection: &Connection, asset_id: i64) -> AppResult<()> {
     connection.execute(
         "UPDATE assets SET classification_revision=classification_revision+1 WHERE id=?1",
@@ -3729,6 +6346,261 @@ fn asset_filter_sql(query: &AssetQuery) -> (String, Vec<Value>) {
         _ => {}
     }
     (clauses.join(" AND "), values)
+}
+
+const ASSET_GROUP_MISSING_KEY: &str = "__missing__";
+
+fn asset_group_ctes(query: &AssetQuery, group_by: AssetGroupBy) -> (String, Vec<Value>) {
+    let (where_sql, values) = asset_filter_sql(query);
+    let matching_assets = format!(
+        "matching_assets AS (
+            SELECT DISTINCT a.id
+            FROM assets a
+            LEFT JOIN tone_features tf ON tf.asset_id=a.id
+            LEFT JOIN color_features cf ON cf.asset_id=a.id
+            WHERE {where_sql}
+        )"
+    );
+    let group_values = match group_by {
+        AssetGroupBy::PrimaryCategory => {
+            let expression = canonical_topic_case(&primary_category_expression());
+            scalar_group_values_cte(&expression)
+        }
+        AssetGroupBy::Tone => {
+            scalar_group_values_cte(&effective_scalar_expression(FIELD_TONE, "tf.tone_label"))
+        }
+        AssetGroupBy::SaturationLevel => scalar_group_values_cte(&effective_scalar_expression(
+            FIELD_SATURATION_LEVEL,
+            "cf.saturation_label",
+        )),
+        AssetGroupBy::Rating => scalar_group_values_cte("a.rating"),
+        AssetGroupBy::AuxiliaryTag => auxiliary_group_values_cte(),
+        AssetGroupBy::DominantColor => dominant_color_group_values_cte(),
+    };
+    (format!("{matching_assets}, {group_values}"), values)
+}
+
+fn scalar_group_values_cte(expression: &str) -> String {
+    format!(
+        "group_values AS (
+            SELECT matched.id AS asset_id,
+                   CASE WHEN ({expression}) IS NULL OR CAST(({expression}) AS TEXT)=''
+                        THEN {missing_key}
+                        ELSE CAST(({expression}) AS TEXT) END AS group_key
+            FROM matching_assets matched
+            JOIN assets a ON a.id=matched.id
+            LEFT JOIN tone_features tf ON tf.asset_id=a.id
+            LEFT JOIN color_features cf ON cf.asset_id=a.id
+        )",
+        missing_key = sql_literal(ASSET_GROUP_MISSING_KEY),
+    )
+}
+
+fn primary_category_expression() -> String {
+    let known_topic_ids = known_topic_filter_ids();
+    let active_model_name = active_semantic_model_sql("name", SIGLIP2_MODEL_NAME);
+    let active_model_version = active_semantic_model_sql("version", SIGLIP2_MODEL_VERSION);
+    let active_analysis_version =
+        active_semantic_model_sql("analysis_version", SIGLIP2_ANALYSIS_VERSION);
+    let auto_expression = format!(
+        "(SELECT sl.label FROM semantic_labels sl
+         WHERE sl.asset_id=a.id AND sl.source_fingerprint=a.fingerprint
+           AND sl.is_manual=0 AND sl.is_primary=1
+           AND sl.category_group='scene'
+           AND sl.model_name={active_model_name}
+           AND sl.model_version={active_model_version}
+           AND sl.analysis_version={active_analysis_version}
+           AND sl.taxonomy_version={taxonomy_version}
+           AND sl.label IN ({known_topic_ids})
+         ORDER BY sl.similarity DESC, sl.label ASC LIMIT 1)",
+        taxonomy_version = sql_literal(TAXONOMY_VERSION),
+        known_topic_ids = known_topic_ids
+            .iter()
+            .map(|value| sql_literal(value))
+            .collect::<Vec<_>>()
+            .join(","),
+    );
+    effective_scalar_expression(FIELD_PRIMARY_CATEGORY, &auto_expression)
+}
+
+fn canonical_topic_case(expression: &str) -> String {
+    let mappings = [
+        ("person", "photo_portrait"),
+        ("portrait", "photo_portrait"),
+        ("landscape", "photo_landscape"),
+        ("street", "photo_street"),
+        ("photo_urban", "photo_street"),
+        ("architecture", "photo_architecture"),
+        ("product", "photo_still_life"),
+        ("still_life", "photo_still_life"),
+        ("photo_food", "photo_still_life"),
+        ("photo_commercial", "photo_still_life"),
+        ("animal", "photo_wildlife"),
+        ("plant", "photo_macro"),
+        ("photo_plant", "photo_macro"),
+        ("vehicle", "photo_vehicle"),
+        ("photo_transport", "photo_vehicle"),
+        ("abstract", "photo_abstract"),
+    ];
+    let arms = mappings
+        .iter()
+        .map(|(alias, canonical)| {
+            format!(
+                "WHEN {} THEN {}",
+                sql_literal(alias),
+                sql_literal(canonical)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(" ");
+    format!("CASE {expression} {arms} ELSE {expression} END")
+}
+
+fn canonical_subject_case(expression: &str) -> String {
+    let arms = [
+        ("person", "single_person"),
+        ("portrait", "single_person"),
+        ("group", "multiple_people"),
+        ("pet", "animal"),
+    ]
+    .iter()
+    .map(|(alias, canonical)| {
+        format!(
+            "WHEN {} THEN {}",
+            sql_literal(alias),
+            sql_literal(canonical)
+        )
+    })
+    .collect::<Vec<_>>()
+    .join(" ");
+    format!("CASE {expression} {arms} ELSE {expression} END")
+}
+
+fn auxiliary_group_values_cte() -> String {
+    let active_model_name = active_semantic_model_sql("name", SIGLIP2_MODEL_NAME);
+    let active_model_version = active_semantic_model_sql("version", SIGLIP2_MODEL_VERSION);
+    let active_analysis_version =
+        active_semantic_model_sql("analysis_version", SIGLIP2_ANALYSIS_VERSION);
+    let label_case = canonical_subject_case("sl.label");
+    let subject_label_case = canonical_subject_case("subject.label");
+    let stored_tag_case = canonical_subject_case("manual_tag.tag_id");
+    let removed_tag_case = canonical_subject_case("removed_tag.tag_id");
+    format!(
+        "raw_auxiliary_tags(asset_id, tag_id) AS (
+            SELECT matched.id, {label_case}
+            FROM matching_assets matched
+            JOIN assets a ON a.id=matched.id
+            JOIN semantic_labels sl
+              ON sl.asset_id=a.id AND sl.source_fingerprint=a.fingerprint
+            WHERE sl.is_primary=0 AND sl.category_group='subject'
+              AND sl.model_name={active_model_name}
+              AND sl.model_version={active_model_version}
+              AND sl.analysis_version={active_analysis_version}
+              AND sl.taxonomy_version={semantic_taxonomy}
+            UNION
+            SELECT matched.id, {subject_label_case}
+            FROM matching_assets matched
+            JOIN assets a ON a.id=matched.id
+            JOIN subject_labels subject
+              ON subject.asset_id=a.id AND subject.source_fingerprint=a.fingerprint
+            WHERE subject.model_name={subject_model_name}
+              AND subject.model_version={subject_model_version}
+              AND subject.analysis_version={subject_analysis_version}
+              AND subject.taxonomy_version={subject_taxonomy}
+            UNION
+            SELECT manual_tag.asset_id, {stored_tag_case}
+            FROM manual_tag_overrides manual_tag
+            JOIN matching_assets matched ON matched.id=manual_tag.asset_id
+            WHERE manual_tag.state='add'
+        ),
+        effective_auxiliary_tags(asset_id, tag_id) AS (
+            SELECT DISTINCT raw.asset_id, raw.tag_id
+            FROM raw_auxiliary_tags raw
+            WHERE raw.tag_id IS NOT NULL AND raw.tag_id<>''
+              AND NOT EXISTS(
+                  SELECT 1 FROM manual_tag_overrides removed_tag
+                  WHERE removed_tag.asset_id=raw.asset_id AND removed_tag.state='remove'
+                    AND {removed_tag_case}=raw.tag_id
+              )
+        ),
+        group_values AS (
+            SELECT asset_id, tag_id AS group_key FROM effective_auxiliary_tags
+            UNION ALL
+            SELECT matched.id, {missing_key}
+            FROM matching_assets matched
+            WHERE NOT EXISTS(
+                SELECT 1 FROM effective_auxiliary_tags effective
+                WHERE effective.asset_id=matched.id
+            )
+        )",
+        semantic_taxonomy = sql_literal(TAXONOMY_VERSION),
+        subject_model_name = sql_literal(SUBJECT_MODEL_NAME),
+        subject_model_version = sql_literal(SUBJECT_MODEL_VERSION),
+        subject_analysis_version = sql_literal(SUBJECT_ANALYSIS_VERSION),
+        subject_taxonomy = sql_literal(SUBJECT_TAXONOMY_VERSION),
+        missing_key = sql_literal(ASSET_GROUP_MISSING_KEY),
+    )
+}
+
+fn dominant_color_group_values_cte() -> String {
+    format!(
+        "color_palette_items(asset_id, category, area_coverage, palette_index) AS (
+            SELECT matched.id,
+                   CASE WHEN palette.type='object'
+                        THEN json_extract(palette.value, '$.category')
+                        ELSE palette.value END,
+                   CASE WHEN palette.type='object'
+                        THEN COALESCE(CAST(json_extract(palette.value, '$.areaCoverage') AS REAL), 1.0)
+                        ELSE 1.0 END,
+                   CAST(palette.key AS INTEGER)
+            FROM matching_assets matched
+            JOIN assets a ON a.id=matched.id
+            LEFT JOIN color_features cf ON cf.asset_id=a.id
+            JOIN json_each(
+                COALESCE(
+                    (SELECT mco.value_json FROM manual_classification_overrides mco
+                     WHERE mco.asset_id=a.id AND mco.field={field}),
+                    CASE
+                        WHEN json_type(cf.dominant_colors_json, '$.coveragePalette')='array'
+                         AND json_array_length(cf.dominant_colors_json, '$.coveragePalette')>0
+                        THEN json_extract(cf.dominant_colors_json, '$.coveragePalette')
+                        ELSE json_array(cf.dominant_color_category)
+                    END
+                )
+            ) palette
+        ),
+        ranked_color_values AS (
+            SELECT asset_id, category, area_coverage,
+                   SUM(CASE WHEN area_coverage>={minimum_area} THEN 1 ELSE 0 END)
+                       OVER (PARTITION BY asset_id) AS meaningful_count,
+                   ROW_NUMBER() OVER (
+                       PARTITION BY asset_id,
+                           CASE WHEN area_coverage>={minimum_area} THEN 1 ELSE 0 END
+                       ORDER BY palette_index ASC
+                   ) AS palette_rank
+            FROM color_palette_items
+            WHERE category IS NOT NULL AND CAST(category AS TEXT)<>''
+        ),
+        effective_color_values(asset_id, category) AS (
+            SELECT DISTINCT asset_id, category
+            FROM ranked_color_values
+            WHERE (meaningful_count>0 AND area_coverage>={minimum_area} AND palette_rank<=2)
+               OR (meaningful_count=0 AND palette_rank=1)
+        ),
+        group_values AS (
+            SELECT asset_id, category AS group_key FROM effective_color_values
+            UNION ALL
+            SELECT matched.id, {missing_key}
+            FROM matching_assets matched
+            WHERE NOT EXISTS(
+                SELECT 1 FROM effective_color_values color
+                WHERE color.asset_id=matched.id
+            )
+        )",
+        field = sql_literal(FIELD_DOMINANT_COLOR_CATEGORY),
+        minimum_area = crate::imaging::MIN_MAIN_COLOR_AREA,
+        missing_key = sql_literal(ASSET_GROUP_MISSING_KEY),
+    )
 }
 
 fn legacy_topic_filter_aliases(canonical_id: &str) -> &'static [&'static str] {
@@ -4846,6 +7718,61 @@ fn semantic_progress_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Seman
 
 fn now() -> String {
     Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true)
+}
+
+fn reject_source_root_overlapping_active_output(
+    connection: &Connection,
+    source_root: &Path,
+) -> AppResult<()> {
+    let source_key = identity_key(source_root);
+    let mut statement = connection.prepare(
+        "SELECT target_root_path FROM copy_export_jobs
+         WHERE state IN ('queued','running','cancelling','rolling_back')",
+    )?;
+    let roots = statement
+        .query_map([], |row| row.get::<_, String>(0))?
+        .collect::<Result<Vec<_>, _>>()?;
+    drop(statement);
+    for output_root in roots {
+        let output_key = identity_key(Path::new(&output_root));
+        if is_same_or_descendant(&source_key, &output_key)
+            || is_same_or_descendant(&output_key, &source_key)
+        {
+            return Err(AppError::InvalidArgument(
+                "a source root cannot overlap an active copy export target".into(),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn copy_plan_status_sql(status: &CopyPlanStatus) -> &'static str {
+    match status {
+        CopyPlanStatus::Ready => "ready",
+        CopyPlanStatus::Blocked => "blocked",
+        CopyPlanStatus::Stale => "stale",
+        CopyPlanStatus::Consumed => "consumed",
+    }
+}
+
+fn copy_plan_status_from_sql(value: &str) -> AppResult<CopyPlanStatus> {
+    match value {
+        "ready" => Ok(CopyPlanStatus::Ready),
+        "blocked" => Ok(CopyPlanStatus::Blocked),
+        "stale" => Ok(CopyPlanStatus::Stale),
+        "consumed" => Ok(CopyPlanStatus::Consumed),
+        other => Err(AppError::InvalidArgument(format!(
+            "unknown copy export plan status: {other}"
+        ))),
+    }
+}
+
+fn copy_item_status_sql(status: &CopyPlanItemStatus) -> &'static str {
+    match status {
+        CopyPlanItemStatus::Ready => "ready",
+        CopyPlanItemStatus::Blocked => "blocked",
+        CopyPlanItemStatus::Skipped => "skipped",
+    }
 }
 
 fn merge_duplicate_assets(
@@ -6084,7 +9011,7 @@ mod tests {
         let repository = Repository::new(temp.path().join("database.sqlite3"));
         repository.initialize().expect("first initialization");
         repository.initialize().expect("second initialization");
-        assert_eq!(repository.migration_version().expect("version"), 17);
+        assert_eq!(repository.migration_version().expect("version"), 19);
         let connection = repository.open().expect("connection");
         for table in [
             "organization_plans",
@@ -6096,6 +9023,12 @@ mod tests {
             "semantic_evidence",
             "subject_analysis_runs",
             "subject_labels",
+            "catalog_backup_records",
+            "organization_plans_v2",
+            "organization_plan_items_v2",
+            "copy_export_jobs",
+            "copy_export_job_items",
+            "file_operation_log",
         ] {
             let exists: i64 = connection
                 .query_row(
@@ -6170,6 +9103,81 @@ mod tests {
                 .expect("legacy migration marker");
             transaction.commit().expect("legacy migration commit");
         }
+    }
+
+    #[test]
+    fn legacy_catalog_upgrade_creates_a_verified_pre_migration_backup() {
+        let fixture_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../test-data");
+        let temp = tempfile::tempdir_in(fixture_root).expect("test-data temporary directory");
+        let database_path = temp.path().join("catalog.sqlite3");
+        let repository = Repository::new(&database_path);
+        initialize_legacy_schema_at_version_15(&repository);
+
+        repository.initialize().expect("upgrade legacy catalog");
+        let connection = repository.open().expect("open upgraded catalog");
+        let (backup_path, purpose, schema_version, integrity, fk_violations, restore_check): (
+            String,
+            String,
+            i64,
+            String,
+            i64,
+            String,
+        ) = connection
+            .query_row(
+                "SELECT backup_path, purpose, schema_version, integrity_check,
+                        foreign_key_check_count, restore_check
+                 FROM catalog_backup_records",
+                [],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                        row.get(5)?,
+                    ))
+                },
+            )
+            .expect("recorded recovery gate snapshot");
+        assert!(Path::new(&backup_path).is_file());
+        assert_eq!(purpose, "pre_migration");
+        assert_eq!(schema_version, 15);
+        assert_eq!(integrity, "ok");
+        assert_eq!(fk_violations, 0);
+        assert_eq!(restore_check, "restored_and_verified");
+        let backup_path_ref = Path::new(&backup_path);
+        let backup_id = backup_path_ref
+            .file_stem()
+            .and_then(|name| name.to_str())
+            .and_then(|name| name.strip_prefix("catalog-"))
+            .expect("backup id in path");
+        let manifest_path =
+            backup_path_ref.with_file_name(format!("catalog-{backup_id}.manifest.json"));
+        let manifest: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&manifest_path).expect("backup manifest"))
+                .expect("parse backup manifest");
+        let restore_check_path = PathBuf::from(
+            manifest["restoreCheckPath"]
+                .as_str()
+                .expect("restore check path in manifest"),
+        );
+        assert!(restore_check_path.is_file());
+        assert_eq!(
+            manifest["restoreCheckBlake3"].as_str(),
+            manifest["backupBlake3"].as_str()
+        );
+        assert_eq!(
+            blake3_file(&restore_check_path).expect("hash retained restore-check copy"),
+            manifest["backupBlake3"].as_str().expect("backup hash")
+        );
+        assert_eq!(repository.migration_version().expect("schema version"), 19);
+        assert_eq!(
+            verify_catalog_snapshot(Path::new(&backup_path), 15)
+                .unwrap()
+                .2,
+            15
+        );
     }
 
     #[test]
@@ -8032,6 +11040,175 @@ mod tests {
                     None,
                 )
                 .is_err()
+        );
+    }
+
+    #[test]
+    fn asset_group_aggregates_cover_full_query_and_page_members() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let repository = Repository::new(temp.path().join("database.sqlite3"));
+        repository.initialize().expect("initialize");
+        let (_, first_asset_id) = seed_classifiable_asset(&repository, "group-query-first");
+        let (_, second_asset_id) = seed_classifiable_asset(&repository, "group-query-second");
+        repository
+            .update_asset_rating(first_asset_id, 4)
+            .expect("rate first asset");
+        repository
+            .update_asset_rating(second_asset_id, 2)
+            .expect("rate second asset");
+        let connection = repository.open().expect("open group fixture");
+        for (asset_id, tag_id) in [
+            (first_asset_id, "single_person"),
+            (second_asset_id, "single_person"),
+            (second_asset_id, "animal"),
+        ] {
+            connection
+                .execute(
+                    "INSERT INTO manual_tag_overrides(asset_id, tag_id, state, updated_at)
+                     VALUES(?1, ?2, 'add', ?3)",
+                    params![asset_id, tag_id, now()],
+                )
+                .expect("add auxiliary group fixture");
+        }
+        drop(connection);
+
+        let query = AssetQuery {
+            version: ASSET_QUERY_VERSION,
+            root: AssetQueryRoot::All,
+            include_descendants: true,
+            filter: AssetFilter::default(),
+            sort: AssetSortField::FileName,
+            direction: SortDirection::Asc,
+            // The aggregate and group members must use the whole query, not
+            // this already-loaded browse page.
+            page: 2,
+            page_size: 1,
+        };
+        let first_rating_page = repository
+            .query_asset_groups(&query, AssetGroupBy::Rating, 1, 1)
+            .expect("first rating group page");
+        assert_eq!(first_rating_page.global_unique_total, 2);
+        assert_eq!(first_rating_page.group_count, 2);
+        assert_eq!(first_rating_page.groups[0].key, "2");
+        let second_rating_page = repository
+            .query_asset_groups(&query, AssetGroupBy::Rating, 2, 1)
+            .expect("second rating group page");
+        assert_eq!(second_rating_page.groups[0].key, "4");
+        assert_eq!(second_rating_page.groups[0].unique_count, 1);
+        let rating_members = repository
+            .query_assets_in_group(&query, AssetGroupBy::Rating, "4", 1, 1)
+            .expect("query rating group members");
+        assert_eq!(rating_members.total, 1);
+        assert_eq!(rating_members.items[0].id, first_asset_id);
+
+        let auxiliary_groups = repository
+            .query_asset_groups(&query, AssetGroupBy::AuxiliaryTag, 1, 20)
+            .expect("query auxiliary groups");
+        let single_person = auxiliary_groups
+            .groups
+            .iter()
+            .find(|group| group.key == "single_person")
+            .expect("single-person group");
+        assert_eq!(single_person.unique_count, 2);
+        assert_eq!(auxiliary_groups.global_unique_total, 2);
+        let second_tag_page = repository
+            .query_assets_in_group(&query, AssetGroupBy::AuxiliaryTag, "single_person", 2, 1)
+            .expect("query second member of multi-tag group");
+        assert_eq!(second_tag_page.total, 2);
+        assert_eq!(second_tag_page.items[0].id, second_asset_id);
+    }
+
+    #[test]
+    fn asset_membership_ignores_browse_page_and_returns_fresh_matches() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let repository = Repository::new(temp.path().join("database.sqlite3"));
+        repository.initialize().expect("initialize");
+        let (_, first_asset_id) = seed_classifiable_asset(&repository, "membership-first");
+        let (_, second_asset_id) = seed_classifiable_asset(&repository, "membership-second");
+        repository
+            .update_asset_rating(first_asset_id, 4)
+            .expect("rate first asset");
+        repository
+            .update_asset_rating(second_asset_id, 2)
+            .expect("rate second asset");
+        let query = AssetQuery {
+            version: ASSET_QUERY_VERSION,
+            root: AssetQueryRoot::All,
+            include_descendants: true,
+            filter: AssetFilter::default(),
+            sort: AssetSortField::FileName,
+            direction: SortDirection::Asc,
+            page: 70,
+            page_size: 1,
+        };
+
+        let current = repository
+            .query_asset_membership(&query, second_asset_id)
+            .expect("query current membership")
+            .expect("asset matches the full query outside the loaded page");
+        assert_eq!(current.id, second_asset_id);
+        assert_eq!(current.rating, 2);
+
+        let restricted_query = AssetQuery {
+            filter: AssetFilter {
+                ratings: vec![3],
+                ..AssetFilter::default()
+            },
+            ..query
+        };
+        assert!(
+            repository
+                .query_asset_membership(&restricted_query, second_asset_id)
+                .expect("query nonmatching membership")
+                .is_none()
+        );
+        assert!(
+            repository
+                .query_asset_membership(&restricted_query, first_asset_id)
+                .expect("query matching membership")
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn asset_neighbor_uses_full_query_and_stable_browse_order() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let repository = Repository::new(temp.path().join("database.sqlite3"));
+        repository.initialize().expect("initialize");
+        let (_, first_asset_id) = seed_classifiable_asset(&repository, "neighbor-first");
+        let (_, second_asset_id) = seed_classifiable_asset(&repository, "neighbor-second");
+        let query = AssetQuery {
+            version: ASSET_QUERY_VERSION,
+            root: AssetQueryRoot::All,
+            include_descendants: true,
+            filter: AssetFilter::default(),
+            sort: AssetSortField::FileName,
+            direction: SortDirection::Asc,
+            page: 80,
+            page_size: 1,
+        };
+
+        let next = repository
+            .query_asset_neighbor(&query, first_asset_id, AssetNeighborDirection::Next)
+            .expect("query next neighbor")
+            .expect("next asset exists");
+        assert_eq!(next.id, second_asset_id);
+        let previous = repository
+            .query_asset_neighbor(&query, second_asset_id, AssetNeighborDirection::Previous)
+            .expect("query previous neighbor")
+            .expect("previous asset exists");
+        assert_eq!(previous.id, first_asset_id);
+        assert!(
+            repository
+                .query_asset_neighbor(&query, first_asset_id, AssetNeighborDirection::Previous)
+                .expect("query first boundary")
+                .is_none()
+        );
+        assert!(
+            repository
+                .query_asset_neighbor(&query, second_asset_id, AssetNeighborDirection::Next)
+                .expect("query last boundary")
+                .is_none()
         );
     }
 

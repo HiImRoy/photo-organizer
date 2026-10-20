@@ -1,12 +1,14 @@
-# 开发交接（2026-09-05）
+# 历史交接（2026-09-05）
 
-## 接续入口
+> 本文只记录截至 2026-09-05 的历史状态；其中的分支、依赖、验证状态、操作步骤和待办均不是当前指引。当前核心 MVP 状态见[2026-10-20 实施交接](handoff/2026-10-20.md)，资源 P0 证据见[2026-10-19 接收记录](handoff/2026-10-19.md)，长期风险与顺序见[2026-10-10 换机交接](handoff/2026-10-10.md)。代理规则以根目录 [AGENTS.md](../AGENTS.md) 为准，实际任务按显式工具配置执行。
+
+## 当时的接续入口（历史记录）
 
 仓库：https://github.com/HiImRoy/photo-organizer
 
-当前开发分支：`codex/ui-redesign-baseline`。本次是工作进度备份，不表示所有功能已完成人工验收。请在此分支继续，不要误从 main 或 master 开始，也不要覆盖现有变更。
+当时的开发分支：`codex/ui-redesign-baseline`。本次是工作进度备份，不表示所有功能已完成人工验收。此分支指引只适用于当时的快照。
 
-先阅读 `AGENTS.md`、本文件、`docs/ui-guidelines.md`，再按任务阅读对应计划。代码开发和琐碎执行任务使用 `gpt-5.6-luna` + `max` 子 agent；主 agent 负责规划、审查、整合和验收。
+当时的工作指引要求先阅读 `AGENTS.md`、本文件、`docs/ui-guidelines.md`，再按任务阅读对应计划，并使用 `gpt-5.6-luna` + `max` 子 agent。当前规则见仓库根目录 `AGENTS.md`。
 
 ## 新 Windows 电脑启动
 

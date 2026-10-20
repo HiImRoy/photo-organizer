@@ -9,7 +9,7 @@ import type {
   SemanticLabelDescriptor,
 } from "../types";
 import { ColorRangeFilter } from "./ColorRangeFilter";
-import { ChevronIcon, FolderIcon, HeartFolderIcon, LibraryIcon } from "./Icons";
+import { BooksIcon, ChevronIcon, FolderIcon, HeartFolderIcon, LibraryIcon } from "./Icons";
 import { RangePair } from "./RangePair";
 
 interface SidebarProps {
@@ -20,6 +20,7 @@ interface SidebarProps {
   catalog: SemanticLabelDescriptor[];
   filter: AssetFilter;
   collections: CollectionSummary[];
+  allSourceActive: boolean;
   favoriteSourceActive: boolean;
   activeCollectionId: number | null;
   browseRootActive: boolean;
@@ -35,6 +36,7 @@ interface SidebarProps {
   onChangeLibraryParent: (library: LibrarySummary, parentLibraryId: number | null) => void;
   assetDropTargetLibraryId: number | null;
   onFilterChange: (filter: AssetFilter) => void;
+  onSelectAll: () => void;
   onSelectFavorites: () => void;
   onSelectCollection: (collectionId: number) => void;
   onRenameCollection: (collection: CollectionSummary) => void;
@@ -51,6 +53,7 @@ export function Sidebar(props: SidebarProps) {
     catalog,
     filter,
     collections,
+    allSourceActive,
     favoriteSourceActive,
     activeCollectionId,
     browseRootActive,
@@ -66,6 +69,7 @@ export function Sidebar(props: SidebarProps) {
     onChangeLibraryParent,
     assetDropTargetLibraryId,
     onFilterChange,
+    onSelectAll,
     onSelectFavorites,
     onSelectCollection,
     onRenameCollection,
@@ -356,6 +360,16 @@ export function Sidebar(props: SidebarProps) {
 
         <div className="sidebar-library-area">
           <div className="nav-list library-tree">
+            <button
+              type="button"
+              className={allSourceActive ? "nav-row is-active" : "nav-row"}
+              onClick={onSelectAll}
+              aria-current={allSourceActive ? "page" : undefined}
+              title="全部照片"
+            >
+              <BooksIcon width="15" height="15" />
+              <span>全部照片</span>
+            </button>
             {collectionNodes.map((node) => (
               <CollectionTreeNode
                 key={`collection:${node.collection.id}`}

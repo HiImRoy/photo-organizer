@@ -13,10 +13,13 @@ use crate::classification::registry_descriptors;
 use crate::db::{LibrarySourceRoot, Repository};
 use crate::error::{AppError, AppResult};
 use crate::models::{
-    AssetDetail, AssetFilter, AssetPage, AssetQuery, AssetSortField, CancelScanResponse,
-    FolderSummary, LibrarySummary, OrganizationIssue, OrganizationPlan, OrganizationPlanRecord,
-    OrganizationPlanRequest, ScanProgress, SemanticGroupSummary, SemanticProgress,
-    SemanticTaskResponse, SortDirection, StartScanResponse, StartSemanticResponse,
+    AssetDetail, AssetFilter, AssetGridItem, AssetGroupBy, AssetGroupPage, AssetNeighborDirection,
+    AssetPage, AssetQuery, AssetSortField, CancelScanResponse, CopyExportRules, FolderSummary,
+    LibrarySummary, OrganizationIssue, OrganizationPlan, OrganizationPlanRecord,
+    OrganizationPlanRequest, OrganizationPlanScopeV2, OrganizationPlanSummaryV2,
+    OrganizationPlanV2, OrganizationTargetV2, RecentOrganizationPlanV2, ScanProgress,
+    SemanticGroupSummary, SemanticProgress, SemanticTaskResponse, SortDirection, StartScanResponse,
+    StartSemanticResponse, TargetParentGrantResponse,
 };
 use crate::organization;
 use crate::paths::AppPaths;
@@ -44,6 +47,7 @@ use crate::workflow::{
 
 pub struct AppState {
     pub repository: Repository,
+    pub copy_export_service: crate::copy_export_service::CopyExportService,
     pub paths: AppPaths,
     pub tasks: Arc<TaskRegistry>,
     pub source_scans: Arc<SourceScanRegistry>,
@@ -68,8 +72,12 @@ impl AppState {
         let semantic_status = semantic_loading_status(semantic.status());
         let subject_status = subject_loading_status(subject.status());
         let model_preparation = Arc::new(Mutex::new(()));
+        let copy_export_service =
+            crate::copy_export_service::CopyExportService::new(repository.clone())
+                .expect("the catalog database path must have a parent directory");
         Self {
             repository,
+            copy_export_service,
             paths,
             tasks: Arc::new(TaskRegistry::default()),
             source_scans: Arc::new(SourceScanRegistry::default()),
@@ -645,6 +653,7 @@ pub fn prepare_bundled_models(app: tauri::AppHandle, state: &AppState) {
 
     let paths = state.paths.clone();
     let repository = state.repository.clone();
+    let copy_export_service = state.copy_export_service.clone();
     let tasks = state.tasks.clone();
     let source_scans = state.source_scans.clone();
     let semantic_tasks = state.semantic_tasks.clone();
@@ -705,6 +714,7 @@ pub fn prepare_bundled_models(app: tauri::AppHandle, state: &AppState) {
             if !resume_pending_semantic_jobs_if_ready(&live_semantic_status, move || {
                 let resume_state = AppState {
                     repository,
+                    copy_export_service,
                     paths,
                     tasks,
                     source_scans,
@@ -790,6 +800,72 @@ pub async fn query_assets(
         .await
         .map_err(|error| format!("asset query task failed: {error}"))?
         .map_err(ipc_error)
+}
+
+#[tauri::command]
+pub async fn query_asset_membership(
+    query: AssetQuery,
+    asset_id: i64,
+    state: State<'_, AppState>,
+) -> Result<Option<AssetGridItem>, String> {
+    let repository = state.repository.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        repository.query_asset_membership(&query, asset_id)
+    })
+    .await
+    .map_err(|error| format!("asset membership query task failed: {error}"))?
+    .map_err(ipc_error)
+}
+
+#[tauri::command]
+pub async fn query_asset_neighbor(
+    query: AssetQuery,
+    asset_id: i64,
+    direction: AssetNeighborDirection,
+    state: State<'_, AppState>,
+) -> Result<Option<AssetGridItem>, String> {
+    let repository = state.repository.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        repository.query_asset_neighbor(&query, asset_id, direction)
+    })
+    .await
+    .map_err(|error| format!("asset neighbor query task failed: {error}"))?
+    .map_err(ipc_error)
+}
+
+#[tauri::command]
+pub async fn query_asset_groups(
+    query: AssetQuery,
+    group_by: AssetGroupBy,
+    page: u32,
+    page_size: u32,
+    state: State<'_, AppState>,
+) -> Result<AssetGroupPage, String> {
+    let repository = state.repository.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        repository.query_asset_groups(&query, group_by, page, page_size)
+    })
+    .await
+    .map_err(|error| format!("asset group query task failed: {error}"))?
+    .map_err(ipc_error)
+}
+
+#[tauri::command]
+pub async fn query_assets_in_group(
+    query: AssetQuery,
+    group_by: AssetGroupBy,
+    group_key: String,
+    page: u32,
+    page_size: u32,
+    state: State<'_, AppState>,
+) -> Result<AssetPage, String> {
+    let repository = state.repository.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        repository.query_assets_in_group(&query, group_by, &group_key, page, page_size)
+    })
+    .await
+    .map_err(|error| format!("group asset query task failed: {error}"))?
+    .map_err(ipc_error)
 }
 
 #[tauri::command]
@@ -1599,6 +1675,169 @@ pub fn discard_organization_plan(
         .repository
         .delete_organization_plan(&plan_id)
         .map_err(ipc_error)
+}
+
+async fn copy_export_blocking<T, F>(operation: F) -> Result<T, String>
+where
+    T: Send + 'static,
+    F: FnOnce() -> AppResult<T> + Send + 'static,
+{
+    tauri::async_runtime::spawn_blocking(operation)
+        .await
+        .map_err(|error| format!("copy export task failed: {error}"))?
+        .map_err(ipc_error)
+}
+
+#[tauri::command]
+pub async fn grant_organization_target_parent(
+    path: String,
+    state: State<'_, AppState>,
+) -> Result<TargetParentGrantResponse, String> {
+    let service = state.copy_export_service.clone();
+    copy_export_blocking(move || service.grant(Path::new(&path))).await
+}
+
+#[tauri::command]
+pub async fn create_organization_plan_v2(
+    scope: OrganizationPlanScopeV2,
+    target: OrganizationTargetV2,
+    rules: Option<CopyExportRules>,
+    state: State<'_, AppState>,
+) -> Result<OrganizationPlanSummaryV2, String> {
+    let service = state.copy_export_service.clone();
+    copy_export_blocking(move || {
+        service
+            .create_plan_v2(scope, target, rules)
+            .map(|plan| plan.summary)
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn read_organization_plan_v2(
+    plan_id: String,
+    item_page: u32,
+    item_page_size: u32,
+    state: State<'_, AppState>,
+) -> Result<OrganizationPlanV2, String> {
+    let service = state.copy_export_service.clone();
+    copy_export_blocking(move || service.get_plan(&plan_id, item_page, item_page_size)).await
+}
+
+#[tauri::command]
+pub async fn list_recent_organization_plans(
+    limit: u32,
+    state: State<'_, AppState>,
+) -> Result<Vec<RecentOrganizationPlanV2>, String> {
+    let service = state.copy_export_service.clone();
+    copy_export_blocking(move || service.list_recent_plans(limit)).await
+}
+
+#[tauri::command]
+pub async fn copy_export_preflight(
+    resource_id: String,
+    operation: crate::copy_export_service::CopyExportOperationKind,
+    state: State<'_, AppState>,
+) -> Result<crate::copy_export_service::CopyExportPreflight, String> {
+    let service = state.copy_export_service.clone();
+    copy_export_blocking(move || service.preflight(&resource_id, operation)).await
+}
+
+#[tauri::command]
+pub async fn copy_export_start(
+    plan_id: String,
+    authorization_token: String,
+    state: State<'_, AppState>,
+) -> Result<crate::copy_export_service::CopyExportStartResponse, String> {
+    let service = state.copy_export_service.clone();
+    copy_export_blocking(move || service.start(&plan_id, &authorization_token)).await
+}
+
+#[tauri::command]
+pub async fn copy_export_get_job(
+    job_id: String,
+    item_page: u32,
+    item_page_size: u32,
+    state: State<'_, AppState>,
+) -> Result<Option<crate::copy_export_service::CopyExportJobView>, String> {
+    let service = state.copy_export_service.clone();
+    copy_export_blocking(move || service.get_job(&job_id, item_page, item_page_size)).await
+}
+
+#[tauri::command]
+pub async fn copy_export_list_recent_jobs(
+    limit: u32,
+    state: State<'_, AppState>,
+) -> Result<Vec<crate::copy_export_service::RecentCopyExportJob>, String> {
+    let service = state.copy_export_service.clone();
+    copy_export_blocking(move || service.list_recent_jobs(limit)).await
+}
+
+#[tauri::command]
+pub async fn copy_export_cancel(
+    job_id: String,
+    state: State<'_, AppState>,
+) -> Result<bool, String> {
+    let service = state.copy_export_service.clone();
+    copy_export_blocking(move || service.cancel(&job_id)).await
+}
+
+#[tauri::command]
+pub async fn copy_export_runtime_status(
+    job_id: String,
+    state: State<'_, AppState>,
+) -> Result<Option<crate::copy_export_service::CopyExportRuntimeStatus>, String> {
+    let service = state.copy_export_service.clone();
+    copy_export_blocking(move || service.runtime_status(&job_id)).await
+}
+
+#[tauri::command]
+pub async fn copy_export_resume_preview(
+    job_id: String,
+    state: State<'_, AppState>,
+) -> Result<crate::copy_export_service::CopyExportPreflight, String> {
+    let service = state.copy_export_service.clone();
+    copy_export_blocking(move || service.preview_resume(&job_id)).await
+}
+
+#[tauri::command]
+pub async fn copy_export_resume(
+    job_id: String,
+    authorization_token: String,
+    state: State<'_, AppState>,
+) -> Result<crate::copy_export_service::CopyExportStartResponse, String> {
+    let service = state.copy_export_service.clone();
+    copy_export_blocking(move || service.resume(&job_id, &authorization_token)).await
+}
+
+#[tauri::command]
+pub async fn copy_export_reconcile_item(
+    job_id: String,
+    ordinal: u32,
+    decision: crate::copy_export_service::CopyItemReconcileDecision,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    let service = state.copy_export_service.clone();
+    copy_export_blocking(move || service.reconcile_item(&job_id, ordinal, decision)).await
+}
+
+#[tauri::command]
+pub async fn copy_export_rollback_preview(
+    job_id: String,
+    state: State<'_, AppState>,
+) -> Result<crate::copy_export_service::CopyExportPreflight, String> {
+    let service = state.copy_export_service.clone();
+    copy_export_blocking(move || service.preview_rollback(&job_id)).await
+}
+
+#[tauri::command]
+pub async fn copy_export_confirm_rollback(
+    job_id: String,
+    authorization_token: String,
+    state: State<'_, AppState>,
+) -> Result<crate::copy_export_service::CopyExportStartResponse, String> {
+    let service = state.copy_export_service.clone();
+    copy_export_blocking(move || service.confirm_rollback(&job_id, &authorization_token)).await
 }
 
 #[tauri::command]

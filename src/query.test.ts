@@ -61,6 +61,8 @@ describe("AssetQueryV1", () => {
       filter: { ...createAssetQueryV1(7).filter, collectionId: 12 },
     });
     expect(collection.root).toEqual({ kind: "collection", collectionId: 12 });
+
+    expect(assetQueryFromV1(createAssetQueryV1(null)).root).toEqual({ kind: "all" });
   });
 
   it("keeps source and virtual browse roots mutually exclusive", () => {
